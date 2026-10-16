@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/config"
@@ -75,8 +76,9 @@ func (h *OIDCHandler) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 // Callback handles the redirect back from the OIDC provider.
-// It verifies the state, exchanges the code, extracts the email claim,
-// provisions or links the user, and issues an app JWT cookie.
+// It verifies the state, exchanges the code, and only accepts the single
+// email configured as OIDC_ALLOWED_EMAIL when the provider asserts it is
+// verified. It then provisions or links the user and issues an app JWT cookie.
 func (h *OIDCHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Verify state
 	stateCookie, err := r.Cookie("oidc_state")
@@ -119,27 +121,45 @@ func (h *OIDCHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract email: try ID token claims first, then userinfo endpoint as fallback
+	// Email and email_verified always come from the same source: the ID token
+	// claims, or — only when the ID token carries no email — the userinfo
+	// endpoint, whose subject must match the ID token's (OIDC Core 5.3.4).
 	var claims struct {
-		Email string `json:"email"`
+		Email         string `json:"email"`
+		EmailVerified *bool  `json:"email_verified"`
 	}
 	_ = idToken.Claims(&claims)
 
 	if claims.Email == "" {
 		userInfo, err := h.provider.UserInfo(r.Context(), oauth2.StaticTokenSource(token))
-		if err == nil {
-			_ = userInfo.Claims(&claims)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "account not allowed", "FORBIDDEN")
+			return
 		}
+		if userInfo.Subject != idToken.Subject {
+			writeError(w, http.StatusForbidden, "account not allowed", "FORBIDDEN")
+			return
+		}
+		var uiClaims struct {
+			Email         string `json:"email"`
+			EmailVerified *bool  `json:"email_verified"`
+		}
+		_ = userInfo.Claims(&uiClaims)
+		claims = uiClaims
 	}
 
-	if claims.Email == "" {
-		writeError(w, http.StatusUnauthorized, "missing email claim", "UNAUTHORIZED")
+	// Single-user enforcement: only the one configured, provider-verified
+	// email may log in; the IdP must assert email_verified explicitly.
+	if claims.EmailVerified == nil || !*claims.EmailVerified ||
+		!strings.EqualFold(claims.Email, h.cfg.OIDCAllowedEmail) {
+		writeError(w, http.StatusForbidden, "account not allowed", "FORBIDDEN")
 		return
 	}
 
-	// Resolve user: look up by email, or claim the existing single user on first OIDC login.
-	// Single-user enforcement: only the first/linked user can authenticate.
-	user, err := h.repo.GetByUsername(claims.Email)
+	// Resolve user by the canonical configured email: look it up, or claim
+	// the existing single user on first OIDC login.
+	username := h.cfg.OIDCAllowedEmail
+	user, err := h.repo.GetByUsername(username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user lookup failed", "INTERNAL")
 		return
@@ -153,23 +173,23 @@ func (h *OIDCHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch {
-		case existing != nil && existing.Username != claims.Email:
+		case existing != nil && !strings.EqualFold(existing.Username, username):
 			// First OIDC login — link existing user to this OIDC identity
-			if err := h.repo.UpdateUsername(existing.ID, claims.Email); err != nil {
+			if err := h.repo.UpdateUsername(existing.ID, username); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to link user", "INTERNAL")
 				return
 			}
 			user = existing
-			user.Username = claims.Email
+			user.Username = username
 		case existing == nil:
 			// No users at all — create one
-			user, err = h.repo.Create(claims.Email, "")
+			user, err = h.repo.Create(username, "")
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "user provisioning failed", "INTERNAL")
 				return
 			}
 		default:
-			// existing.Username == claims.Email — already linked
+			// existing username matches — already linked
 			user = existing
 		}
 	}
@@ -208,6 +228,7 @@ func generateState() (string, error) {
 func signState(state, secret string) (string, error) {
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"state": state,
+		"typ":   oidcStateTyp,
 		"exp":   time.Now().Add(10 * time.Minute).Unix(),
 	})
 	return t.SignedString([]byte(secret))
@@ -227,6 +248,13 @@ func verifyState(queryState, cookieValue, secret string) bool {
 	if !ok {
 		return false
 	}
+	if typ, _ := claims["typ"].(string); typ != oidcStateTyp {
+		return false
+	}
 	s, _ := claims["state"].(string)
 	return s == queryState
 }
+
+// oidcStateTyp marks state cookies so they can never be mistaken for (or
+// accepted as) session tokens; middleware.Auth rejects them by the same value.
+const oidcStateTyp = "oidc_state"

@@ -103,9 +103,11 @@ Redirects the browser to the configured OIDC provider's authorization endpoint. 
 ### GET /api/auth/oidc/callback
 **Mode: oidc only**
 
-OIDC redirect URI. Verifies state, exchanges authorization code for tokens, extracts the `email` claim, provisions/links the user on first login, and issues the app JWT cookie. Redirects to `/inbox` on success. Returns 403 if the OIDC email doesn't match the linked user (single-user enforcement).
+OIDC redirect URI. Verifies state, exchanges authorization code for tokens, and only accepts the email configured in `OIDC_ALLOWED_EMAIL` when the provider asserts it is verified (`email_verified: true`, taken from the ID token, or from userinfo when the ID token carries no email and its `sub` matches the ID token's). Provisions/links the user on first login and issues the app JWT cookie. Redirects to `/inbox` on success.
 
-Required env vars: `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`
+Returns `403` `{"error":"account not allowed","code":"FORBIDDEN"}` when the email is not the configured allowed email, is not asserted as verified, or userinfo does not match the ID token subject.
+
+Required env vars: `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`, `OIDC_ALLOWED_EMAIL`
 ```
 
 ---

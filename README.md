@@ -90,7 +90,7 @@ For use behind an authenticating reverse proxy (Authelia, Authentik, etc.).
 
 ### OIDC Auth
 
-Log in via any OpenID Connect provider (Google, Keycloak, Authelia, etc.). On first login the existing user is automatically linked to your OIDC identity. Only a single user is allowed — other OIDC accounts are rejected.
+Log in via any OpenID Connect provider (Google, Keycloak, Authelia, etc.). Only the single email configured in `OIDC_ALLOWED_EMAIL` may log in, and the provider must assert it with `email_verified: true`; any other account is rejected with `403`. On first login the existing user is automatically linked to this email.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -99,6 +99,7 @@ Log in via any OpenID Connect provider (Google, Keycloak, Authelia, etc.). On fi
 | `OIDC_CLIENT_ID` | — | OAuth2 client ID |
 | `OIDC_CLIENT_SECRET` | — | OAuth2 client secret |
 | `OIDC_REDIRECT_URI` | — | Callback URL: `https://your-domain/api/auth/oidc/callback` |
+| `OIDC_ALLOWED_EMAIL` | — | The only email allowed to log in (required). The IdP must assert it with `email_verified: true` |
 
 ### API Key
 

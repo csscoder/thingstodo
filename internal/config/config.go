@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,6 +26,9 @@ type Config struct {
 	OIDCClientID     string
 	OIDCClientSecret string
 	OIDCRedirectURI  string
+	// OIDCAllowedEmail is the single email allowed to log in (required in
+	// oidc mode); it is also the canonical username of the app user.
+	OIDCAllowedEmail string
 
 	// VAPID (Web Push)
 	VAPIDPrivateKey string
@@ -54,14 +58,15 @@ func Load() Config {
 		OIDCClientID:     envStr("OIDC_CLIENT_ID", ""),
 		OIDCClientSecret: envStr("OIDC_CLIENT_SECRET", ""),
 		OIDCRedirectURI:  envStr("OIDC_REDIRECT_URI", ""),
+		OIDCAllowedEmail: envStr("OIDC_ALLOWED_EMAIL", ""),
 
 		VAPIDPrivateKey: envStr("VAPID_PRIVATE_KEY", ""),
 		VAPIDPublicKey:  envStr("VAPID_PUBLIC_KEY", ""),
 		VAPIDContact:    envStr("VAPID_CONTACT", ""),
 	}
 
-	if (cfg.AuthMode == "builtin" || cfg.AuthMode == "oidc") && cfg.JWTSecret == "" {
-		log.Fatal("JWT_SECRET must be set when AUTH_MODE is builtin or oidc")
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
 	}
 
 	// Load timezone — defaults to system TZ (UTC in most Docker containers)
@@ -76,6 +81,18 @@ func Load() Config {
 	}
 
 	return cfg
+}
+
+// Validate reports configuration errors that make the selected auth mode
+// unusable. Load calls it and exits the process on failure.
+func (c Config) Validate() error {
+	if (c.AuthMode == "builtin" || c.AuthMode == "oidc") && c.JWTSecret == "" {
+		return errors.New("JWT_SECRET must be set when AUTH_MODE is builtin or oidc")
+	}
+	if c.AuthMode == "oidc" && c.OIDCAllowedEmail == "" {
+		return errors.New("OIDC_ALLOWED_EMAIL must be set when AUTH_MODE is oidc")
+	}
+	return nil
 }
 
 func envStr(key, fallback string) string {
