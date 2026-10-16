@@ -126,9 +126,12 @@ func TestAuth_Builtin_UnknownSub(t *testing.T) {
 }
 
 func TestAuth_Builtin_OIDCStateTokenRejected(t *testing.T) {
+	// sub is valid and accepted by the stub, so the typ claim is the only
+	// rejection path exercised: removing the typ check must fail this test.
 	tok := signToken(t, jwt.SigningMethodHS256, testSecret, jwt.MapClaims{
 		"state": "x",
 		"typ":   "oidc_state",
+		"sub":   "u1",
 		"exp":   time.Now().Add(time.Hour).Unix(),
 	})
 	rec := runAuth(builtinCfg(), firstUserStub, userExistsStub, requestWithSession(tok))
@@ -150,6 +153,17 @@ func TestAuth_OIDCMode_UsesSameCookieRules(t *testing.T) {
 	})
 	rec = runAuth(cfg, firstUserStub, userExistsStub, requestWithSession(noSub))
 	assertStatusBody(t, rec, http.StatusUnauthorized, `{"error":"invalid claims","code":"UNAUTHORIZED"}`)
+
+	// State tokens occur in oidc mode; with a valid sub the typ claim must
+	// still be the rejection path here too.
+	stateTok := signToken(t, jwt.SigningMethodHS256, testSecret, jwt.MapClaims{
+		"state": "x",
+		"typ":   "oidc_state",
+		"sub":   "u1",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	})
+	rec = runAuth(cfg, firstUserStub, userExistsStub, requestWithSession(stateTok))
+	assertStatusBody(t, rec, http.StatusUnauthorized, `{"error":"invalid token","code":"UNAUTHORIZED"}`)
 }
 
 func TestAuth_Proxy_HeaderSet(t *testing.T) {
