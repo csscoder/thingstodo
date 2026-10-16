@@ -114,6 +114,36 @@ func TestRouter_OversizedJSONIs413(t *testing.T) {
 	testutil.AssertJSONField(t, resp, "code", "BODY_TOO_LARGE")
 }
 
+func TestRouter_OversizedJSONOnUploadRouteIs413(t *testing.T) {
+	client, db := newRouterClient(t, config.Config{})
+
+	user, err := repository.NewUserRepository(db).Create("carol", "hash")
+	if err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// Create a task to attach to.
+	resp := doReq(t, client, http.MethodPost, "/api/tasks", user.ID, strings.NewReader(`{"title":"json cap target"}`), "application/json")
+	testutil.AssertStatus(t, resp, http.StatusCreated)
+	var task struct {
+		ID string `json:"id"`
+	}
+	resp.JSON(t, &task)
+	if task.ID == "" {
+		t.Fatalf("created task has no id; body: %s", string(resp.Body))
+	}
+
+	// The upload route is exempt from the router-level BodyLimit middleware,
+	// so only the handler-side MaxBytesReader caps JSON bodies there. An
+	// 11 MiB JSON body must still be rejected with 413 BODY_TOO_LARGE.
+	payload := `{"link":"https://example.com/` + strings.Repeat("a", 11<<20) + `"}`
+
+	resp = doReq(t, client, http.MethodPost, "/api/tasks/"+task.ID+"/attachments", user.ID, strings.NewReader(payload), "application/json")
+
+	testutil.AssertStatus(t, resp, http.StatusRequestEntityTooLarge)
+	testutil.AssertJSONField(t, resp, "code", "BODY_TOO_LARGE")
+}
+
 func TestRouter_UploadAbove10MiB(t *testing.T) {
 	client, db := newRouterClient(t, config.Config{MaxUploadSize: 12 << 20})
 

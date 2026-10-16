@@ -25,7 +25,7 @@ JSON request bodies are capped at 10 MiB (10485760 bytes), regardless of `Conten
 { "error": "request body too large", "code": "BODY_TOO_LARGE" }
 ```
 
-Exception: `POST /api/tasks/:id/attachments` with `multipart/form-data` is capped by `MAX_UPLOAD_SIZE` instead (see below); JSON link attachments on that route remain subject to the 10 MiB limit.
+Exception: the route `POST /api/tasks/:id/attachments` is exempt from this middleware-level cap regardless of `Content-Type` (the exemption is keyed on route and method, not Content-Type). Multipart uploads there are capped by `MAX_UPLOAD_SIZE` instead (see below); JSON link-creates on that route remain capped at 10 MiB by the handler itself and return 413 `BODY_TOO_LARGE` beyond that.
 
 ### Duplicate Name Errors
 `POST` and `PATCH` for projects, areas, and tags return **409 Conflict** with code `DUPLICATE_NAME` if the title already exists.
