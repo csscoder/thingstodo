@@ -78,6 +78,13 @@ Response (200): Sets httpOnly JWT cookie
 { "user": { "id": "string", "username": "string" } }
 ```
 
+Failed logins are rate-limited per client IP: after 10 consecutive failures within a 15-minute window, all further login attempts from that IP are rejected until the window expires.
+
+Response (429):
+```json
+{ "error": "too many failed login attempts", "code": "RATE_LIMITED" }
+```
+
 ### DELETE /api/auth/logout
 **Mode: builtin, oidc**
 

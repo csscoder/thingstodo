@@ -69,6 +69,7 @@ func (h *OIDCHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecureRequest(r),
 		MaxAge:   600,
 	})
 
@@ -87,7 +88,7 @@ func (h *OIDCHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: "oidc_state", Value: "", Path: "/", HttpOnly: true, MaxAge: -1,
+		Name: "oidc_state", Value: "", Path: "/", HttpOnly: true, Secure: isSecureRequest(r), MaxAge: -1,
 	})
 
 	if !verifyState(r.URL.Query().Get("state"), stateCookie.Value, h.cfg.JWTSecret) {
@@ -211,6 +212,7 @@ func (h *OIDCHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecureRequest(r),
 		MaxAge:   7 * 24 * 60 * 60,
 	})
 

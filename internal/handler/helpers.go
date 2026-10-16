@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -53,4 +55,29 @@ func decodeJSONWithRaw(r *http.Request, v interface{}) (map[string]json.RawMessa
 		return nil, err
 	}
 	return raw, nil
+}
+
+// isSecureRequest reports whether the request reached this server over TLS,
+// either directly or behind a reverse proxy asserting X-Forwarded-Proto.
+func isSecureRequest(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// clientIP resolves the client IP for rate limiting. It starts from the host
+// part of RemoteAddr; when that is a loopback or private address (this app
+// deploys behind a reverse proxy) and X-Forwarded-For is present, it returns
+// the rightmost comma-separated entry — the one appended by the trusted
+// proxy for the directly connected client.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			return strings.TrimSpace(parts[len(parts)-1])
+		}
+	}
+	return host
 }

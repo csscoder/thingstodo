@@ -12,17 +12,24 @@ import (
 )
 
 type AuthHandler struct {
-	repo *repository.UserRepository
-	cfg  config.Config
+	repo    *repository.UserRepository
+	cfg     config.Config
+	limiter *loginLimiter
 }
 
 func NewAuthHandler(repo *repository.UserRepository, cfg config.Config) *AuthHandler {
-	return &AuthHandler{repo: repo, cfg: cfg}
+	return &AuthHandler{repo: repo, cfg: cfg, limiter: newLoginLimiter(10, 15*time.Minute, time.Now)}
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.AuthMode != "builtin" {
 		writeError(w, http.StatusNotFound, "login not available in this auth mode", "NOT_FOUND")
+		return
+	}
+
+	ip := clientIP(r)
+	if h.limiter.blocked(ip) {
+		writeError(w, http.StatusTooManyRequests, "too many failed login attempts", "RATE_LIMITED")
 		return
 	}
 
@@ -37,14 +44,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.repo.GetByUsername(input.Username)
 	if err != nil || user == nil {
+		h.limiter.fail(ip)
 		writeError(w, http.StatusUnauthorized, "invalid credentials", "UNAUTHORIZED")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)); err != nil {
+		h.limiter.fail(ip)
 		writeError(w, http.StatusUnauthorized, "invalid credentials", "UNAUTHORIZED")
 		return
 	}
+	h.limiter.reset(ip)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub": user.ID,
@@ -62,6 +72,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecureRequest(r),
 		MaxAge:   7 * 24 * 60 * 60,
 	})
 
@@ -76,6 +87,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isSecureRequest(r),
 		MaxAge:   -1,
 	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
