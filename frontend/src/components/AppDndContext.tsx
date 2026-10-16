@@ -1,0 +1,634 @@
+import { type ReactNode, useState, useCallback, useMemo, useRef } from 'react'
+import {
+  DndContext,
+  type DragEndEvent,
+  type DragStartEvent,
+  DragOverlay,
+  PointerSensor,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+  pointerWithin,
+  rectIntersection,
+  closestCenter,
+  type CollisionDetection,
+} from '@dnd-kit/core'
+import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
+import { Package } from 'lucide-react'
+import { reorderTasks, bulkAction } from '../api/tasks'
+import * as localMutations from '../db/mutations'
+import { localDb } from '../db/index'
+import { updateProject, reorderProjects } from '../api/projects'
+import { reorderAreas } from '../api/areas'
+import { reorderTags } from '../api/tags'
+import { useQueryClient } from '@tanstack/react-query'
+import { updateTaskInCache, queryKeys } from '../hooks/queries'
+import { useLocalProjects, useLocalAreas, useLocalTags } from '../hooks/localQueries'
+import type { Task, Tag, Area, Project, SortField } from '../api/types'
+
+/** Optimistically reorder a task in all cached view data.
+ *  Updates the sort field value on the task, then re-sorts any Task[] that contains it. */
+function reorderTaskInCache(
+  queryClient: ReturnType<typeof useQueryClient>,
+  taskId: string,
+  sortField: SortField,
+  newPosition: number,
+) {
+  const getSortOrder = (t: Task, sf: SortField): number => {
+    if (sf === 'sort_order_today') return t.sort_order_today
+    if (sf === 'sort_order_project') return t.sort_order_project
+    return t.sort_order_heading
+  }
+
+  const reorderArrays = (obj: unknown): unknown => {
+    if (!obj || typeof obj !== 'object') return obj
+    if (Array.isArray(obj)) {
+      // Check if this is a Task[] containing our task
+      const isTaskArray = obj.length > 0 && obj.some(
+        (item) => item && typeof item === 'object' && 'id' in item && 'status' in item && item.id === taskId,
+      )
+      if (isTaskArray) {
+        // Update the sort field on the moved task, then sort the array
+        return [...obj]
+          .map((t) => (t.id === taskId ? { ...t, [sortField]: newPosition } : t))
+          .sort((a, b) => getSortOrder(a, sortField) - getSortOrder(b, sortField))
+      }
+      return obj.map(reorderArrays)
+    }
+    const result: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(obj)) {
+      result[key] = reorderArrays(value)
+    }
+    return result
+  }
+
+  queryClient.setQueriesData<unknown>(
+    { queryKey: ['views'] },
+    (old: unknown) => old ? reorderArrays(old) : old,
+  )
+  queryClient.setQueriesData<unknown>(
+    { queryKey: ['projects'] },
+    (old: unknown) => old ? reorderArrays(old) : old,
+  )
+  queryClient.setQueriesData<unknown>(
+    { queryKey: ['areas'] },
+    (old: unknown) => old ? reorderArrays(old) : old,
+  )
+}
+/** Calculate a new sort_order position for an entity dropped at the given index. */
+function calculateEntityPosition(
+  items: { sort_order: number }[],
+  targetIndex: number,
+): number {
+  if (items.length === 0) return 1024
+  if (targetIndex === 0) return items[0].sort_order / 2
+  if (targetIndex >= items.length) return items[items.length - 1].sort_order + 1024
+  return (items[targetIndex - 1].sort_order + items[targetIndex].sort_order) / 2
+}
+
+import { TaskItemDragOverlay } from './TaskItemDragOverlay'
+import { useAppStore } from '../stores/app'
+import { SortableListRegistryProvider } from '../contexts/SortableListRegistry'
+import { useSortableListRegistry } from '../contexts/useSortableListRegistry'
+import { calculatePosition } from '../lib/sort-position'
+
+// Prefer sidebar droppables when the pointer is over them, fall back to closestCenter for sortable reorder.
+// When multiple sidebar targets match (e.g. project inside area), prefer the most specific one.
+const sidebarFirstCollision: CollisionDetection = (args) => {
+  const activeId = String(args.active.id)
+
+  // Project sort drags: collide with same-prefix (reorder) + sidebar-area targets (reassign)
+  if (activeId.startsWith('sort-project-')) {
+    const sortContainers = args.droppableContainers.filter((c) =>
+      String(c.id).startsWith('sort-project-'),
+    )
+    const areaContainers = args.droppableContainers.filter((c) =>
+      String(c.id).startsWith('sidebar-area-'),
+    )
+    // Check if pointer is over an area target (area reassignment takes priority)
+    if (areaContainers.length > 0) {
+      const areaHits = pointerWithin({ ...args, droppableContainers: areaContainers })
+      if (areaHits.length > 0) return [areaHits[0]]
+    }
+    return closestCenter({ ...args, droppableContainers: sortContainers })
+  }
+
+  // Other sort drags (areas, tags): only collide with same-prefix sort containers
+  if (activeId.startsWith('sort-')) {
+    const prefix = activeId.replace(/-[^-]+$/, '-') // e.g. "sort-area-"
+    const sortContainers = args.droppableContainers.filter((c) =>
+      String(c.id).startsWith(prefix),
+    )
+    return closestCenter({ ...args, droppableContainers: sortContainers })
+  }
+
+  const sidebarContainers = args.droppableContainers.filter((c) =>
+    String(c.id).startsWith('sidebar-'),
+  )
+  if (sidebarContainers.length > 0) {
+    const sidebarHits = pointerWithin({ ...args, droppableContainers: sidebarContainers })
+    if (sidebarHits.length > 0) {
+      // Prefer project/specific targets over area (area is a parent container)
+      const projectHit = sidebarHits.find((c) => String(c.id).startsWith('sidebar-project-'))
+      if (projectHit) return [projectHit]
+      return [sidebarHits[0]]
+    }
+    // Rect intersection fallback for near-misses
+    const sidebarRect = rectIntersection({ ...args, droppableContainers: sidebarContainers })
+    if (sidebarRect.length > 0) {
+      const projectHit = sidebarRect.find((c) => String(c.id).startsWith('sidebar-project-'))
+      if (projectHit) return [projectHit]
+      return [sidebarRect[0]]
+    }
+  }
+
+  // Fall back to closestCenter for sortable reorder among non-sidebar items
+  const sortableContainers = args.droppableContainers.filter(
+    (c) => !String(c.id).startsWith('sidebar-') && !String(c.id).startsWith('sort-'),
+  )
+  return closestCenter({ ...args, droppableContainers: sortableContainers })
+}
+
+interface AppDndContextProps {
+  children: ReactNode
+}
+
+function AppDndContextInner({ children }: AppDndContextProps) {
+  const [activeTask, setActiveTask] = useState<Task | null>(null)
+  const [activeProjectName, setActiveProjectName] = useState<string | null>(null)
+  const [draggedTaskIds, setDraggedTaskIds] = useState<Set<string>>(new Set())
+  const projectsArr = useLocalProjects()
+  const projects = useMemo(() => projectsArr ?? [], [projectsArr])
+  const areasArr = useLocalAreas()
+  const areas = useMemo(() => areasArr ?? [], [areasArr])
+  const tagsArr = useLocalTags()
+  const allTags = useMemo(() => tagsArr ?? [], [tagsArr])
+  const queryClient = useQueryClient()
+  const registry = useSortableListRegistry()
+  const projectDndGenRef = useRef(0)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 8 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  )
+
+  const handleDragStart = useCallback(
+    (event: DragStartEvent) => {
+      const activeId = String(event.active.id)
+      if (activeId.startsWith('sort-project-')) {
+        const projectId = activeId.replace('sort-project-', '')
+        const project = projects.find((p) => p.id === projectId)
+        setActiveProjectName(project?.title ?? null)
+        return
+      }
+      if (activeId.startsWith('sort-')) return // areas/tags: no overlay needed
+      const task = event.active.data.current?.task as Task | undefined
+      setActiveTask(task ?? null)
+
+      // Multi-drag: if dragged task is in the multi-selection, drag all selected
+      const { selectedTaskIds } = useAppStore.getState()
+      if (task && selectedTaskIds.has(task.id) && selectedTaskIds.size > 1) {
+        setDraggedTaskIds(new Set(selectedTaskIds))
+      } else {
+        setDraggedTaskIds(new Set())
+      }
+    },
+    [projects],
+  )
+
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      setActiveTask(null)
+      setActiveProjectName(null)
+
+      const forceInvalidate = () => {
+        queryClient.invalidateQueries({ queryKey: ['views'] })
+        queryClient.invalidateQueries({ queryKey: ['projects'] })
+        queryClient.invalidateQueries({ queryKey: ['areas'] })
+        queryClient.invalidateQueries({ queryKey: ['tags'] })
+      }
+
+      const { active, over } = event
+      if (!over) {
+        setDraggedTaskIds(new Set())
+        return
+      }
+
+      const activeId = String(active.id)
+      const overId = String(over.id)
+
+      // Multi-task drag to sidebar targets — use bulk API
+      if (draggedTaskIds.size > 1 && !activeId.startsWith('sort-')) {
+        const ids = Array.from(draggedTaskIds)
+        const today = new Date().toISOString().split('T')[0]
+        let handled = false
+
+        if (overId === 'sidebar-today') {
+          Promise.all(ids.map((id) => localMutations.updateTask(id, { when_date: today }))).catch(() => {})
+          bulkAction({ task_ids: ids, action: 'set_when', params: { when_date: today } })
+            .then(() => forceInvalidate())
+          handled = true
+        } else if (overId === 'sidebar-someday') {
+          Promise.all(ids.map((id) => localMutations.updateTask(id, { when_date: 'someday' }))).catch(() => {})
+          bulkAction({ task_ids: ids, action: 'set_when', params: { when_date: 'someday' } })
+            .then(() => forceInvalidate())
+          handled = true
+        } else if (overId === 'sidebar-anytime') {
+          Promise.all(ids.map((id) => localMutations.updateTask(id, { when_date: null }))).catch(() => {})
+          bulkAction({ task_ids: ids, action: 'set_when', params: { when_date: '' } })
+            .then(() => forceInvalidate())
+          handled = true
+        } else if (overId.startsWith('sidebar-project-')) {
+          const projectId = overId.replace('sidebar-project-', '')
+          const project = projects.find((p) => p.id === projectId)
+          Promise.all(ids.map((id) => localMutations.updateTask(id, { project_id: projectId, area_id: project?.area_id ?? null }))).catch(() => {})
+          bulkAction({ task_ids: ids, action: 'move_project', params: { project_id: projectId } })
+            .then(() => forceInvalidate())
+          handled = true
+        } else if (overId.startsWith('sidebar-tag-')) {
+          const tagId = overId.replace('sidebar-tag-', '')
+          // Add tag to each task locally (read existing tags first)
+          Promise.all(ids.map(async (id) => {
+            const task = await localDb.tasks.get(id)
+            const existingTagIds = task?.tags?.map((t) => t.id) ?? []
+            if (!existingTagIds.includes(tagId)) {
+              await localMutations.updateTask(id, { tag_ids: [...existingTagIds, tagId] })
+            }
+          })).catch(() => {})
+          bulkAction({ task_ids: ids, action: 'add_tags', params: { tag_ids: [tagId] } })
+            .then(() => forceInvalidate())
+          handled = true
+        } else if (overId === 'sidebar-trash') {
+          Promise.all(ids.map((id) => localMutations.deleteTask(id))).catch(() => {})
+          bulkAction({ task_ids: ids, action: 'delete' })
+            .then(() => forceInvalidate())
+          handled = true
+        } else if (overId === 'sidebar-completed') {
+          Promise.all(ids.map((id) => localMutations.completeTask(id))).catch(() => {})
+          bulkAction({ task_ids: ids, action: 'complete' })
+            .then(() => forceInvalidate())
+          handled = true
+        }
+
+        if (handled) {
+          setDraggedTaskIds(new Set())
+          return
+        }
+      }
+      setDraggedTaskIds(new Set())
+
+      // Sidebar sort reorder: areas
+      if (activeId.startsWith('sort-area-') && overId.startsWith('sort-area-')) {
+        if (activeId === overId) return
+        const movedId = activeId.replace('sort-area-', '')
+        const overedId = overId.replace('sort-area-', '')
+        const oldIndex = areas.findIndex((a) => a.id === movedId)
+        const newIndex = areas.findIndex((a) => a.id === overedId)
+        if (oldIndex === -1 || newIndex === -1) return
+        const without = areas.filter((a) => a.id !== movedId)
+        const newPos = calculateEntityPosition(without, newIndex)
+        // Optimistic: reorder in cache
+        queryClient.setQueriesData<{ areas: Area[] }>(
+          { queryKey: queryKeys.areas.all },
+          (old) => {
+            if (!old) return old
+            return { ...old, areas: old.areas.map((a) => a.id === movedId ? { ...a, sort_order: newPos } : a).sort((a, b) => a.sort_order - b.sort_order) }
+          },
+        )
+        reorderAreas([{ id: movedId, sort_order: newPos }]).then(() => {
+          queryClient.invalidateQueries({ queryKey: queryKeys.areas.all })
+        })
+        return
+      }
+
+      // Sidebar sort reorder: tags
+      if (activeId.startsWith('sort-tag-') && overId.startsWith('sort-tag-')) {
+        if (activeId === overId) return
+        const movedId = activeId.replace('sort-tag-', '')
+        const overedId = overId.replace('sort-tag-', '')
+        const rootTags = allTags.filter((t: Tag) => !t.parent_tag_id)
+        const oldIndex = rootTags.findIndex((t: Tag) => t.id === movedId)
+        const newIndex = rootTags.findIndex((t: Tag) => t.id === overedId)
+        if (oldIndex === -1 || newIndex === -1) return
+        const without = rootTags.filter((t: Tag) => t.id !== movedId)
+        const newPos = calculateEntityPosition(without, newIndex)
+        queryClient.setQueriesData<{ tags: Tag[] }>(
+          { queryKey: queryKeys.tags.all },
+          (old) => {
+            if (!old) return old
+            return { ...old, tags: old.tags.map((t) => t.id === movedId ? { ...t, sort_order: newPos } : t).sort((a, b) => a.sort_order - b.sort_order) }
+          },
+        )
+        reorderTags([{ id: movedId, sort_order: newPos }]).then(() => {
+          queryClient.invalidateQueries({ queryKey: queryKeys.tags.all })
+        })
+        return
+      }
+
+      // Sidebar sort: projects
+      if (activeId.startsWith('sort-project-')) {
+        const movedId = activeId.replace('sort-project-', '')
+
+        // Determine target area and sort position
+        let targetAreaId: string | undefined
+        let newPos: number | undefined
+
+        if (overId.startsWith('sort-project-')) {
+          if (activeId === overId) return
+          const overedId = overId.replace('sort-project-', '')
+          const overedProject = projects.find((p) => p.id === overedId)
+          if (!overedProject) return
+          targetAreaId = overedProject.area_id
+          const targetProjects = projects.filter((p) => p.area_id === targetAreaId && p.id !== movedId)
+          const newIndex = targetProjects.findIndex((p) => p.id === overedId)
+          if (newIndex === -1) return
+          newPos = calculateEntityPosition(targetProjects, newIndex)
+        } else if (overId.startsWith('sidebar-area-')) {
+          targetAreaId = overId.replace('sidebar-area-', '')
+        } else {
+          return
+        }
+
+        // Always update area_id (+ sort_order when reordering)
+        const gen = ++projectDndGenRef.current
+        queryClient.cancelQueries({ queryKey: queryKeys.projects.all })
+        queryClient.setQueriesData<{ projects: Project[] }>(
+          { queryKey: queryKeys.projects.all },
+          (old) => {
+            if (!old) return old
+            return {
+              ...old,
+              projects: old.projects
+                .map((p) => p.id === movedId
+                  ? { ...p, area_id: targetAreaId!, ...(newPos != null ? { sort_order: newPos } : {}) }
+                  : p)
+                .sort((a, b) => a.sort_order - b.sort_order),
+            }
+          },
+        )
+        const apiCalls: Promise<unknown>[] = [
+          updateProject(movedId, { area_id: targetAreaId }),
+        ]
+        if (newPos != null) {
+          apiCalls.push(reorderProjects([{ id: movedId, sort_order: newPos }]))
+        }
+        Promise.all(apiCalls).then(() => {
+          if (gen !== projectDndGenRef.current) return
+          queryClient.invalidateQueries({ queryKey: queryKeys.projects.all })
+          queryClient.invalidateQueries({ queryKey: ['areas'] })
+        }).catch((err) => {
+          console.error('Project DnD API error:', err)
+          queryClient.invalidateQueries({ queryKey: queryKeys.projects.all })
+        })
+
+        return
+      }
+
+      // Sidebar drops (task → sidebar target)
+      // Optimistic update first, then await API before invalidating to avoid refetch race
+      if (overId.startsWith('sidebar-')) {
+        const draggedTask = active.data.current?.task as Task | undefined
+        const taskId = draggedTask?.id ?? activeId
+        const isTrashed = !!draggedTask?.deleted_at
+        const needsReopen = draggedTask?.status !== 'open'
+
+        // Drag TO Trash: soft-delete the task
+        if (overId === 'sidebar-trash') {
+          updateTaskInCache(queryClient, taskId, {
+            deleted_at: new Date().toISOString(),
+          } as Partial<Task>)
+          useAppStore.getState().setDepartingTaskId(taskId)
+          localMutations.deleteTask(taskId).catch(() => {})
+          setTimeout(() => {
+            useAppStore.getState().setDepartingTaskId(null)
+            queryClient.invalidateQueries({ queryKey: ['views'] })
+            queryClient.invalidateQueries({ queryKey: ['projects'] })
+            queryClient.invalidateQueries({ queryKey: ['areas'] })
+            queryClient.invalidateQueries({ queryKey: ['tags'] })
+          }, 800)
+          return
+        }
+
+        // Drag TO Completed: complete the task (restore first if trashed)
+        if (overId === 'sidebar-completed') {
+          const doComplete = async () => {
+            if (isTrashed) {
+              queryClient.setQueriesData<{ groups: { date: string; tasks: Task[] }[]; total: number }>(
+                { queryKey: ['views', 'trash'] },
+                (old) => {
+                  if (!old) return old
+                  return {
+                    ...old,
+                    total: old.total - 1,
+                    groups: old.groups
+                      .map((g) => ({ ...g, tasks: g.tasks.filter((t) => t.id !== taskId) }))
+                      .filter((g) => g.tasks.length > 0),
+                  }
+                },
+              )
+              updateTaskInCache(queryClient, taskId, { deleted_at: null } as Partial<Task>)
+              await localMutations.restoreTask(taskId)
+            }
+            updateTaskInCache(queryClient, taskId, {
+              status: 'completed',
+              completed_at: new Date().toISOString(),
+            } as Partial<Task>)
+            useAppStore.getState().setDepartingTaskId(taskId)
+            await localMutations.completeTask(taskId)
+            setTimeout(() => {
+              useAppStore.getState().setDepartingTaskId(null)
+              queryClient.invalidateQueries({ queryKey: ['views'] })
+              queryClient.invalidateQueries({ queryKey: ['projects'] })
+              queryClient.invalidateQueries({ queryKey: ['areas'] })
+              queryClient.invalidateQueries({ queryKey: ['tags'] })
+            }, 800)
+          }
+          doComplete().catch(() => {
+            queryClient.invalidateQueries({ queryKey: ['views'] })
+            queryClient.invalidateQueries({ queryKey: ['projects'] })
+            queryClient.invalidateQueries({ queryKey: ['areas'] })
+          })
+          return
+        }
+
+        // Drag TO Tag: just add the tag, don't restore/reopen
+        if (overId.startsWith('sidebar-tag-')) {
+          const tagId = overId.replace('sidebar-tag-', '')
+          // Read existing tags from local DB for accurate tag_ids
+          const doTagDrop = async () => {
+            const localTask = await localDb.tasks.get(taskId)
+            const existingTagIds = localTask?.tags?.map((t) => t.id) ?? draggedTask?.tags?.map((t) => t.id) ?? []
+            if (!existingTagIds.includes(tagId)) {
+              const tag = allTags.find((t: Tag) => t.id === tagId)
+              const newTagRef = { id: tagId, title: tag?.title ?? '', color: tag?.color ?? null }
+              updateTaskInCache(queryClient, taskId, {
+                tags: [...(draggedTask?.tags ?? []), newTagRef],
+              } as Partial<Task>)
+              const newTagIds = [...existingTagIds, tagId]
+              await localMutations.updateTask(taskId, { tag_ids: newTagIds })
+              queryClient.invalidateQueries({ queryKey: ['views'] })
+              queryClient.invalidateQueries({ queryKey: ['tags'] })
+            }
+          }
+          doTagDrop().catch(() => {
+            queryClient.invalidateQueries({ queryKey: ['views'] })
+            queryClient.invalidateQueries({ queryKey: ['tags'] })
+          })
+          return
+        }
+
+        const sidebarDrop = async () => {
+          // Restore trashed tasks when dropped on a sidebar target
+          if (isTrashed) {
+            // Remove the task from the trash view cache immediately
+            queryClient.setQueriesData<{ groups: { date: string; tasks: Task[] }[]; total: number }>(
+              { queryKey: ['views', 'trash'] },
+              (old) => {
+                if (!old) return old
+                return {
+                  ...old,
+                  total: old.total - 1,
+                  groups: old.groups
+                    .map((g) => ({ ...g, tasks: g.tasks.filter((t) => t.id !== taskId) }))
+                    .filter((g) => g.tasks.length > 0),
+                }
+              },
+            )
+            updateTaskInCache(queryClient, taskId, {
+              deleted_at: null,
+            } as Partial<Task>)
+            await localMutations.restoreTask(taskId)
+          }
+          // Reopen non-open tasks when dropped on a sidebar target
+          if (needsReopen) {
+            updateTaskInCache(queryClient, taskId, {
+              status: 'open',
+              completed_at: null,
+              canceled_at: null,
+            } as Partial<Task>)
+            await localMutations.reopenTask(taskId)
+          }
+          if (overId === 'sidebar-today') {
+            const today = new Date().toISOString().split('T')[0]
+            updateTaskInCache(queryClient, taskId, { when_date: today } as Partial<Task>)
+            await localMutations.updateTask(taskId, { when_date: today })
+          } else if (overId === 'sidebar-anytime') {
+            updateTaskInCache(queryClient, taskId, { when_date: null } as Partial<Task>)
+            await localMutations.updateTask(taskId, { when_date: null })
+          } else if (overId === 'sidebar-someday') {
+            updateTaskInCache(queryClient, taskId, { when_date: 'someday' } as Partial<Task>)
+            await localMutations.updateTask(taskId, { when_date: 'someday' })
+          } else if (overId === 'sidebar-inbox') {
+            updateTaskInCache(queryClient, taskId, {
+              project_id: null, project_name: null,
+              area_id: null, area_name: null,
+              when_date: null,
+            } as Partial<Task>)
+            await localMutations.updateTask(taskId, { project_id: null, area_id: null, when_date: null })
+          } else if (overId.startsWith('sidebar-project-')) {
+            const projectId = overId.replace('sidebar-project-', '')
+            const project = projects.find((p) => p.id === projectId)
+            const projectArea = project?.area_id ? areas.find((a) => a.id === project.area_id) : null
+            updateTaskInCache(queryClient, taskId, {
+              project_id: projectId,
+              project_name: project?.title ?? null,
+              area_id: project?.area_id ?? null,
+              area_name: projectArea?.title ?? null,
+            } as Partial<Task>)
+            await localMutations.updateTask(taskId, { project_id: projectId, area_id: project?.area_id ?? null })
+          } else if (overId.startsWith('sidebar-area-')) {
+            const areaId = overId.replace('sidebar-area-', '')
+            const area = areas.find((a) => a.id === areaId)
+            updateTaskInCache(queryClient, taskId, {
+              project_id: null,
+              project_name: null,
+              area_id: areaId,
+              area_name: area?.title ?? null,
+            } as Partial<Task>)
+            await localMutations.updateTask(taskId, { project_id: null, area_id: areaId })
+          }
+          // Invalidate after local mutations complete
+          queryClient.invalidateQueries({ queryKey: ['views'] })
+          queryClient.invalidateQueries({ queryKey: ['tags'] })
+          if (overId.startsWith('sidebar-project-') || overId.startsWith('sidebar-area-')) {
+            queryClient.invalidateQueries({ queryKey: ['projects'] })
+            queryClient.invalidateQueries({ queryKey: ['areas'] })
+          }
+        }
+        sidebarDrop().catch(() => {
+          queryClient.invalidateQueries({ queryKey: ['views'] })
+          queryClient.invalidateQueries({ queryKey: ['projects'] })
+          queryClient.invalidateQueries({ queryKey: ['areas'] })
+          queryClient.invalidateQueries({ queryKey: ['tags'] })
+        })
+        return
+      }
+
+      // Same-list reorder (task within sortable list)
+      if (activeId === overId) return
+      const sourceList = registry.getListForTask(activeId)
+      const targetList = registry.getListForTask(overId)
+      if (sourceList && targetList && sourceList.listId === targetList.listId) {
+        const { tasks, sortField } = sourceList
+        // Sortable IDs may be schedule_entry_id, so match by composite key
+        const sortableKey = (t: Task) => t.schedule_entry_id ?? t.id
+        const oldIndex = tasks.findIndex((t) => sortableKey(t) === activeId)
+        const newIndex = tasks.findIndex((t) => sortableKey(t) === overId)
+        if (oldIndex === -1 || newIndex === -1) return
+
+        const movedTask = tasks[oldIndex]
+        const newPosition = calculatePosition(
+          tasks.filter((t) => sortableKey(t) !== activeId),
+          newIndex,
+          sortField,
+        )
+        // Optimistic: reorder the task array in cache immediately
+        reorderTaskInCache(queryClient, movedTask.id, sortField, newPosition)
+        // Update local IndexedDB immediately
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        localDb.tasks.update(movedTask.id, { [sortField]: newPosition } as any).catch(() => {})
+        // Persist to backend, then reconcile
+        reorderTasks([
+          { id: movedTask.id, sort_field: sortField, sort_order: newPosition },
+        ]).then(() => {
+          queryClient.invalidateQueries({ queryKey: ['views'] })
+          queryClient.invalidateQueries({ queryKey: ['projects'] })
+          queryClient.invalidateQueries({ queryKey: ['areas'] })
+        })
+      }
+    },
+    [queryClient, projects, areas, allTags, registry, draggedTaskIds],
+  )
+
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={sidebarFirstCollision}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+    >
+      {children}
+      <DragOverlay dropAnimation={null}>
+        {activeTask ? <TaskItemDragOverlay task={activeTask} count={draggedTaskIds.size > 1 ? draggedTaskIds.size : undefined} /> : null}
+        {activeProjectName ? (
+          <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 py-2 shadow-lg dark:border-neutral-600 dark:bg-neutral-800">
+            <Package size={14} className="text-neutral-400" />
+            <span className="text-sm text-neutral-900 dark:text-neutral-100">{activeProjectName}</span>
+          </div>
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  )
+}
+
+export function AppDndContext({ children }: AppDndContextProps) {
+  return (
+    <SortableListRegistryProvider>
+      <AppDndContextInner>{children}</AppDndContextInner>
+    </SortableListRegistryProvider>
+  )
+}

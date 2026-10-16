@@ -1,0 +1,502 @@
+import { useState, useRef, useEffect } from 'react'
+import { useDraggable } from '@dnd-kit/core'
+import { motion } from 'framer-motion'
+import * as Checkbox from '@radix-ui/react-checkbox'
+import { Check, Calendar, Flag, GripVertical, X, ListChecks, StickyNote, Link, Paperclip, RefreshCw, Bell, Info, CheckCheck } from 'lucide-react'
+import type { Task } from '../api/types'
+import { useCompleteTask, useReopenTask, useUpdateTask, useReviewTask, useCancelTask, useWontDoTask, useDeleteTask } from '../hooks/queries'
+import { getTaskContext } from '../hooks/useTaskContext'
+import { useAppStore } from '../stores/app'
+import { ConfirmDialog } from './ConfirmDialog'
+import { useResolveTags } from '../hooks/useResolveTags'
+import { formatRelativeDate } from '../lib/format-date'
+import { formatTime, formatTimeRange } from '../lib/format-time'
+import { formatReminderShort } from '../lib/format-reminder'
+import { useSettings } from '../hooks/queries'
+import { getTagPillClasses, getTagIconClass } from '../lib/tag-colors'
+import { isReservedTag, isObsidianTag } from '../lib/reserved-tags'
+import { ReservedTagIcon } from './ReservedTagIcon'
+import { TaskStatusIcon } from './TaskStatusIcon'
+import { TagAutocomplete } from './TagAutocomplete'
+import { ProjectAutocomplete } from './ProjectAutocomplete'
+import { PriorityAutocomplete } from './PriorityAutocomplete'
+import { useSwipe } from '../hooks/useSwipeLeft'
+import { SwipeActionsTray } from './SwipeActionsTray'
+
+interface TaskItemProps {
+  task: Task
+  showProject?: boolean
+  hideWhenDate?: boolean
+  showReviewCheckbox?: boolean
+  showDivider?: boolean
+  taskSection?: string
+}
+
+export function TaskItem({ task, showProject = true, hideWhenDate = false, showReviewCheckbox = false, showDivider = false, taskSection }: TaskItemProps) {
+  const selectedTaskId = useAppStore((s) => s.selectedTaskId)
+  const selectedScheduleEntryId = useAppStore((s) => s.selectedScheduleEntryId)
+  const selectTask = useAppStore((s) => s.selectTask)
+  const expandedTaskId = useAppStore((s) => s.expandedTaskId)
+  const expandedScheduleEntryId = useAppStore((s) => s.expandedScheduleEntryId)
+  const expandTask = useAppStore((s) => s.expandTask)
+  const editingTaskId = useAppStore((s) => s.editingTaskId)
+  const startEditingTask = useAppStore((s) => s.startEditingTask)
+  const setDetailFocusField = useAppStore((s) => s.setDetailFocusField)
+  const detailFieldCompleted = useAppStore((s) => s.detailFieldCompleted)
+  const setDetailFieldCompleted = useAppStore((s) => s.setDetailFieldCompleted)
+  const selectedTaskIds = useAppStore((s) => s.selectedTaskIds)
+  const toggleTaskSelection = useAppStore((s) => s.toggleTaskSelection)
+  const clearSelection = useAppStore((s) => s.clearSelection)
+  const lastSelectedTaskId = useAppStore((s) => s.lastSelectedTaskId)
+  const selectTaskRange = useAppStore((s) => s.selectTaskRange)
+  const departingTaskIds = useAppStore((s) => s.departingTaskIds)
+  const isDeparting = useAppStore((s) => s.departingTaskId) === task.id || departingTaskIds.has(task.id)
+  const pendingCompleteConfirmId = useAppStore((s) => s.pendingCompleteConfirmId)
+  const setPendingCompleteConfirmId = useAppStore((s) => s.setPendingCompleteConfirmId)
+  const completeTask = useCompleteTask()
+  const reopenTask = useReopenTask()
+  const updateTask = useUpdateTask()
+  const reviewTask = useReviewTask()
+  const cancelTask = useCancelTask()
+  const wontDoTask = useWontDoTask()
+  const deleteTask = useDeleteTask()
+  const resolveTags = useResolveTags()
+  const { data: settings } = useSettings()
+  const taskContext = getTaskContext(task)
+  const entryId = task.schedule_entry_id
+  const isSelected = selectedTaskId === task.id && selectedScheduleEntryId === (entryId ?? null)
+  const isExpanded = expandedTaskId === task.id && expandedScheduleEntryId === (entryId ?? null)
+  const isCompleted = task.status === 'completed'
+  const isDone = task.status !== 'open'
+  const isMultiSelected = selectedTaskIds.has(task.id)
+
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    isDragging,
+  } = useDraggable({ id: task.schedule_entry_id ?? task.id, data: { type: 'task', task } })
+
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState(task.title)
+  const [reservedError, setReservedError] = useState<string | null>(null)
+  const [scheduleConfirmPending, setScheduleConfirmPending] = useState(false)
+  const [swipeTrayOpen, setSwipeTrayOpen] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const skipBlurRef = useRef(false)
+  const triggerCursorRef = useRef<number | null>(null)
+  const reservedErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function getEditTitle() {
+    const tagSuffix = task.tags.filter((t) => !isReservedTag(t.title)).map((t) => `#${t.title}`).join(' ')
+    return task.title + (tagSuffix ? ' ' + tagSuffix : '')
+  }
+
+  useEffect(() => {
+    setTitle(task.title)
+  }, [task.title])
+
+  // When editing starts, focus input and place cursor at end
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.setSelectionRange(inputRef.current.value.length, inputRef.current.value.length)
+    }
+  }, [editing])
+
+  // Stop editing when task is deselected and not expanded
+  useEffect(() => {
+    if (!isSelected && !isExpanded) setEditing(false)
+  }, [isSelected, isExpanded])
+
+  // Open schedule confirmation when triggered by keyboard shortcut
+  useEffect(() => {
+    if (pendingCompleteConfirmId === task.id) {
+      setScheduleConfirmPending(true)
+      setPendingCompleteConfirmId(null)
+    }
+  }, [pendingCompleteConfirmId, task.id, setPendingCompleteConfirmId])
+
+  // Respond to store-level edit trigger (Enter key) — only when modal is NOT open
+  // (the modal's ModalContent handles editingTaskId when isExpanded)
+  useEffect(() => {
+    if (editingTaskId === task.id && !isExpanded) {
+      setTitle(getEditTitle())
+      setEditing(true)
+      startEditingTask(null)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingTaskId, task.id, startEditingTask, isExpanded])
+
+  // Return focus to title after a detail field completes (triggered by @, ^, *)
+  useEffect(() => {
+    if (detailFieldCompleted && editing && isExpanded) {
+      setDetailFieldCompleted(false)
+      const pos = triggerCursorRef.current
+      triggerCursorRef.current = null
+      requestAnimationFrame(() => {
+        inputRef.current?.focus()
+        if (pos != null) {
+          inputRef.current?.setSelectionRange(pos, pos)
+        }
+      })
+    }
+  }, [detailFieldCompleted, editing, isExpanded, setDetailFieldCompleted])
+
+  function handleCheck(checked: boolean | 'indeterminate') {
+    if (checked === true) {
+      if (task.has_actionable_schedules) {
+        setScheduleConfirmPending(true)
+      } else {
+        completeTask.mutate(task.id)
+      }
+    } else {
+      reopenTask.mutate(task.id)
+    }
+  }
+
+  function handleClick(e: React.MouseEvent) {
+    // Shift+Click: range select
+    if (e.shiftKey) {
+      e.preventDefault()
+      selectTaskRange(lastSelectedTaskId, task.id, taskSection)
+      return
+    }
+    // Cmd/Ctrl+Click: toggle multi-select
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault()
+      toggleTaskSelection(task.id, true, taskSection)
+      return
+    }
+    // Plain click while multi-selected: clear selection, then normal behavior
+    if (selectedTaskIds.size > 0) {
+      clearSelection()
+    }
+    selectTask(task.id, entryId)
+  }
+
+  function handleDoubleClick(e: React.MouseEvent) {
+    e.preventDefault()
+    // Double click = open modal
+    expandTask(task.id, entryId)
+  }
+
+  const { offsetX: swipeOffsetX, ...swipeHandlers } = useSwipe({
+    onSwipeLeft: () => expandTask(task.id, entryId),
+    onSwipeRight: () => setSwipeTrayOpen(true),
+  })
+
+  async function saveTitle() {
+    setEditing(false)
+    const trimmed = title.trim()
+    if (!trimmed || trimmed === getEditTitle()) {
+      setTitle(task.title)
+      return
+    }
+    const hasDollarToken = trimmed.includes('$')
+    const { title: cleanTitle, tagIds, projectId, areaId } = await resolveTags(trimmed)
+    if (!cleanTitle) {
+      setTitle(task.title)
+      return
+    }
+    const reservedTagIds = task.tags.filter((t) => isReservedTag(t.title)).map((t) => t.id)
+    updateTask.mutate({
+      id: task.id,
+      data: {
+        title: cleanTitle,
+        tag_ids: [...tagIds, ...reservedTagIds],
+        project_id: hasDollarToken ? projectId : task.project_id,
+        area_id: hasDollarToken ? areaId : task.area_id,
+      },
+    })
+  }
+
+  function handleTitleChange(value: string) {
+    const cursorPos = inputRef.current?.selectionStart ?? value.length
+    const lastChar = value[cursorPos - 1]
+
+    const triggerMap: Record<string, 'when' | 'deadline' | 'notes'> = {
+      '@': 'when',
+      '^': 'deadline',
+      '*': 'notes',
+    }
+
+    const field = lastChar ? triggerMap[lastChar] : undefined
+    if (field) {
+      const withoutTrigger = value.slice(0, cursorPos - 1) + value.slice(cursorPos)
+      setTitle(withoutTrigger)
+      triggerCursorRef.current = cursorPos - 1
+      skipBlurRef.current = true
+      setDetailFocusField(field)
+      expandTask(task.id, entryId)
+      return
+    }
+
+    // Detect reserved tag tokens
+    const tagMatches = [...value.matchAll(/#([\w-]+)/g)]
+    const reservedMatch = tagMatches.find((m) => isReservedTag(m[1]))
+    if (reservedMatch) {
+      if (reservedErrorTimerRef.current) clearTimeout(reservedErrorTimerRef.current)
+      setReservedError(`"${reservedMatch[1]}" is a reserved tag`)
+      reservedErrorTimerRef.current = setTimeout(() => setReservedError(null), 2000)
+    }
+
+    setTitle(value)
+  }
+
+
+  return (
+    <motion.div
+      ref={setNodeRef}
+      data-task-id={task.id}
+      data-task-section={taskSection ?? undefined}
+      aria-selected={isMultiSelected || undefined}
+      data-schedule-entry-id={task.schedule_entry_id ?? undefined}
+      data-departing={isDeparting ? 'true' : undefined}
+      className="group/item"
+      style={{ opacity: isDragging ? 0.4 : 1 }}
+      layout="position"
+      initial={{ opacity: 0, height: 0 }}
+      animate={
+        isDeparting
+          ? { opacity: 0, height: 0, transition: { duration: 0.7, ease: 'easeInOut' } }
+          : { opacity: 1, height: 'auto' }
+      }
+      exit={
+        isDone
+          ? { opacity: 0, height: 0, transition: { duration: 0.3, delay: 0.8 } }
+          : { opacity: 0, height: 0, transition: { duration: 0.2 } }
+      }
+      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+    >
+      <div className="flex items-start gap-2">
+      <div className="min-w-0 flex-1">
+      <div className="relative overflow-hidden md:overflow-visible rounded-lg">
+        {/* Swipe indicator icons behind the task row */}
+        {swipeOffsetX !== 0 && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-between px-4">
+            {swipeOffsetX > 0 && (
+              <div className="flex items-center gap-2 text-neutral-400 dark:text-neutral-500">
+                <CheckCheck size={20} />
+              </div>
+            )}
+            {swipeOffsetX < 0 && (
+              <div className="ml-auto flex items-center gap-2 text-neutral-400 dark:text-neutral-500">
+                <Info size={20} />
+              </div>
+            )}
+          </div>
+        )}
+      <div
+        className={`relative flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 transition-colors ${
+          isMultiSelected
+            ? 'ring-2 ring-red-400 ring-inset bg-red-50 dark:bg-red-900/20'
+            : isSelected
+              ? 'bg-red-50 dark:bg-red-900/20'
+              : swipeOffsetX !== 0
+                ? 'bg-neutral-100 dark:bg-neutral-800'
+                : 'bg-white group-hover/item:bg-neutral-50 dark:bg-neutral-900 dark:group-hover/item:bg-neutral-800'
+        }`}
+        onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
+        {...swipeHandlers}
+      >
+        {/* Drag handle */}
+        <button
+          className="absolute -left-5 top-1/2 hidden -translate-y-1/2 cursor-grab touch-none rounded p-0.5 text-neutral-300 opacity-0 transition-opacity hover:text-neutral-500 group-hover/item:opacity-100 active:cursor-grabbing md:block dark:text-neutral-600 dark:hover:text-neutral-400"
+          {...attributes}
+          {...listeners}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <GripVertical size={16} />
+        </button>
+        <div className="shrink-0 flex items-center justify-center min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0" onClick={(e) => e.stopPropagation()}>
+          {task.status === 'canceled' || task.status === 'wont_do' ? (
+            <TaskStatusIcon status={task.status} />
+          ) : (
+            <Checkbox.Root
+              checked={isCompleted}
+              onCheckedChange={handleCheck}
+              className={`flex h-5 w-5 items-center justify-center rounded-full border-2 transition-colors data-[state=checked]:border-red-500 data-[state=checked]:bg-red-500 ${
+                task.high_priority ? 'border-red-500 dark:border-red-500' : 'border-neutral-300 dark:border-neutral-500'
+              }`}
+            >
+              <Checkbox.Indicator>
+                <Check size={12} className="text-white" />
+              </Checkbox.Indicator>
+              {!isCompleted && task.all_today_schedules_completed && (
+                <span className={`h-1.5 w-1.5 rounded-full ${task.high_priority ? 'bg-red-500' : 'bg-neutral-300 dark:bg-neutral-500'}`} />
+              )}
+            </Checkbox.Root>
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            {editing ? (
+              <>
+                <input
+                  ref={inputRef}
+                  value={title}
+                  onChange={(e) => handleTitleChange(e.target.value)}
+                  onBlur={() => {
+                    if (skipBlurRef.current) {
+                      skipBlurRef.current = false
+                      return
+                    }
+                    saveTitle()
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      skipBlurRef.current = true
+                      saveTitle()
+                    }
+                    if (e.key === 'Escape') {
+                      skipBlurRef.current = true
+                      setTitle(task.title)
+                      setEditing(false)
+                    }
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  className={`min-w-0 flex-1 border-none bg-transparent text-sm leading-5 focus:outline-none ${
+                    isDone ? 'text-neutral-400 line-through' : 'text-neutral-900 dark:text-neutral-100'
+                  }`}
+                />
+                <TagAutocomplete inputRef={inputRef} value={title} onChange={setTitle} />
+                <ProjectAutocomplete inputRef={inputRef} value={title} onChange={setTitle} />
+                <PriorityAutocomplete
+                  inputRef={inputRef}
+                  value={title}
+                  onChange={setTitle}
+                  onSetHighPriority={() => updateTask.mutate({ id: task.id, data: { high_priority: true } })}
+                />
+              </>
+            ) : (
+              <span
+                className={`text-sm leading-5 ${
+                  isDone ? 'text-neutral-400 line-through' : 'text-neutral-900 dark:text-neutral-100'
+                } ${settings?.privacy_mode ? 'privacy-blur' : ''}`}
+              >
+                {task.title}
+              </span>
+            )}
+            {!editing && task.tags.filter((t) => isReservedTag(t.title)).map((tag) => (
+              <ReservedTagIcon key={tag.id} tagTitle={tag.title} size={14} className={getTagIconClass(tag.color) || (isObsidianTag(tag.title) ? 'text-purple-500' : 'text-neutral-400')} />
+            ))}
+            {!editing && task.tags.filter((t) => !isReservedTag(t.title)).map((tag) => (
+              <span
+                key={tag.id}
+                className={`group/tag inline-flex items-center gap-0.5 rounded-full py-0.5 pl-2 pr-1.5 text-xs ${getTagPillClasses(tag.color)}`}
+              >
+                {tag.title}
+                <button
+                  type="button"
+                  className="ml-0.5 hidden rounded-full p-0.5 text-neutral-400 hover:bg-neutral-200 hover:text-neutral-600 group-hover/tag:inline-flex dark:hover:bg-neutral-600 dark:hover:text-neutral-200"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    const remainingTagIds = task.tags.filter((t) => t.id !== tag.id).map((t) => t.id)
+                    updateTask.mutate({ id: task.id, data: { tag_ids: remainingTagIds } })
+                  }}
+                  aria-label={`Remove tag ${tag.title}`}
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+            {!editing && (task.has_notes || task.has_links || task.has_files || task.has_repeat_rule) && (
+              <span className="flex items-center gap-1.5 text-neutral-400">
+                {task.has_repeat_rule && <RefreshCw size={12} className="text-red-500" />}
+                {task.has_notes && <StickyNote size={12} />}
+                {task.has_links && !task.tags.some((t) => isReservedTag(t.title)) && <Link size={12} />}
+                {task.has_files && <Paperclip size={12} />}
+              </span>
+            )}
+            {!editing && (
+              <div className="flex items-center gap-2 text-xs text-neutral-400 md:ml-auto">
+                {task.deadline && (
+                  <span className="flex items-center gap-1 text-red-500">
+                    <Flag size={12} />
+                    {formatRelativeDate(task.deadline)}
+                  </span>
+                )}
+                {!hideWhenDate && task.when_date && (
+                  <span className="flex items-center gap-1">
+                    <Calendar size={12} />
+                    {formatRelativeDate(task.when_date)}
+                  </span>
+                )}
+                {task.checklist_count > 0 && (
+                  <span className="flex items-center gap-1">
+                    <ListChecks size={12} />
+                    {task.checklist_done}/{task.checklist_count}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+          {!editing && (taskContext || (settings?.show_time_badge !== false && task.first_schedule_time) || task.has_reminders) && showProject && (
+            <p className="mt-0.5 flex items-center gap-1 text-[10px] leading-tight text-neutral-400">
+              {taskContext && <span className={settings?.privacy_mode ? 'privacy-blur' : ''}>{taskContext}</span>}
+              {settings?.show_time_badge !== false && task.first_schedule_time && (
+                <span className="inline-flex items-center gap-0.5">
+                  <Calendar size={10} className="shrink-0" />
+                  {task.past_schedule_count && task.past_schedule_count > 1
+                    ? 'multiple time blocks'
+                    : task.first_schedule_end_time
+                      ? formatTimeRange(task.first_schedule_time, task.first_schedule_end_time, settings?.time_format ?? '12h')
+                      : formatTime(task.first_schedule_time, settings?.time_format ?? '12h')}
+                </span>
+              )}
+              {task.has_reminders && task.first_reminder_type && (
+                <span className="inline-flex items-center gap-0.5">
+                  <Bell size={10} className="shrink-0" />
+                  {formatReminderShort(task.first_reminder_type, task.first_reminder_value ?? 0, settings?.time_format ?? '12h', task.first_reminder_exact_at)}
+                </span>
+              )}
+            </p>
+          )}
+          {reservedError && (
+            <p className="mt-0.5 text-xs text-red-500">{reservedError}</p>
+          )}
+        </div>
+      </div>
+      </div>
+      {showDivider && <div className="mx-3 border-b border-neutral-100 dark:border-neutral-800" />}
+      {swipeTrayOpen && (
+        <SwipeActionsTray
+          onDismiss={() => setSwipeTrayOpen(false)}
+          onCancel={() => { setSwipeTrayOpen(false); cancelTask.mutate(task.id) }}
+          onWontDo={() => { setSwipeTrayOpen(false); wontDoTask.mutate(task.id) }}
+          onComplete={() => { setSwipeTrayOpen(false); completeTask.mutate(task.id) }}
+          onDelete={() => { setSwipeTrayOpen(false); deleteTask.mutate(task.id) }}
+        />
+      )}
+      </div>
+      {showReviewCheckbox && (
+        <button
+          className="mt-2 shrink-0 self-start rounded p-1 text-neutral-300 opacity-0 transition-opacity hover:text-neutral-500 group-hover/item:opacity-100 dark:text-neutral-600 dark:hover:text-neutral-400"
+          onClick={(e) => {
+            e.stopPropagation()
+            reviewTask.mutate(task.id)
+          }}
+          aria-label="Mark as reviewed"
+        >
+          <Check size={20} />
+        </button>
+      )}
+      </div>
+      <ConfirmDialog
+        open={scheduleConfirmPending}
+        title="Complete task with scheduled dates?"
+        description="Past scheduled dates will be marked done. Today and future dates will be removed."
+        confirmLabel="Complete"
+        onConfirm={() => {
+          setScheduleConfirmPending(false)
+          completeTask.mutate(task.id)
+        }}
+        onCancel={() => setScheduleConfirmPending(false)}
+      />
+    </motion.div>
+  )
+}

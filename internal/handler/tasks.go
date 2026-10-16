@@ -1,0 +1,419 @@
+package handler
+
+import (
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	mw "github.com/collinjanssen/thingstodo/internal/middleware"
+	"github.com/collinjanssen/thingstodo/internal/model"
+	"github.com/collinjanssen/thingstodo/internal/repository"
+	"github.com/collinjanssen/thingstodo/internal/scheduler"
+	"github.com/collinjanssen/thingstodo/internal/sse"
+	"github.com/go-chi/chi/v5"
+)
+
+type TaskHandler struct {
+	repo         *repository.TaskRepository
+	scheduleRepo *repository.ScheduleRepository
+	reminderRepo *repository.ReminderRepository
+	settingsRepo *repository.UserSettingsRepository
+	broker       *sse.Broker
+	scheduler    *scheduler.Scheduler
+}
+
+func NewTaskHandler(repo *repository.TaskRepository, scheduleRepo *repository.ScheduleRepository, reminderRepo *repository.ReminderRepository, settingsRepo *repository.UserSettingsRepository, broker *sse.Broker, sched *scheduler.Scheduler) *TaskHandler {
+	return &TaskHandler{repo: repo, scheduleRepo: scheduleRepo, reminderRepo: reminderRepo, settingsRepo: settingsRepo, broker: broker, scheduler: sched}
+}
+
+func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f := model.TaskFilters{}
+
+	if v := q.Get("status"); v != "" {
+		f.Status = &v
+	}
+	if v := q.Get("project_id"); v != "" {
+		f.ProjectID = &v
+	}
+	if v := q.Get("area_id"); v != "" {
+		f.AreaID = &v
+	}
+	if v := q.Get("heading_id"); v != "" {
+		f.HeadingID = &v
+	}
+	if v := q.Get("tag_ids"); v != "" {
+		f.TagIDs = strings.Split(v, ",")
+	}
+	if v := q.Get("when_date"); v != "" {
+		f.WhenDate = &v
+	}
+	if v := q.Get("when_before"); v != "" {
+		f.WhenBefore = &v
+	}
+	if v := q.Get("when_after"); v != "" {
+		f.WhenAfter = &v
+	}
+	if v := q.Get("has_deadline"); v != "" {
+		b := v == "true"
+		f.HasDeadline = &b
+	}
+	if v := q.Get("search"); v != "" {
+		f.Search = &v
+	}
+
+	tasks, err := h.repo.List(f)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"tasks": tasks})
+}
+
+func (h *TaskHandler) Get(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	task, err := h.repo.GetByID(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
+	var input model.CreateTaskInput
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		return
+	}
+	if input.Title == "" {
+		writeError(w, http.StatusBadRequest, "title is required", "VALIDATION")
+		return
+	}
+	if input.WhenDate != nil && input.Deadline != nil && *input.WhenDate != "someday" && *input.Deadline < *input.WhenDate {
+		writeError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION")
+		return
+	}
+	task, err := h.repo.Create(input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+
+	// Auto-apply default reminder if configured
+	userID, _ := r.Context().Value(mw.UserIDKey).(string)
+	if settings, err := h.settingsRepo.GetOrCreate(userID); err == nil && settings.DefaultReminderType != nil {
+		_, err := h.reminderRepo.Create(task.ID, model.CreateReminderInput{
+			Type:  model.ReminderType(*settings.DefaultReminderType),
+			Value: settings.DefaultReminderValue,
+		})
+		if err != nil {
+			log.Printf("warning: failed to create default reminder for task %s: %v", task.ID, err)
+		} else {
+			// Re-fetch to include the new reminder in the response
+			task, _ = h.repo.GetByID(task.ID)
+		}
+	}
+
+	h.broker.BroadcastJSON("task_created", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusCreated, task)
+}
+
+func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var input model.UpdateTaskInput
+	raw, err := decodeJSONWithRaw(r, &input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		return
+	}
+	input.Raw = raw
+
+	// Validate deadline >= when_date: resolve effective values from input + existing task
+	if _, hasWhen := input.Raw["when_date"]; hasWhen {
+		if _, hasDeadline := input.Raw["deadline"]; hasDeadline {
+			// Both changing — validate directly
+			if input.WhenDate != nil && input.Deadline != nil && *input.WhenDate != "someday" && *input.Deadline < *input.WhenDate {
+				writeError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION")
+				return
+			}
+		}
+	}
+	if needsDateCrossCheck(input) {
+		existing, err := h.repo.GetByID(id)
+		if err != nil || existing == nil {
+			writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+			return
+		}
+		whenDate := existing.WhenDate
+		if _, ok := input.Raw["when_date"]; ok {
+			whenDate = input.WhenDate
+		}
+		deadline := existing.Deadline
+		if _, ok := input.Raw["deadline"]; ok {
+			deadline = input.Deadline
+		}
+		if whenDate != nil && deadline != nil && *whenDate != "someday" && *deadline < *whenDate {
+			writeError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION")
+			return
+		}
+	}
+
+	task, err := h.repo.Update(id, input)
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate timeless date") {
+			writeError(w, http.StatusBadRequest, "a schedule for this date already exists without a time", "VALIDATION")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.repo.Delete(id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	h.broker.BroadcastJSON("task_deleted", map[string]interface{}{"id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *TaskHandler) Purge(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.repo.PermanentDelete(id); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	h.broker.BroadcastJSON("task_purged", map[string]interface{}{"id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *TaskHandler) Complete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	h.cleanupSchedules(id)
+	task, err := h.repo.Complete(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	if h.scheduler != nil {
+		h.scheduler.HandleTaskDone(id)
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	h.cleanupSchedules(id)
+	task, err := h.repo.Cancel(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	if h.scheduler != nil {
+		h.scheduler.HandleTaskDone(id)
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) WontDo(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	h.cleanupSchedules(id)
+	task, err := h.repo.WontDo(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	if h.scheduler != nil {
+		h.scheduler.HandleTaskDone(id)
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Reopen(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	task, err := h.repo.Reopen(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Restore(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	task, err := h.repo.Restore(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Review(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	task, err := h.repo.MarkReviewed(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Move(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var input model.MoveTaskInput
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		return
+	}
+	task, err := h.repo.Move(id, input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	if task == nil {
+		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
+		return
+	}
+	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *TaskHandler) Reorder(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Items []model.ReorderItem `json:"items"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		return
+	}
+	if err := h.repo.Reorder(body.Items); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+	ids := make([]string, len(body.Items))
+	for i, item := range body.Items {
+		ids[i] = item.ID
+	}
+	h.broker.BroadcastJSON("bulk_change", map[string]interface{}{
+		"type": "reorder", "entity": "task", "ids": ids,
+	})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *TaskHandler) BulkAction(w http.ResponseWriter, r *http.Request) {
+	var input model.BulkActionInput
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		return
+	}
+	if len(input.TaskIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "task_ids required", "BAD_REQUEST")
+		return
+	}
+	if len(input.TaskIDs) > 100 {
+		writeError(w, http.StatusBadRequest, "maximum 100 tasks per bulk action", "BAD_REQUEST")
+		return
+	}
+
+	validActions := map[string]bool{
+		"complete": true, "cancel": true, "wontdo": true, "delete": true,
+		"set_when": true, "set_deadline": true, "set_priority": true, "toggle_priority": true,
+		"move_project": true, "add_tags": true, "remove_tags": true, "toggle_tags": true,
+		"mark_reviewed": true,
+	}
+	if !validActions[input.Action] {
+		writeError(w, http.StatusBadRequest, "invalid action: "+input.Action, "BAD_REQUEST")
+		return
+	}
+
+	if input.Action == "complete" || input.Action == "cancel" || input.Action == "wontdo" {
+		for _, id := range input.TaskIDs {
+			h.cleanupSchedules(id)
+		}
+	}
+
+	affected, err := h.repo.BulkAction(input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return
+	}
+
+	if h.scheduler != nil && (input.Action == "complete" || input.Action == "cancel" || input.Action == "wontdo") {
+		for _, id := range input.TaskIDs {
+			h.scheduler.HandleTaskDone(id)
+		}
+	}
+
+	h.broker.BroadcastJSON("bulk_change", map[string]interface{}{
+		"type":   input.Action,
+		"entity": "task",
+		"ids":    input.TaskIDs,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":       true,
+		"affected": affected,
+	})
+}
+
+// cleanupSchedules completes past uncompleted schedule entries and deletes
+// today + future entries when a task is completed/canceled/wontdo.
+func (h *TaskHandler) cleanupSchedules(taskID string) {
+	today := time.Now().Format("2006-01-02")
+	if err := h.scheduleRepo.CleanupOnTaskDone(taskID, today); err != nil {
+		log.Printf("schedule cleanup for task %s: %v", taskID, err)
+	}
+}
+
+// needsDateCrossCheck returns true when only one of when_date/deadline is
+// changing, so we need to fetch the existing task to validate the pair.
+func needsDateCrossCheck(input model.UpdateTaskInput) bool {
+	_, hasWhen := input.Raw["when_date"]
+	_, hasDeadline := input.Raw["deadline"]
+	return (hasWhen && !hasDeadline) || (!hasWhen && hasDeadline)
+}

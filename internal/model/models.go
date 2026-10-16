@@ -1,0 +1,522 @@
+package model
+
+import (
+	"crypto/rand"
+	"encoding/json"
+)
+
+const idAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+func NewID() string {
+	b := make([]byte, 10)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	for i := range b {
+		b[i] = idAlphabet[int(b[i])%len(idAlphabet)]
+	}
+	return string(b)
+}
+
+// --- Domain entities ---
+
+type Area struct {
+	ID                  string  `json:"id"`
+	Title               string  `json:"title"`
+	SortOrder           float64 `json:"sort_order"`
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
+	ProjectCount        int     `json:"project_count,omitempty"`
+	TaskCount           int     `json:"task_count,omitempty"`
+	StandaloneTaskCount int     `json:"standalone_task_count,omitempty"`
+}
+
+type AreaDetail struct {
+	Area
+	Projects       []ProjectListItem `json:"projects"`
+	Tasks          []TaskListItem    `json:"tasks"`
+	CompletedTasks []TaskListItem    `json:"completed_tasks"`
+}
+
+type Project struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Notes     string  `json:"notes"`
+	AreaID    *string `json:"area_id"`
+	Status    string  `json:"status"`
+	WhenDate  *string `json:"when_date"`
+	Deadline  *string `json:"deadline"`
+	SortOrder float64 `json:"sort_order"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+}
+
+type ProjectListItem struct {
+	Project
+	Area               *Ref     `json:"area"`
+	TaskCount          int      `json:"task_count"`
+	CompletedTaskCount int      `json:"completed_task_count"`
+	Tags               []TagRef `json:"tags"`
+}
+
+type ProjectDetail struct {
+	ProjectListItem
+	Headings            []HeadingWithTasks `json:"headings"`
+	TasksWithoutHeading []TaskListItem     `json:"tasks_without_heading"`
+	CompletedTasks      []TaskListItem     `json:"completed_tasks"`
+}
+
+type Heading struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	ProjectID string  `json:"project_id"`
+	SortOrder float64 `json:"sort_order"`
+}
+
+type HeadingWithTasks struct {
+	Heading
+	Tasks []TaskListItem `json:"tasks"`
+}
+
+type Task struct {
+	ID               string  `json:"id"`
+	Title            string  `json:"title"`
+	Notes            string  `json:"notes"`
+	Status           string  `json:"status"`
+	WhenDate         *string `json:"when_date"`
+	HighPriority     bool    `json:"high_priority"`
+	Deadline         *string `json:"deadline"`
+	ProjectID        *string `json:"project_id"`
+	AreaID           *string `json:"area_id"`
+	HeadingID        *string `json:"heading_id"`
+	SortOrderToday   float64 `json:"sort_order_today"`
+	SortOrderProject float64 `json:"sort_order_project"`
+	SortOrderHeading float64 `json:"sort_order_heading"`
+	CompletedAt      *string `json:"completed_at"`
+	CanceledAt       *string `json:"canceled_at"`
+	DeletedAt        *string `json:"deleted_at"`
+	CreatedAt        string  `json:"created_at"`
+	UpdatedAt        string  `json:"updated_at"`
+}
+
+type TaskListItem struct {
+	Task
+	Tags                       []TagRef `json:"tags"`
+	ChecklistCount             int      `json:"checklist_count"`
+	ChecklistDone              int      `json:"checklist_done"`
+	HasNotes                   bool     `json:"has_notes"`
+	HasLinks                   bool     `json:"has_links"`
+	HasFiles                   bool     `json:"has_files"`
+	HasRepeatRule              bool     `json:"has_repeat_rule"`
+	HasReminders               bool     `json:"has_reminders"`
+	FirstReminderType          *string  `json:"first_reminder_type"`
+	FirstReminderValue         *int     `json:"first_reminder_value"`
+	FirstReminderExactAt       *string  `json:"first_reminder_exact_at"`
+	FirstScheduleTime          *string  `json:"first_schedule_time"`
+	FirstScheduleEndTime       *string  `json:"first_schedule_end_time"`
+	FirstScheduleCompleted     bool     `json:"first_schedule_completed,omitempty"`
+	ScheduleEntryID            *string  `json:"schedule_entry_id"`
+	PastScheduleCount          int      `json:"past_schedule_count,omitempty"`
+	HasActionableSchedules     bool     `json:"has_actionable_schedules,omitempty"`
+	AllTodaySchedulesCompleted bool     `json:"all_today_schedules_completed,omitempty"`
+	ProjectName                *string  `json:"project_name"`
+	AreaName                   *string  `json:"area_name"`
+}
+
+type TaskDetail struct {
+	Task
+	Project     *Ref            `json:"project"`
+	Area        *Ref            `json:"area"`
+	HeadingRef  *Ref            `json:"heading"`
+	Tags        []TagRef        `json:"tags"`
+	Checklist   []ChecklistItem `json:"checklist"`
+	Attachments []Attachment    `json:"attachments"`
+	RepeatRule  *RepeatRule     `json:"repeat_rule"`
+	Schedules   []TaskSchedule  `json:"schedules"`
+	Reminders   []Reminder      `json:"reminders"`
+}
+
+type ChecklistItem struct {
+	ID        string  `json:"id"`
+	TaskID    string  `json:"task_id,omitempty"`
+	Title     string  `json:"title"`
+	Completed bool    `json:"completed"`
+	SortOrder float64 `json:"sort_order"`
+}
+
+type TaskSchedule struct {
+	ID        string  `json:"id"`
+	TaskID    string  `json:"task_id,omitempty"`
+	WhenDate  string  `json:"when_date"`
+	StartTime *string `json:"start_time"`
+	EndTime   *string `json:"end_time"`
+	Completed bool    `json:"completed"`
+	SortOrder float64 `json:"sort_order"`
+	CreatedAt string  `json:"created_at,omitempty"`
+}
+
+type Attachment struct {
+	ID        string  `json:"id"`
+	TaskID    string  `json:"task_id,omitempty"`
+	Type      string  `json:"type"`
+	Title     string  `json:"title"`
+	URL       string  `json:"url"`
+	MimeType  string  `json:"mime_type"`
+	FileSize  int64   `json:"file_size"`
+	SortOrder float64 `json:"sort_order"`
+	CreatedAt string  `json:"created_at"`
+}
+
+type Tag struct {
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	Color       *string `json:"color"`
+	ParentTagID *string `json:"parent_tag_id"`
+	SortOrder   float64 `json:"sort_order"`
+	TaskCount   int     `json:"task_count,omitempty"`
+}
+
+type TagRef struct {
+	ID    string  `json:"id"`
+	Title string  `json:"title"`
+	Color *string `json:"color"`
+}
+
+type Ref struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+type RepeatRule struct {
+	ID      string            `json:"id"`
+	TaskID  string            `json:"task_id,omitempty"`
+	Pattern RecurrencePattern `json:"pattern"`
+	// Deprecated flat fields (kept for backwards compat in responses)
+	Frequency      string   `json:"frequency,omitempty"`
+	IntervalValue  int      `json:"interval_value,omitempty"`
+	Mode           string   `json:"mode,omitempty"`
+	DayConstraints []string `json:"day_constraints,omitempty"`
+	CreatedAt      string   `json:"created_at,omitempty"`
+}
+
+type User struct {
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"-"`
+	CreatedAt    string `json:"created_at,omitempty"`
+}
+
+type UserSettings struct {
+	PlayCompleteSound        bool    `json:"play_complete_sound"`
+	ShowCountMain            bool    `json:"show_count_main"`
+	ShowCountProjects        bool    `json:"show_count_projects"`
+	ShowCountTags            bool    `json:"show_count_tags"`
+	ReviewAfterDays          *int    `json:"review_after_days"`
+	SortAreas                string  `json:"sort_areas"`
+	SortTags                 string  `json:"sort_tags"`
+	EveningStartsAt          string  `json:"evening_starts_at"`
+	DefaultTimeGap           int     `json:"default_time_gap"`
+	ShowTimeBadge            bool    `json:"show_time_badge"`
+	TimeFormat               string  `json:"time_format"`
+	FontSize                 int     `json:"font_size"`
+	DefaultReminderType      *string `json:"default_reminder_type"`
+	DefaultReminderValue     int     `json:"default_reminder_value"`
+	CopyRemindersToRecurring bool    `json:"copy_reminders_to_recurring"`
+	NotificationProvider     string  `json:"notification_provider"`
+	NtfyServerURL            string  `json:"ntfy_server_url"`
+	NtfyTopic                string  `json:"ntfy_topic"`
+	NtfyAccessToken          string  `json:"ntfy_access_token"`
+	BaseURL                  string  `json:"base_url"`
+	PrivacyMode              bool    `json:"privacy_mode"`
+	ReviewIncludeRecurring   bool    `json:"review_include_recurring"`
+}
+
+type UpdateUserSettingsInput struct {
+	PlayCompleteSound        *bool                      `json:"play_complete_sound"`
+	ShowCountMain            *bool                      `json:"show_count_main"`
+	ShowCountProjects        *bool                      `json:"show_count_projects"`
+	ShowCountTags            *bool                      `json:"show_count_tags"`
+	ReviewAfterDays          *int                       `json:"review_after_days"`
+	SortAreas                *string                    `json:"sort_areas"`
+	SortTags                 *string                    `json:"sort_tags"`
+	EveningStartsAt          *string                    `json:"evening_starts_at"`
+	DefaultTimeGap           *int                       `json:"default_time_gap"`
+	ShowTimeBadge            *bool                      `json:"show_time_badge"`
+	TimeFormat               *string                    `json:"time_format"`
+	FontSize                 *int                       `json:"font_size"`
+	DefaultReminderType      *string                    `json:"default_reminder_type"`
+	DefaultReminderValue     *int                       `json:"default_reminder_value"`
+	CopyRemindersToRecurring *bool                      `json:"copy_reminders_to_recurring"`
+	NotificationProvider     *string                    `json:"notification_provider"`
+	NtfyServerURL            *string                    `json:"ntfy_server_url"`
+	NtfyTopic                *string                    `json:"ntfy_topic"`
+	NtfyAccessToken          *string                    `json:"ntfy_access_token"`
+	BaseURL                  *string                    `json:"base_url"`
+	PrivacyMode              *bool                      `json:"privacy_mode"`
+	ReviewIncludeRecurring   *bool                      `json:"review_include_recurring"`
+	Raw                      map[string]json.RawMessage `json:"-"`
+}
+
+// --- Input types ---
+
+type CreateTaskInput struct {
+	ID           string   `json:"id"` // optional: if set, use this ID instead of generating
+	Title        string   `json:"title"`
+	Notes        string   `json:"notes"`
+	WhenDate     *string  `json:"when_date"`
+	HighPriority bool     `json:"high_priority"`
+	Deadline     *string  `json:"deadline"`
+	ProjectID    *string  `json:"project_id"`
+	AreaID       *string  `json:"area_id"`
+	HeadingID    *string  `json:"heading_id"`
+	TagIDs       []string `json:"tag_ids"`
+}
+
+type UpdateTaskInput struct {
+	Title        *string  `json:"title"`
+	Notes        *string  `json:"notes"`
+	WhenDate     *string  `json:"when_date"`
+	HighPriority *bool    `json:"high_priority"`
+	Deadline     *string  `json:"deadline"`
+	ProjectID    *string  `json:"project_id"`
+	AreaID       *string  `json:"area_id"`
+	HeadingID    *string  `json:"heading_id"`
+	TagIDs       []string `json:"tag_ids"`
+	// Use json.RawMessage tracking to detect explicit null vs absent
+	Raw map[string]json.RawMessage `json:"-"`
+}
+
+type ReorderItem struct {
+	ID        string  `json:"id"`
+	SortField string  `json:"sort_field"`
+	SortOrder float64 `json:"sort_order"`
+}
+
+type SimpleReorderItem struct {
+	ID        string  `json:"id"`
+	SortOrder float64 `json:"sort_order"`
+}
+
+type MoveTaskInput struct {
+	ProjectID *string `json:"project_id"`
+	AreaID    *string `json:"area_id"`
+	HeadingID *string `json:"heading_id"`
+	WhenDate  *string `json:"when_date"`
+}
+
+type CreateProjectInput struct {
+	ID       string   `json:"id,omitempty"`
+	Title    string   `json:"title"`
+	Notes    string   `json:"notes"`
+	AreaID   *string  `json:"area_id"`
+	WhenDate *string  `json:"when_date"`
+	Deadline *string  `json:"deadline"`
+	TagIDs   []string `json:"tag_ids"`
+}
+
+type UpdateProjectInput struct {
+	Title    *string                    `json:"title"`
+	Notes    *string                    `json:"notes"`
+	AreaID   *string                    `json:"area_id"`
+	Status   *string                    `json:"status"`
+	WhenDate *string                    `json:"when_date"`
+	Deadline *string                    `json:"deadline"`
+	TagIDs   []string                   `json:"tag_ids"`
+	Raw      map[string]json.RawMessage `json:"-"`
+}
+
+type CreateAreaInput struct {
+	ID    string `json:"id,omitempty"`
+	Title string `json:"title"`
+}
+
+type UpdateAreaInput struct {
+	Title     *string  `json:"title"`
+	SortOrder *float64 `json:"sort_order"`
+}
+
+type CreateTagInput struct {
+	ID          string  `json:"id,omitempty"`
+	Title       string  `json:"title"`
+	ParentTagID *string `json:"parent_tag_id"`
+}
+
+type UpdateTagInput struct {
+	Title       *string                    `json:"title"`
+	Color       *string                    `json:"color"`
+	ParentTagID *string                    `json:"parent_tag_id"`
+	SortOrder   *float64                   `json:"sort_order"`
+	Raw         map[string]json.RawMessage `json:"-"`
+}
+
+type CreateHeadingInput struct {
+	ID    string `json:"id,omitempty"`
+	Title string `json:"title"`
+}
+
+type UpdateHeadingInput struct {
+	Title     *string  `json:"title"`
+	SortOrder *float64 `json:"sort_order"`
+}
+
+type CreateChecklistInput struct {
+	ID    string `json:"id,omitempty"`
+	Title string `json:"title"`
+}
+
+type UpdateChecklistInput struct {
+	Title     *string  `json:"title"`
+	Completed *bool    `json:"completed"`
+	SortOrder *float64 `json:"sort_order"`
+}
+
+type CreateTaskScheduleInput struct {
+	ID        string  `json:"id,omitempty"`
+	WhenDate  string  `json:"when_date"`
+	StartTime *string `json:"start_time"`
+	EndTime   *string `json:"end_time"`
+}
+
+type UpdateTaskScheduleInput struct {
+	WhenDate  *string                    `json:"when_date"`
+	StartTime *string                    `json:"start_time"`
+	EndTime   *string                    `json:"end_time"`
+	SortOrder *float64                   `json:"sort_order"`
+	Completed *bool                      `json:"completed"`
+	Raw       map[string]json.RawMessage `json:"-"`
+}
+
+type CreateAttachmentInput struct {
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	MimeType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
+}
+
+type UpdateAttachmentInput struct {
+	Title     *string  `json:"title"`
+	SortOrder *float64 `json:"sort_order"`
+}
+
+type CreateRepeatRuleInput struct {
+	Pattern *RecurrencePattern `json:"pattern,omitempty"`
+	// Deprecated flat fields (still accepted for backwards compat)
+	Frequency      string   `json:"frequency,omitempty"`
+	IntervalValue  int      `json:"interval_value,omitempty"`
+	Mode           string   `json:"mode,omitempty"`
+	DayConstraints []string `json:"day_constraints,omitempty"`
+}
+
+type BulkActionInput struct {
+	TaskIDs []string               `json:"task_ids"`
+	Action  string                 `json:"action"`
+	Params  map[string]interface{} `json:"params"`
+}
+
+type TaskFilters struct {
+	Status      *string
+	ProjectID   *string
+	AreaID      *string
+	HeadingID   *string
+	TagIDs      []string
+	WhenDate    *string
+	WhenBefore  *string
+	WhenAfter   *string
+	HasDeadline *bool
+	Search      *string
+}
+
+// --- View response types ---
+
+type InboxView struct {
+	Tasks  []TaskListItem `json:"tasks"`
+	Review []TaskListItem `json:"review"`
+}
+
+type TodayView struct {
+	Sections  []TodaySection `json:"sections"`
+	Overdue   []TaskListItem `json:"overdue"`
+	Earlier   []TaskListItem `json:"earlier"`
+	Completed []TaskListItem `json:"completed"`
+}
+
+type TodaySection struct {
+	Title  string      `json:"title"`
+	Groups []TaskGroup `json:"groups"`
+}
+
+type TaskGroup struct {
+	Project *Ref           `json:"project"`
+	Tasks   []TaskListItem `json:"tasks"`
+}
+
+type UpcomingView struct {
+	Overdue []TaskListItem `json:"overdue"`
+	Dates   []DateGroup    `json:"dates"`
+	Earlier []TaskListItem `json:"earlier"`
+}
+
+type DateGroup struct {
+	Date  string         `json:"date"`
+	Tasks []TaskListItem `json:"tasks"`
+}
+
+type AnytimeView struct {
+	Areas  []AnytimeArea `json:"areas"`
+	NoArea AnytimeNoArea `json:"no_area"`
+}
+
+type AnytimeArea struct {
+	Area            Ref              `json:"area"`
+	Projects        []AnytimeProject `json:"projects"`
+	StandaloneTasks []TaskListItem   `json:"standalone_tasks"`
+}
+
+type AnytimeProject struct {
+	Project Ref            `json:"project"`
+	Tasks   []TaskListItem `json:"tasks"`
+}
+
+type AnytimeNoArea struct {
+	Projects        []AnytimeProject `json:"projects"`
+	StandaloneTasks []TaskListItem   `json:"standalone_tasks"`
+}
+
+type LogbookView struct {
+	Groups []DateGroup `json:"groups"`
+	Total  int         `json:"total"`
+}
+
+type ViewCounts struct {
+	Inbox   int `json:"inbox"`
+	Today   int `json:"today"`
+	Overdue int `json:"overdue"`
+	Review  int `json:"review"`
+	Anytime int `json:"anytime"`
+	Someday int `json:"someday"`
+	Logbook int `json:"logbook"`
+	Trash   int `json:"trash"`
+}
+
+type SearchResult struct {
+	Task         TaskListItem `json:"task"`
+	TitleSnippet string       `json:"title_snippet"`
+	NotesSnippet string       `json:"notes_snippet"`
+	Rank         float64      `json:"rank"`
+}
+
+type SavedFilter struct {
+	ID        string `json:"id"`
+	View      string `json:"view"`
+	Name      string `json:"name"`
+	Config    string `json:"config"`
+	CreatedAt string `json:"created_at"`
+}
+
+type CreateSavedFilterInput struct {
+	View   string `json:"view"`
+	Name   string `json:"name"`
+	Config string `json:"config"`
+}

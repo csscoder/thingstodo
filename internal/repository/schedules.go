@@ -1,0 +1,359 @@
+package repository
+
+import (
+	"database/sql"
+	"fmt"
+
+	"github.com/collinjanssen/thingstodo/internal/model"
+)
+
+type ScheduleRepository struct {
+	db        *sql.DB
+	changeLog *ChangeLogRepository
+}
+
+func NewScheduleRepository(db *sql.DB, changeLog *ChangeLogRepository) *ScheduleRepository {
+	return &ScheduleRepository{db: db, changeLog: changeLog}
+}
+
+func (r *ScheduleRepository) ListByTask(taskID string) ([]model.TaskSchedule, error) {
+	rows, err := r.db.Query(
+		"SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE task_id = ? ORDER BY sort_order", taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []model.TaskSchedule
+	for rows.Next() {
+		var s model.TaskSchedule
+		if err := rows.Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder); err != nil {
+			return nil, fmt.Errorf("scan schedule: %w", err)
+		}
+		items = append(items, s)
+	}
+	if items == nil {
+		items = []model.TaskSchedule{}
+	}
+	return items, rows.Err()
+}
+
+// ListAll returns all task schedules across all tasks.
+func (r *ScheduleRepository) ListAll() ([]model.TaskSchedule, error) {
+	rows, err := r.db.Query(
+		"SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules ORDER BY sort_order")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []model.TaskSchedule
+	for rows.Next() {
+		var s model.TaskSchedule
+		if err := rows.Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder); err != nil {
+			return nil, fmt.Errorf("scan schedule: %w", err)
+		}
+		items = append(items, s)
+	}
+	if items == nil {
+		items = []model.TaskSchedule{}
+	}
+	return items, rows.Err()
+}
+
+func (r *ScheduleRepository) Create(taskID string, input model.CreateTaskScheduleInput) (*model.TaskSchedule, error) {
+	id := input.ID
+	if id == "" {
+		id = model.NewID()
+	}
+	var maxSort float64
+	_ = r.db.QueryRow("SELECT COALESCE(MAX(sort_order), 0) FROM task_schedules WHERE task_id = ?", taskID).Scan(&maxSort)
+
+	_, err := r.db.Exec(
+		"INSERT INTO task_schedules (id, task_id, when_date, start_time, end_time, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+		id, taskID, input.WhenDate, input.StartTime, input.EndTime, maxSort+1024)
+	if err != nil {
+		return nil, fmt.Errorf("create schedule: %w", err)
+	}
+
+	var s model.TaskSchedule
+	_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id).
+		Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
+	logChange(r.changeLog, "schedule", id, "create", nil, &s, "", "")
+	return &s, nil
+}
+
+func (r *ScheduleRepository) Update(id string, input model.UpdateTaskScheduleInput) (*model.TaskSchedule, error) {
+	if input.WhenDate != nil {
+		if _, err := r.db.Exec("UPDATE task_schedules SET when_date = ? WHERE id = ?", *input.WhenDate, id); err != nil {
+			return nil, fmt.Errorf("update schedule when_date: %w", err)
+		}
+	}
+	if _, ok := input.Raw["start_time"]; ok {
+		if _, err := r.db.Exec("UPDATE task_schedules SET start_time = ? WHERE id = ?", input.StartTime, id); err != nil {
+			return nil, fmt.Errorf("update schedule start_time: %w", err)
+		}
+	}
+	if _, ok := input.Raw["end_time"]; ok {
+		if _, err := r.db.Exec("UPDATE task_schedules SET end_time = ? WHERE id = ?", input.EndTime, id); err != nil {
+			return nil, fmt.Errorf("update schedule end_time: %w", err)
+		}
+	}
+	if input.SortOrder != nil {
+		if _, err := r.db.Exec("UPDATE task_schedules SET sort_order = ? WHERE id = ?", *input.SortOrder, id); err != nil {
+			return nil, fmt.Errorf("update schedule sort_order: %w", err)
+		}
+	}
+	if input.Completed != nil {
+		v := 0
+		if *input.Completed {
+			v = 1
+		}
+		if _, err := r.db.Exec("UPDATE task_schedules SET completed = ? WHERE id = ?", v, id); err != nil {
+			return nil, fmt.Errorf("update schedule completed: %w", err)
+		}
+	}
+
+	var s model.TaskSchedule
+	err := r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id).
+		Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err == nil {
+		logChange(r.changeLog, "schedule", id, "update", nil, &s, "", "")
+	}
+	return &s, err
+}
+
+func (r *ScheduleRepository) Delete(id string) error {
+	_, err := r.db.Exec("DELETE FROM task_schedules WHERE id = ?", id)
+	if err == nil {
+		logChange(r.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", "")
+	}
+	return err
+}
+
+func (r *ScheduleRepository) Reorder(items []model.SimpleReorderItem) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, item := range items {
+		_, err := tx.Exec("UPDATE task_schedules SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
+		if err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Log sort_order changes after successful commit
+	for _, item := range items {
+		var s model.TaskSchedule
+		_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", item.ID).
+			Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
+		logChange(r.changeLog, "schedule", item.ID, "update", []string{"sort_order"}, &s, "", "")
+	}
+	return nil
+}
+
+// GetTaskIDForSchedule returns the task_id owning the given schedule entry.
+func (r *ScheduleRepository) GetTaskIDForSchedule(scheduleID string) (string, error) {
+	var taskID string
+	err := r.db.QueryRow("SELECT task_id FROM task_schedules WHERE id = ?", scheduleID).Scan(&taskID)
+	if err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+// CountByTask returns the number of schedule entries for a task.
+func (r *ScheduleRepository) CountByTask(taskID string) (int, error) {
+	var count int
+	err := r.db.QueryRow("SELECT COUNT(*) FROM task_schedules WHERE task_id = ?", taskID).Scan(&count)
+	return count, err
+}
+
+// SyncPrimary updates tasks.when_date from the first schedule entry.
+// NOTE: This method does not log a "task" change because the pull client expects
+// a full task snapshot, and ScheduleRepository doesn't have access to TaskRepository.
+// The caller (schedule handler) already triggers task cache invalidation through other paths.
+func (r *ScheduleRepository) SyncPrimary(taskID string) error {
+	var whenDate sql.NullString
+
+	err := r.db.QueryRow(
+		"SELECT when_date FROM task_schedules WHERE task_id = ? ORDER BY sort_order ASC LIMIT 1",
+		taskID).Scan(&whenDate)
+
+	if err == sql.ErrNoRows {
+		_, err = r.db.Exec("UPDATE tasks SET when_date = NULL, updated_at = datetime('now') WHERE id = ?", taskID)
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("sync primary: %w", err)
+	}
+
+	_, err = r.db.Exec(
+		"UPDATE tasks SET when_date = ?, updated_at = datetime('now') WHERE id = ?",
+		whenDate.String, taskID)
+	return err
+}
+
+// GetScheduleFields reads the current when_date and start_time for a schedule entry.
+func (r *ScheduleRepository) GetScheduleFields(id string, whenDate *string, startTime **string) error {
+	var wd string
+	var st sql.NullString
+	err := r.db.QueryRow("SELECT when_date, start_time FROM task_schedules WHERE id = ?", id).Scan(&wd, &st)
+	if err != nil {
+		return err
+	}
+	*whenDate = wd
+	if st.Valid {
+		s := st.String
+		*startTime = &s
+	} else {
+		*startTime = nil
+	}
+	return nil
+}
+
+// HasDuplicateTimelessDate checks whether another timeless entry with the same date exists for this task.
+// excludeID is the schedule entry being changed (pass "" for new entries).
+func (r *ScheduleRepository) HasDuplicateTimelessDate(taskID, whenDate, excludeID string) (bool, error) {
+	if whenDate == "someday" {
+		return false, nil
+	}
+	var count int
+	err := r.db.QueryRow(
+		"SELECT COUNT(*) FROM task_schedules WHERE task_id = ? AND when_date = ? AND start_time IS NULL AND id != ?",
+		taskID, whenDate, excludeID).Scan(&count)
+	return count > 0, err
+}
+
+// CreateFirstEntry creates a single schedule entry for a task (used by scheduler for repeat instances).
+func (r *ScheduleRepository) CreateFirstEntry(taskID, date string) error {
+	id := model.NewID()
+	_, err := r.db.Exec(
+		"INSERT INTO task_schedules (id, task_id, when_date, sort_order) VALUES (?, ?, ?, 0)",
+		id, taskID, date)
+	if err == nil {
+		var s model.TaskSchedule
+		_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id).
+			Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
+		logChange(r.changeLog, "schedule", id, "create", nil, &s, "", "")
+	}
+	return err
+}
+
+// CleanupOnTaskDone completes past and today's uncompleted schedule entries
+// and deletes future + someday uncompleted entries for a task. Called when a
+// task is completed, canceled, or marked won't do.
+func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Mark past and today's uncompleted entries as completed
+	if _, err = tx.Exec(
+		"UPDATE task_schedules SET completed = 1 WHERE task_id = ? AND when_date <= ? AND when_date != 'someday' AND completed = 0",
+		taskID, today,
+	); err != nil {
+		return fmt.Errorf("complete past/today schedules: %w", err)
+	}
+
+	// Collect IDs of future/someday entries before deleting them (for change log)
+	rows, err := tx.Query(
+		"SELECT id FROM task_schedules WHERE task_id = ? AND (when_date > ? OR when_date = 'someday') AND completed = 0",
+		taskID, today,
+	)
+	if err != nil {
+		return fmt.Errorf("query future schedule ids: %w", err)
+	}
+	var deletedIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan future schedule id: %w", err)
+		}
+		deletedIDs = append(deletedIDs, id)
+	}
+	rows.Close()
+
+	// Delete future (after today) and someday uncompleted entries
+	if _, err = tx.Exec(
+		"DELETE FROM task_schedules WHERE task_id = ? AND (when_date > ? OR when_date = 'someday') AND completed = 0",
+		taskID, today,
+	); err != nil {
+		return fmt.Errorf("delete future schedules: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Log completed entries
+	completedRows, err := r.db.Query(
+		"SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE task_id = ? AND when_date <= ? AND when_date != 'someday' AND completed = 1",
+		taskID, today,
+	)
+	if err == nil {
+		defer completedRows.Close()
+		for completedRows.Next() {
+			var s model.TaskSchedule
+			if err := completedRows.Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder); err != nil {
+				break
+			}
+			logChange(r.changeLog, "schedule", s.ID, "update", []string{"completed"}, &s, "", "")
+		}
+	}
+
+	// Log deleted entries
+	for _, id := range deletedIDs {
+		logChange(r.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", "")
+	}
+
+	return nil
+}
+
+// SyncFirstScheduleDate updates the first schedule entry's when_date to match tasks.when_date.
+// This is called when when_date is updated via PATCH /tasks/{id}.
+func (r *ScheduleRepository) SyncFirstScheduleDate(taskID string, date *string) error {
+	if date == nil {
+		// when_date set to NULL — delete all schedules
+		_, err := r.db.Exec("DELETE FROM task_schedules WHERE task_id = ?", taskID)
+		return err
+	}
+	// Check if there's a first schedule entry
+	var schedID string
+	var startTime sql.NullString
+	err := r.db.QueryRow(
+		"SELECT id, start_time FROM task_schedules WHERE task_id = ? ORDER BY sort_order ASC LIMIT 1",
+		taskID).Scan(&schedID, &startTime)
+	if err == sql.ErrNoRows {
+		// Create one
+		return r.CreateFirstEntry(taskID, *date)
+	}
+	if err != nil {
+		return err
+	}
+	// Block duplicate timeless dates
+	if !startTime.Valid && *date != "someday" {
+		dup, err := r.HasDuplicateTimelessDate(taskID, *date, schedID)
+		if err != nil {
+			return err
+		}
+		if dup {
+			return fmt.Errorf("duplicate timeless date")
+		}
+	}
+	// Update existing first entry
+	_, err = r.db.Exec("UPDATE task_schedules SET when_date = ? WHERE id = ?", *date, schedID)
+	return err
+}

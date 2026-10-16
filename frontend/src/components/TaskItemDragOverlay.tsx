@@ -1,0 +1,96 @@
+import { Check, Calendar, Flag, StickyNote, Link, Paperclip, RefreshCw } from 'lucide-react'
+import type { Task } from '../api/types'
+import { useSettings } from '../hooks/queries'
+import { getTagPillClasses, getTagIconClass } from '../lib/tag-colors'
+import { isReservedTag, isObsidianTag } from '../lib/reserved-tags'
+import { ReservedTagIcon } from './ReservedTagIcon'
+import { TaskStatusIcon } from './TaskStatusIcon'
+
+interface TaskItemDragOverlayProps {
+  task: Task
+  count?: number
+}
+
+export function TaskItemDragOverlay({ task, count = 1 }: TaskItemDragOverlayProps) {
+  const { data: settings } = useSettings()
+  const isCompleted = task.status === 'completed'
+  const isDone = task.status !== 'open'
+
+  return (
+    <div className="relative">
+      {count > 1 && (
+        <>
+          <div className="absolute inset-0 translate-x-1 translate-y-1 rounded-lg bg-neutral-200 dark:bg-neutral-700" />
+          <div className="absolute -right-2 -top-2 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">
+            {count}
+          </div>
+        </>
+      )}
+    <div className="relative rounded-lg border border-neutral-200 bg-white px-3 py-2 shadow-lg dark:border-neutral-600 dark:bg-neutral-800">
+      <div className="flex items-center gap-3">
+        {task.status === 'canceled' || task.status === 'wont_do' ? (
+          <TaskStatusIcon status={task.status} />
+        ) : (
+          <div
+            className={`flex h-5 w-5 items-center justify-center rounded-full border-2 ${
+              isCompleted
+                ? 'border-red-500 bg-red-500'
+                : task.high_priority
+                  ? 'border-red-500 dark:border-red-500'
+                  : 'border-neutral-300 dark:border-neutral-500'
+            }`}
+          >
+            {isCompleted && <Check size={12} className="text-white" />}
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span
+              className={`text-sm ${
+                isDone
+                  ? 'text-neutral-400 line-through'
+                  : 'text-neutral-900 dark:text-neutral-100'
+              } ${settings?.privacy_mode ? 'privacy-blur' : ''}`}
+            >
+              {task.title}
+            </span>
+            {task.tags.filter((t) => isReservedTag(t.title)).map((tag) => (
+              <ReservedTagIcon key={tag.id} tagTitle={tag.title} size={14} className={getTagIconClass(tag.color) || (isObsidianTag(tag.title) ? 'text-purple-500' : 'text-neutral-400')} />
+            ))}
+            {task.tags.filter((t) => !isReservedTag(t.title)).map((tag) => (
+              <span
+                key={tag.id}
+                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs ${getTagPillClasses(tag.color)}`}
+              >
+                {tag.title}
+              </span>
+            ))}
+            {(task.has_notes || task.has_links || task.has_files || task.has_repeat_rule) && (
+              <span className="flex items-center gap-1.5 text-neutral-400">
+                {task.has_repeat_rule && <RefreshCw size={12} className="text-red-500" />}
+                {task.has_notes && <StickyNote size={12} />}
+                {task.has_links && !task.tags.some((t) => isReservedTag(t.title)) && <Link size={12} />}
+                {task.has_files && <Paperclip size={12} />}
+              </span>
+            )}
+            <div className="ml-auto flex items-center gap-2 text-xs text-neutral-400">
+              {task.deadline && (
+                <span className="flex items-center gap-1 text-red-500">
+                  <Flag size={12} />
+                  {task.deadline}
+                </span>
+              )}
+              {task.when_date && (
+                <span className="flex items-center gap-1">
+                  <Calendar size={12} />
+                  {task.when_date}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+  )
+}
