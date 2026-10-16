@@ -17,7 +17,10 @@ const UserIDKey contextKey = "userID"
 // UserLookupFunc returns the user ID for the API key holder.
 type UserLookupFunc func() (string, error)
 
-func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc) func(http.Handler) http.Handler {
+// UserExistsFunc reports whether a user with the given ID exists.
+type UserExistsFunc func(id string) (bool, error)
+
+func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExistsFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// API key check runs in all auth modes (except "none")
@@ -64,8 +67,7 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc) func(http.Handler)
 				ctx := context.WithValue(r.Context(), UserIDKey, userHeader)
 				next.ServeHTTP(w, r.WithContext(ctx))
 
-			default: // "builtin"
-				// JWT cookie auth
+			default: // "builtin" and "oidc": JWT cookie auth
 				cookie, err := r.Cookie("token")
 				if err != nil {
 					http.Error(w, `{"error":"unauthorized","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
@@ -74,7 +76,7 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc) func(http.Handler)
 
 				jwtToken, err := jwt.Parse(cookie.Value, func(t *jwt.Token) (interface{}, error) {
 					return []byte(cfg.JWTSecret), nil
-				})
+				}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired())
 				if err != nil || !jwtToken.Valid {
 					http.Error(w, `{"error":"invalid token","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
 					return
@@ -86,7 +88,24 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc) func(http.Handler)
 					return
 				}
 
+				// OIDC state cookies are signed with the same secret but are
+				// not session tokens; never accept them as authentication.
+				if typ, _ := claims["typ"].(string); typ == "oidc_state" {
+					http.Error(w, `{"error":"invalid token","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					return
+				}
+
 				sub, _ := claims["sub"].(string)
+				if sub == "" {
+					http.Error(w, `{"error":"invalid claims","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					return
+				}
+				exists, err := userExists(sub)
+				if err != nil || !exists {
+					http.Error(w, `{"error":"invalid claims","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					return
+				}
+
 				ctx := context.WithValue(r.Context(), UserIDKey, sub)
 				next.ServeHTTP(w, r.WithContext(ctx))
 			}

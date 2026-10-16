@@ -112,6 +112,9 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 					return "", nil
 				}
 				return u.ID, nil
+			}, func(id string) (bool, error) {
+				u, err := userRepo.GetByID(id)
+				return u != nil, err
 			}))
 
 			// SSE events
