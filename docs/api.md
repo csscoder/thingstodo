@@ -16,6 +16,8 @@ All endpoints return JSON. All mutations broadcast SSE events. Authentication vi
 }
 ```
 
+`5xx` responses always carry the generic body `{ "error": "internal error", "code": "INTERNAL" }`; the underlying cause is logged server-side and never included in the response.
+
 ### Duplicate Name Errors
 `POST` and `PATCH` for projects, areas, and tags return **409 Conflict** with code `DUPLICATE_NAME` if the title already exists.
 
@@ -1363,7 +1365,7 @@ Response (200):
 |--------|---------|
 | `applied` | Change was applied without conflict |
 | `conflict_resolved` | Change conflicted with server state (server was newer), but was still recorded for audit |
-| `error` | Change could not be applied; check `error` field for details |
+| `error` | Change could not be applied; check `error` field for details. Internal failures report the generic `internal error`; user-facing messages (validation, not found, duplicate name, unsupported entity/action) keep their own text |
 
 **Supported entities:** task, project, area, tag
 

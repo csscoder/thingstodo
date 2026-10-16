@@ -606,3 +606,38 @@ func TestSyncPushUpdateNonexistentTask(t *testing.T) {
 		t.Errorf("expected 'error', got %q", result.Results[0].Status)
 	}
 }
+
+func TestSyncPush_UnsupportedEntityMessageUnchanged(t *testing.T) {
+	client, _, _ := setupSyncRouter(t)
+
+	body := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{
+			{
+				"entity":            "bogus",
+				"entity_id":         "x1",
+				"action":            "create",
+				"data":              map[string]interface{}{},
+				"fields":            []string{},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+		},
+	}
+
+	resp := client.Post("/api/sync/push", body)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	r := result.Results[0]
+	if r.Status != "error" {
+		t.Errorf("expected status 'error', got %q", r.Status)
+	}
+	if r.Error != "unsupported entity type: bogus" {
+		t.Errorf("expected error %q, got %q", "unsupported entity type: bogus", r.Error)
+	}
+}

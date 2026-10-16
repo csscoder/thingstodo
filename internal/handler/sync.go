@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -384,7 +385,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 		task, err := h.tasks.Create(input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		_ = task
@@ -488,7 +489,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 						h.cleanupSchedules(change.EntityID)
 						if _, cErr := h.tasks.Complete(change.EntityID); cErr != nil {
 							result.Status = "error"
-							result.Error = cErr.Error()
+							result.Error = syncErrorMessage(cErr)
 							return result
 						}
 						if h.scheduler != nil {
@@ -500,7 +501,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 						h.cleanupSchedules(change.EntityID)
 						if _, cErr := h.tasks.Cancel(change.EntityID); cErr != nil {
 							result.Status = "error"
-							result.Error = cErr.Error()
+							result.Error = syncErrorMessage(cErr)
 							return result
 						}
 						if h.scheduler != nil {
@@ -511,7 +512,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 					case "open":
 						if _, cErr := h.tasks.Reopen(change.EntityID); cErr != nil {
 							result.Status = "error"
-							result.Error = cErr.Error()
+							result.Error = syncErrorMessage(cErr)
 							return result
 						}
 						result.Status = status
@@ -520,7 +521,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 						h.cleanupSchedules(change.EntityID)
 						if _, cErr := h.tasks.WontDo(change.EntityID); cErr != nil {
 							result.Status = "error"
-							result.Error = cErr.Error()
+							result.Error = syncErrorMessage(cErr)
 							return result
 						}
 						if h.scheduler != nil {
@@ -535,7 +536,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 					// Soft-delete
 					if cErr := h.tasks.Delete(change.EntityID); cErr != nil {
 						result.Status = "error"
-						result.Error = cErr.Error()
+						result.Error = syncErrorMessage(cErr)
 						return result
 					}
 					result.Status = status
@@ -544,7 +545,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 				// Restore (deleted_at = null)
 				if _, cErr := h.tasks.Restore(change.EntityID); cErr != nil {
 					result.Status = "error"
-					result.Error = cErr.Error()
+					result.Error = syncErrorMessage(cErr)
 					return result
 				}
 				result.Status = status
@@ -556,7 +557,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			_, err = h.tasks.Update(change.EntityID, input)
 			if err != nil {
 				result.Status = "error"
-				result.Error = err.Error()
+				result.Error = syncErrorMessage(err)
 				return result
 			}
 		}
@@ -566,7 +567,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 		err := h.tasks.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -613,7 +614,7 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 		_, err = h.projects.Create(input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -674,7 +675,7 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 			_, err = h.projects.Update(change.EntityID, input)
 			if err != nil {
 				result.Status = "error"
-				result.Error = err.Error()
+				result.Error = syncErrorMessage(err)
 				return result
 			}
 		}
@@ -684,7 +685,7 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 		err := h.projects.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -717,7 +718,7 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 		_, err = h.areas.Create(input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -753,7 +754,7 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 		_, err = h.areas.Update(change.EntityID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = status
@@ -762,7 +763,7 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 		err := h.areas.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -799,7 +800,7 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 		_, err = h.tags.Create(input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -839,7 +840,7 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 		_, err := h.tags.Update(change.EntityID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -848,7 +849,7 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 		err := h.tags.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -889,7 +890,7 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 		_, err := h.schedules.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -931,7 +932,7 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 		_, err := h.schedules.Update(change.EntityID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -940,7 +941,7 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 		err := h.schedules.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -972,7 +973,7 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 		_, err := h.checklist.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -998,7 +999,7 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 		_, err := h.checklist.Update(change.EntityID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1007,7 +1008,7 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 		err := h.checklist.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1047,7 +1048,7 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 		_, err := h.attachments.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1056,7 +1057,7 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 		err := h.attachments.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1093,7 +1094,7 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 		_, err := h.reminders.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1102,7 +1103,7 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 		err := h.reminders.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1134,7 +1135,7 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 		_, err := h.headings.Create(projectID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1156,7 +1157,7 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 		_, err := h.headings.Update(change.EntityID, input)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1165,7 +1166,7 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 		err := h.headings.Delete(change.EntityID)
 		if err != nil {
 			result.Status = "error"
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 			return result
 		}
 		result.Status = "applied"
@@ -1178,6 +1179,20 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 }
 
 // --- Helpers ---
+
+// syncErrorMessage maps a sync change error to a client-safe message.
+// User-facing duplicate-name sentinels keep their own text; every other
+// error is logged server-side and replaced with a generic message so
+// internal details (SQLite errors, schema names) never reach clients.
+func syncErrorMessage(err error) string {
+	if errors.Is(err, repository.ErrDuplicateProjectName) ||
+		errors.Is(err, repository.ErrDuplicateAreaName) ||
+		errors.Is(err, repository.ErrDuplicateTagName) {
+		return err.Error()
+	}
+	log.Printf("sync change error: %v", err)
+	return "internal error"
+}
 
 func stringFromData(data map[string]interface{}, key string) string {
 	if v, ok := data[key]; ok && v != nil {

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -12,6 +13,13 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg, code string) {
+	if status >= http.StatusInternalServerError {
+		// Never leak internal error text (driver messages, schema details) to
+		// clients; log it server-side and send the generic body instead.
+		log.Printf("http %d: %s", status, msg)
+		writeJSON(w, status, map[string]string{"error": "internal error", "code": "INTERNAL"})
+		return
+	}
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
 
