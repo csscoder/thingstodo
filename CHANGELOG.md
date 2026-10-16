@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- **Attachment path traversal** — attachment creates over JSON and sync accept only `link`; files are attached solely via multipart upload, and download/delete resolve paths through `os.Root` so `../` names cannot escape the attachments directory
+- **JWT authentication bypass** — session JWTs must be HS256-signed with `exp` set and a `sub` matching an existing user; OIDC state cookies (`typ=oidc_state`) are no longer accepted as session tokens
+- **OIDC account takeover** — **Breaking:** `OIDC_ALLOWED_EMAIL` is now required in `AUTH_MODE=oidc`; login proceeds only for that email with `email_verified: true`, and userinfo claims are trusted only when its `sub` matches the ID token
+- **Panic recovery and wrong-typed sync fields** — a recover middleware returns a generic 500 JSON body instead of dropping the connection, and sync push validates field types per change, returning an `error` result for wrong-typed values without aborting the batch
+- **Internal error leaks** — 5xx responses and sync per-change errors now return `internal error` instead of SQLite/internal messages; the original error is logged server-side
+- **Request body limit** — request bodies are capped at 10 MiB (413 when exceeded), except the multipart upload route which keeps its `MAX_UPLOAD_SIZE` cap
+- **Secure session cookies** — `token` and `oidc_state` cookies are marked `Secure` when the request is TLS or `X-Forwarded-Proto: https`
+- **Login rate limiting** — failed password logins are limited per client IP (10 failures per 15 minutes → 429), with `X-Forwarded-For` honored only from loopback/private peers
+- **Script-scheme links** — link attachments with `javascript:`, `data:`, `vbscript:`, or `file:` schemes (or unparseable URLs) are rejected with 400 from REST and an `error` result from sync
+
 ## [0.13.2] - 2026-04-08
 
 ### Fixed

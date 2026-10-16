@@ -84,6 +84,8 @@ Open [http://localhost:2999](http://localhost:2999) and log in with the password
 
 For use behind an authenticating reverse proxy (Authelia, Authentik, etc.).
 
+> **Warning:** `AUTH_MODE=proxy` trusts the `AUTH_PROXY_HEADER` value unconditionally. Use it only when the app port is reachable solely through the authenticating proxy — e.g. publish the container as `127.0.0.1:2999:2999` in compose instead of `2999:2999` — so clients cannot bypass the proxy and forge the header. Likewise, never use `AUTH_MODE=none` on a reachable host: it disables authentication entirely.
+
 | Variable | Default | Description |
 |---|---|---|
 | `AUTH_PROXY_HEADER` | `Remote-User` | Header containing the authenticated username |
