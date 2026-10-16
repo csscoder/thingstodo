@@ -348,8 +348,11 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			Notes: stringFromData(change.Data, "notes"),
 		}
 		if v, ok := change.Data["when_date"]; ok && v != nil {
-			s := v.(string)
-			input.WhenDate = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "when_date")
+			}
+			input.WhenDate = s
 		}
 		if v, ok := change.Data["high_priority"]; ok {
 			if b, ok := v.(bool); ok {
@@ -357,20 +360,32 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			}
 		}
 		if v, ok := change.Data["deadline"]; ok && v != nil {
-			s := v.(string)
-			input.Deadline = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "deadline")
+			}
+			input.Deadline = s
 		}
 		if v, ok := change.Data["project_id"]; ok && v != nil {
-			s := v.(string)
-			input.ProjectID = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "project_id")
+			}
+			input.ProjectID = s
 		}
 		if v, ok := change.Data["area_id"]; ok && v != nil {
-			s := v.(string)
-			input.AreaID = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "area_id")
+			}
+			input.AreaID = s
 		}
 		if v, ok := change.Data["heading_id"]; ok && v != nil {
-			s := v.(string)
-			input.HeadingID = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "heading_id")
+			}
+			input.HeadingID = s
 		}
 		if v, ok := change.Data["tag_ids"]; ok && v != nil {
 			if arr, ok := v.([]interface{}); ok {
@@ -440,8 +455,11 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 				input.Notes = &s
 			case "when_date":
 				if val != nil {
-					s := val.(string)
-					input.WhenDate = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "when_date")
+					}
+					input.WhenDate = s
 				}
 			case "high_priority":
 				if b, ok := val.(bool); ok {
@@ -449,23 +467,35 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 				}
 			case "deadline":
 				if val != nil {
-					s := val.(string)
-					input.Deadline = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "deadline")
+					}
+					input.Deadline = s
 				}
 			case "project_id":
 				if val != nil {
-					s := val.(string)
-					input.ProjectID = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "project_id")
+					}
+					input.ProjectID = s
 				}
 			case "area_id":
 				if val != nil {
-					s := val.(string)
-					input.AreaID = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "area_id")
+					}
+					input.AreaID = s
 				}
 			case "heading_id":
 				if val != nil {
-					s := val.(string)
-					input.HeadingID = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "heading_id")
+					}
+					input.HeadingID = s
 				}
 			case "tag_ids":
 				if val != nil {
@@ -599,16 +629,25 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 			Notes: stringFromData(change.Data, "notes"),
 		}
 		if v, ok := change.Data["area_id"]; ok && v != nil {
-			s := v.(string)
-			input.AreaID = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "area_id")
+			}
+			input.AreaID = s
 		}
 		if v, ok := change.Data["when_date"]; ok && v != nil {
-			s := v.(string)
-			input.WhenDate = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "when_date")
+			}
+			input.WhenDate = s
 		}
 		if v, ok := change.Data["deadline"]; ok && v != nil {
-			s := v.(string)
-			input.Deadline = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "deadline")
+			}
+			input.Deadline = s
 		}
 
 		_, err = h.projects.Create(input)
@@ -650,23 +689,35 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 				input.Notes = &s
 			case "area_id":
 				if val != nil {
-					s := val.(string)
-					input.AreaID = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "area_id")
+					}
+					input.AreaID = s
 				}
 			case "status":
 				if val != nil {
-					s := val.(string)
-					input.Status = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "status")
+					}
+					input.Status = s
 				}
 			case "when_date":
 				if val != nil {
-					s := val.(string)
-					input.WhenDate = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "when_date")
+					}
+					input.WhenDate = s
 				}
 			case "deadline":
 				if val != nil {
-					s := val.(string)
-					input.Deadline = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "deadline")
+					}
+					input.Deadline = s
 				}
 			}
 		}
@@ -794,8 +845,11 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 			Title: stringFromData(change.Data, "title"),
 		}
 		if v, ok := change.Data["parent_tag_id"]; ok && v != nil {
-			s := v.(string)
-			input.ParentTagID = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "parent_tag_id")
+			}
+			input.ParentTagID = s
 		}
 		_, err = h.tags.Create(input)
 		if err != nil {
@@ -822,13 +876,19 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 				input.Title = &s
 			case "color":
 				if val != nil {
-					s := val.(string)
-					input.Color = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "color")
+					}
+					input.Color = s
 				}
 			case "parent_tag_id":
 				if val != nil {
-					s := val.(string)
-					input.ParentTagID = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "parent_tag_id")
+					}
+					input.ParentTagID = s
 				}
 			case "sort_order":
 				if f, ok := val.(float64); ok {
@@ -880,12 +940,18 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 			WhenDate: stringFromData(change.Data, "when_date"),
 		}
 		if v, ok := change.Data["start_time"]; ok && v != nil {
-			s := v.(string)
-			input.StartTime = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "start_time")
+			}
+			input.StartTime = s
 		}
 		if v, ok := change.Data["end_time"]; ok && v != nil {
-			s := v.(string)
-			input.EndTime = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "end_time")
+			}
+			input.EndTime = s
 		}
 		_, err := h.schedules.Create(taskID, input)
 		if err != nil {
@@ -906,18 +972,27 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 			switch field {
 			case "when_date":
 				if val != nil {
-					s := val.(string)
-					input.WhenDate = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "when_date")
+					}
+					input.WhenDate = s
 				}
 			case "start_time":
 				if val != nil {
-					s := val.(string)
-					input.StartTime = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "start_time")
+					}
+					input.StartTime = s
 				}
 			case "end_time":
 				if val != nil {
-					s := val.(string)
-					input.EndTime = &s
+					s, ok := optString(val)
+					if !ok {
+						return fieldTypeError(result, "end_time")
+					}
+					input.EndTime = s
 				}
 			case "completed":
 				if b, ok := val.(bool); ok {
@@ -1088,8 +1163,11 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 			Value: int(floatFromData(change.Data, "value")),
 		}
 		if v, ok := change.Data["exact_at"]; ok && v != nil {
-			s := v.(string)
-			input.ExactAt = &s
+			s, ok := optString(v)
+			if !ok {
+				return fieldTypeError(result, "exact_at")
+			}
+			input.ExactAt = s
 		}
 		_, err := h.reminders.Create(taskID, input)
 		if err != nil {
@@ -1192,6 +1270,29 @@ func syncErrorMessage(err error) string {
 	}
 	log.Printf("sync change error: %v", err)
 	return "internal error"
+}
+
+// optString converts a sync data value into an optional string field.
+// nil stays accepted ((nil, true) — the web UI sends nulls to clear values);
+// any other non-string type is rejected with (nil, false) so the caller can
+// report a per-change error instead of panicking.
+func optString(v interface{}) (*string, bool) {
+	switch s := v.(type) {
+	case nil:
+		return nil, true
+	case string:
+		return &s, true
+	default:
+		return nil, false
+	}
+}
+
+// fieldTypeError marks a sync change result as failed because a field had an
+// unexpected JSON type, so the rest of the batch continues.
+func fieldTypeError(result SyncPushResult, field string) SyncPushResult {
+	result.Status = "error"
+	result.Error = "invalid type for field " + field
+	return result
 }
 
 func stringFromData(data map[string]interface{}, key string) string {

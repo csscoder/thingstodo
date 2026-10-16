@@ -27,6 +27,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 
 	r := chi.NewRouter()
+	r.Use(mw.Recover)
 	r.Use(mw.Logger)
 
 	// Repositories

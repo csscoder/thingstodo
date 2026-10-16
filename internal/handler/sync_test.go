@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
@@ -639,5 +640,119 @@ func TestSyncPush_UnsupportedEntityMessageUnchanged(t *testing.T) {
 	}
 	if r.Error != "unsupported entity type: bogus" {
 		t.Errorf("expected error %q, got %q", "unsupported entity type: bogus", r.Error)
+	}
+}
+
+func TestSyncPush_WrongTypeIsPerChangeError(t *testing.T) {
+	client, _, taskRepo := setupSyncRouter(t)
+
+	body := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{
+			{
+				"entity":    "task",
+				"entity_id": "sync-wrongtype-1",
+				"action":    "create",
+				"data": map[string]interface{}{
+					"title":     "Wrong when_date type",
+					"when_date": 123,
+				},
+				"fields":            []string{"title", "when_date"},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+			{
+				"entity":            "task",
+				"entity_id":         "sync-wrongtype-2",
+				"action":            "create",
+				"data":              map[string]interface{}{"title": "Valid task"},
+				"fields":            []string{"title"},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+			{
+				"entity":            "task",
+				"entity_id":         "sync-wrongtype-2",
+				"action":            "update",
+				"data":              map[string]interface{}{"project_id": true},
+				"fields":            []string{"project_id"},
+				"client_updated_at": "2099-01-01T00:00:00Z",
+			},
+		},
+	}
+
+	resp := client.Post("/api/sync/push", body)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+
+	if len(result.Results) != 3 {
+		t.Fatalf("expected 3 results, got %d (body: %s)", len(result.Results), string(resp.Body))
+	}
+
+	if result.Results[0].Status != "error" {
+		t.Errorf("results[0]: expected status 'error', got %q", result.Results[0].Status)
+	}
+	if !strings.Contains(result.Results[0].Error, "when_date") {
+		t.Errorf("results[0]: expected error mentioning when_date, got %q", result.Results[0].Error)
+	}
+
+	if result.Results[1].Status != "applied" {
+		t.Errorf("results[1]: expected status 'applied', got %q (error: %s)", result.Results[1].Status, result.Results[1].Error)
+	}
+	task, err := taskRepo.GetByID("sync-wrongtype-2")
+	if err != nil || task == nil {
+		t.Errorf("results[1]: expected task sync-wrongtype-2 to exist, got task=%v err=%v", task, err)
+	}
+
+	if result.Results[2].Status != "error" {
+		t.Errorf("results[2]: expected status 'error', got %q", result.Results[2].Status)
+	}
+	if !strings.Contains(result.Results[2].Error, "project_id") {
+		t.Errorf("results[2]: expected error mentioning project_id, got %q", result.Results[2].Error)
+	}
+}
+
+func TestSyncPush_NullOptionalFieldsAccepted(t *testing.T) {
+	client, _, _ := setupSyncRouter(t)
+
+	body := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{
+			{
+				"entity":    "task",
+				"entity_id": "sync-null-1",
+				"action":    "create",
+				"data": map[string]interface{}{
+					"title":      "Null optional fields",
+					"deadline":   nil,
+					"project_id": nil,
+				},
+				"fields":            []string{"title", "deadline", "project_id"},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+			{
+				"entity":            "task",
+				"entity_id":         "sync-null-1",
+				"action":            "update",
+				"data":              map[string]interface{}{"deadline": nil, "project_id": nil},
+				"fields":            []string{"deadline", "project_id"},
+				"client_updated_at": "2099-01-01T00:00:00Z",
+			},
+		},
+	}
+
+	resp := client.Post("/api/sync/push", body)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+
+	if len(result.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d (body: %s)", len(result.Results), string(resp.Body))
+	}
+	for i, r := range result.Results {
+		if r.Status != "applied" {
+			t.Errorf("results[%d]: expected status 'applied', got %q (error: %s)", i, r.Status, r.Error)
+		}
 	}
 }
