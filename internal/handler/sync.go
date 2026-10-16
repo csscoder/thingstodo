@@ -280,7 +280,7 @@ func (h *SyncHandler) Push(w http.ResponseWriter, r *http.Request) {
 
 	var req SyncPushRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 

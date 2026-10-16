@@ -32,7 +32,7 @@ func (h *ChecklistHandler) Create(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "id")
 	var input model.CreateChecklistInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.Title == "" {
@@ -52,7 +52,7 @@ func (h *ChecklistHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var input model.UpdateChecklistInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	item, err := h.repo.Update(id, input)

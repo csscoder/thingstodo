@@ -18,6 +18,15 @@ All endpoints return JSON. All mutations broadcast SSE events. Authentication vi
 
 `5xx` responses always carry the generic body `{ "error": "internal error", "code": "INTERNAL" }`; the underlying cause is logged server-side and never included in the response.
 
+### Request Body Limit
+JSON request bodies are capped at 10 MiB (10485760 bytes), regardless of `Content-Type`. Larger bodies are rejected before decoding with **413 Payload Too Large**:
+
+```json
+{ "error": "request body too large", "code": "BODY_TOO_LARGE" }
+```
+
+Exception: `POST /api/tasks/:id/attachments` with `multipart/form-data` is capped by `MAX_UPLOAD_SIZE` instead (see below); JSON link attachments on that route remain subject to the 10 MiB limit.
+
 ### Duplicate Name Errors
 `POST` and `PATCH` for projects, areas, and tags return **409 Conflict** with code `DUPLICATE_NAME` if the title already exists.
 
@@ -401,11 +410,12 @@ Response (200):
 ```
 
 ### POST /api/tasks/:id/attachments
-**For files:** multipart/form-data with `file` field
+**For files:** multipart/form-data with `file` field (capped by `MAX_UPLOAD_SIZE`, default 25 MiB)
 **For links:**
 ```json
 { "type": "link", "title": "string", "url": "string" }
 ```
+(JSON bodies on this route are capped at 10 MiB and return 413 `BODY_TOO_LARGE` beyond that.)
 
 Response (201): Attachment object
 

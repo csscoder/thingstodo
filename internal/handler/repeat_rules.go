@@ -38,7 +38,7 @@ func (h *RepeatRuleHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "id")
 	var input model.CreateRepeatRuleInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 

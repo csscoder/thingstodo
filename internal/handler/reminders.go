@@ -32,7 +32,7 @@ func (h *ReminderHandler) Create(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "id")
 	var input model.CreateReminderInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	switch input.Type {

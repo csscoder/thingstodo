@@ -31,7 +31,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 
@@ -113,4 +113,3 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) AuthConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"auth_mode": h.cfg.AuthMode})
 }
-

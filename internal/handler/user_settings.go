@@ -41,7 +41,7 @@ func (h *UserSettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var input model.UpdateUserSettingsInput
 	raw, err := decodeJSONWithRaw(r, &input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	input.Raw = raw

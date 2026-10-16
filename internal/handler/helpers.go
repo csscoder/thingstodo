@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 )
@@ -21,6 +22,17 @@ func writeError(w http.ResponseWriter, status int, msg, code string) {
 		return
 	}
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
+// writeDecodeError maps a request body decode failure to the right client
+// error: 413 when the body exceeded the MaxBytesReader limit, 400 otherwise.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var maxBytes *http.MaxBytesError
+	if errors.As(err, &maxBytes) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large", "BODY_TOO_LARGE")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
 }
 
 func decodeJSON(r *http.Request, v interface{}) error {

@@ -29,6 +29,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	r := chi.NewRouter()
 	r.Use(mw.Recover)
 	r.Use(mw.Logger)
+	r.Use(mw.BodyLimit(mw.MaxJSONBody))
 
 	// Repositories
 	changeLogRepo := repository.NewChangeLogRepository(db)

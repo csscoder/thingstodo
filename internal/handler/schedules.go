@@ -43,7 +43,7 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "id")
 	var input model.CreateTaskScheduleInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.WhenDate == "" {
@@ -106,7 +106,7 @@ func (h *ScheduleHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var input model.UpdateTaskScheduleInput
 	raw, err := decodeJSONWithRaw(r, &input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	input.Raw = raw
@@ -188,7 +188,7 @@ func (h *ScheduleHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "id")
 	var items []model.SimpleReorderItem
 	if err := decodeJSON(r, &items); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if err := h.repo.Reorder(items); err != nil {

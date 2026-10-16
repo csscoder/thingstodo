@@ -33,7 +33,7 @@ func (h *TagHandler) List(w http.ResponseWriter, r *http.Request) {
 func (h *TagHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var input model.CreateTagInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.Title == "" {
@@ -63,7 +63,7 @@ func (h *TagHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var input model.UpdateTagInput
 	raw, err := decodeJSONWithRaw(r, &input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	input.Raw = raw
@@ -98,7 +98,7 @@ func (h *TagHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 		Items []model.SimpleReorderItem `json:"items"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if err := h.repo.Reorder(body.Items); err != nil {

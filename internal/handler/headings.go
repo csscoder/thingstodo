@@ -32,7 +32,7 @@ func (h *HeadingHandler) Create(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "id")
 	var input model.CreateHeadingInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.Title == "" {
@@ -52,7 +52,7 @@ func (h *HeadingHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var input model.UpdateHeadingInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	heading, err := h.repo.Update(id, input)
@@ -73,7 +73,7 @@ func (h *HeadingHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 		Items []model.SimpleReorderItem `json:"items"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if err := h.repo.Reorder(body.Items); err != nil {

@@ -88,7 +88,7 @@ func (h *TaskHandler) Get(w http.ResponseWriter, r *http.Request) {
 func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var input model.CreateTaskInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.Title == "" {
@@ -129,7 +129,7 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var input model.UpdateTaskInput
 	raw, err := decodeJSONWithRaw(r, &input)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	input.Raw = raw
@@ -307,7 +307,7 @@ func (h *TaskHandler) Move(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var input model.MoveTaskInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	task, err := h.repo.Move(id, input)
@@ -328,7 +328,7 @@ func (h *TaskHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 		Items []model.ReorderItem `json:"items"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if err := h.repo.Reorder(body.Items); err != nil {
@@ -348,7 +348,7 @@ func (h *TaskHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 func (h *TaskHandler) BulkAction(w http.ResponseWriter, r *http.Request) {
 	var input model.BulkActionInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if len(input.TaskIDs) == 0 {

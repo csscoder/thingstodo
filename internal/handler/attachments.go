@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	mw "github.com/collinjanssen/thingstodo/internal/middleware"
 	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
 	"github.com/collinjanssen/thingstodo/internal/sse"
@@ -48,10 +49,13 @@ func (h *AttachmentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// JSON link attachment
+	// JSON link attachment. This route is exempt from the router-level
+	// BodyLimit (multipart uploads may exceed MaxJSONBody), so cap the JSON
+	// branch here itself.
+	r.Body = http.MaxBytesReader(w, r.Body, mw.MaxJSONBody)
 	var input model.CreateAttachmentInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.Type == "" {
@@ -129,7 +133,7 @@ func (h *AttachmentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var input model.UpdateAttachmentInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	att, err := h.repo.Update(id, input)

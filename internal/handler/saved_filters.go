@@ -58,7 +58,7 @@ func (h *SavedFilterHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	var input model.CreateSavedFilterInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.View == "" || input.Name == "" || input.Config == "" {

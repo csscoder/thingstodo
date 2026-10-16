@@ -29,7 +29,7 @@ func (h *PushSubscriptionHandler) Subscribe(w http.ResponseWriter, r *http.Reque
 	}
 	var input model.CreatePushSubscriptionInput
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.Endpoint == "" || input.P256dh == "" || input.Auth == "" {
@@ -49,7 +49,7 @@ func (h *PushSubscriptionHandler) Unsubscribe(w http.ResponseWriter, r *http.Req
 		Endpoint string `json:"endpoint"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON", "BAD_REQUEST")
+		writeDecodeError(w, err)
 		return
 	}
 	if input.Endpoint == "" {
