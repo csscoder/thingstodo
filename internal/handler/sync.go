@@ -1120,6 +1120,11 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 				input.FileSize = int64(f)
 			}
 		}
+		if err := normalizeLinkInput(&input); err != nil {
+			result.Status = "error"
+			result.Error = err.Error()
+			return result
+		}
 		_, err := h.attachments.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"

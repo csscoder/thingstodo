@@ -756,3 +756,96 @@ func TestSyncPush_NullOptionalFieldsAccepted(t *testing.T) {
 		}
 	}
 }
+
+// --- Attachment sync tests ---
+
+func pushAttachmentChange(t *testing.T, client *testutil.TestClient, entityID string, data map[string]interface{}) handler.SyncPushResponse {
+	t.Helper()
+
+	createResp := client.Post("/api/tasks", map[string]string{"title": "Attachment sync test"})
+	var created map[string]interface{}
+	createResp.JSON(t, &created)
+	data["task_id"] = created["id"].(string)
+
+	body := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{
+			{
+				"entity":            "attachment",
+				"entity_id":         entityID,
+				"action":            "create",
+				"data":              data,
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+		},
+	}
+
+	resp := client.Post("/api/sync/push", body)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	return result
+}
+
+func TestSyncPush_AttachmentFileTypeRejected(t *testing.T) {
+	client, _, _, db := setupSyncRouterWithDB(t)
+
+	result := pushAttachmentChange(t, client, "att-file-1", map[string]interface{}{
+		"type": "file",
+		"url":  "../secret.db",
+	})
+
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	if result.Results[0].Status != "error" {
+		t.Fatalf("expected status 'error', got %q", result.Results[0].Status)
+	}
+	if !strings.Contains(result.Results[0].Error, "only link attachments") {
+		t.Errorf("unexpected error message: %q", result.Results[0].Error)
+	}
+
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM attachments").Scan(&n); err != nil {
+		t.Fatalf("failed to count attachments: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected no attachment rows after rejection, got %d", n)
+	}
+}
+
+func TestSyncPush_AttachmentScriptSchemeRejected(t *testing.T) {
+	client, _, _, _ := setupSyncRouterWithDB(t)
+
+	result := pushAttachmentChange(t, client, "att-js-1", map[string]interface{}{
+		"type": "link",
+		"url":  "javascript:alert(1)",
+	})
+
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	if result.Results[0].Status != "error" {
+		t.Fatalf("expected status 'error', got %q", result.Results[0].Status)
+	}
+	if !strings.Contains(result.Results[0].Error, "url scheme not allowed") {
+		t.Errorf("unexpected error message: %q", result.Results[0].Error)
+	}
+}
+
+func TestSyncPush_AttachmentLinkApplied(t *testing.T) {
+	client, _, _, _ := setupSyncRouterWithDB(t)
+
+	result := pushAttachmentChange(t, client, "att-link-1", map[string]interface{}{
+		"url":   "https://x.test",
+		"title": "L",
+	})
+
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	if result.Results[0].Status != "applied" {
+		t.Fatalf("expected status 'applied', got %q (error: %s)", result.Results[0].Status, result.Results[0].Error)
+	}
+}

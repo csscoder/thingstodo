@@ -419,11 +419,12 @@ Response (200):
 ```
 
 ### POST /api/tasks/:id/attachments
-**For files:** multipart/form-data with `file` field (capped by `MAX_UPLOAD_SIZE`, default 25 MiB)
-**For links:**
+**For files:** multipart/form-data with `file` field (capped by `MAX_UPLOAD_SIZE`, default 25 MiB). This is the only way to create `file` attachments.
+**For links:** JSON accepts only `link` attachments (`type` optional, defaults to `"link"`); any other `type` is rejected with 400 `VALIDATION`:
 ```json
 { "type": "link", "title": "string", "url": "string" }
 ```
+The URL is required and trimmed; `javascript:`, `data:`, `vbscript:` and `file:` schemes (case-insensitive) are rejected with 400 `VALIDATION`. The same rules apply to attachment creates via `POST /api/sync/push` (violations yield a per-change `error` result).
 (JSON bodies on this route are capped at 10 MiB and return 413 `BODY_TOO_LARGE` beyond that.)
 
 Response (201): Attachment object

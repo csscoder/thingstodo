@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	mw "github.com/collinjanssen/thingstodo/internal/middleware"
 	"github.com/collinjanssen/thingstodo/internal/model"
@@ -40,6 +43,32 @@ func (h *AttachmentHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"attachments": items})
 }
 
+// normalizeLinkInput validates attachment creation over JSON/sync. Only link
+// attachments may be created that way; files are uploaded via multipart. It
+// defaults an absent type to "link", trims the URL, and rejects URLs whose
+// scheme could execute scripts or address local files.
+func normalizeLinkInput(in *model.CreateAttachmentInput) error {
+	if in.Type == "" {
+		in.Type = "link"
+	}
+	if in.Type != "link" {
+		return errors.New("only link attachments can be created via JSON")
+	}
+	in.URL = strings.TrimSpace(in.URL)
+	if in.URL == "" {
+		return errors.New("url is required")
+	}
+	u, err := url.Parse(in.URL)
+	if err != nil {
+		return errors.New("invalid url")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "javascript", "data", "vbscript", "file":
+		return errors.New("url scheme not allowed")
+	}
+	return nil
+}
+
 func (h *AttachmentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "id")
 
@@ -58,11 +87,8 @@ func (h *AttachmentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
-	if input.Type == "" {
-		input.Type = "link"
-	}
-	if input.URL == "" {
-		writeError(w, http.StatusBadRequest, "url is required", "VALIDATION")
+	if err := normalizeLinkInput(&input); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "VALIDATION")
 		return
 	}
 	att, err := h.repo.Create(taskID, input)
@@ -164,7 +190,12 @@ func (h *AttachmentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 			return
 		}
-		os.Remove(filepath.Join(h.attachmentsPath, att.URL))
+		// os.Root confines removal to the attachments dir; a removal error
+		// (e.g. a legacy row pointing outside it) is ignored, as before.
+		if root, err := os.OpenRoot(h.attachmentsPath); err == nil {
+			_ = root.Remove(att.URL)
+			root.Close()
+		}
 	} else {
 		if err := h.repo.Delete(id); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
@@ -191,8 +222,16 @@ func (h *AttachmentHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := filepath.Join(h.attachmentsPath, att.URL)
-	f, err := os.Open(filePath)
+	// os.Root confines access to the attachments dir, blocking traversal via
+	// stored URLs like "../secret.db".
+	root, err := os.OpenRoot(h.attachmentsPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "file not found on disk", "NOT_FOUND")
+		return
+	}
+	defer root.Close()
+
+	f, err := root.Open(att.URL)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "file not found on disk", "NOT_FOUND")
 		return
