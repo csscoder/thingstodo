@@ -578,7 +578,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 		}
 
 		if len(input.Raw) > 0 {
-			if field, msg, ok := h.validateTaskUpdate(input); !ok {
+			if field, msg, ok := h.validateTaskUpdate(input, existing); !ok {
 				return syncFieldError(result, field, msg)
 			}
 			_, err = h.tasks.Update(change.EntityID, input)
@@ -661,8 +661,9 @@ func (h *SyncHandler) validateTaskCreate(input model.CreateTaskInput) (string, s
 }
 
 // validateTaskUpdate applies the same boundary rules as PATCH /api/tasks to
-// the fields a sync update actually changes.
-func (h *SyncHandler) validateTaskUpdate(input model.UpdateTaskInput) (string, string, bool) {
+// the fields a sync update actually changes. existing is the stored task;
+// it resolves the effective project for the heading membership rule.
+func (h *SyncHandler) validateTaskUpdate(input model.UpdateTaskInput, existing *model.TaskDetail) (string, string, bool) {
 	if input.Title != nil && *input.Title == "" {
 		return "title", "cannot be empty", false
 	}
@@ -686,6 +687,23 @@ func (h *SyncHandler) validateTaskUpdate(input model.UpdateTaskInput) (string, s
 	if _, ok := input.Raw["heading_id"]; ok && input.HeadingID != nil {
 		if field, msg, ok := refFound(db, "headings", "heading_id", "heading not found", *input.HeadingID); !ok {
 			return field, msg, false
+		}
+		// A carried heading must belong to the effective project — the one
+		// this change sets, or the task's stored one when it leaves the
+		// project untouched — mirroring the REST PATCH/Move boundary check.
+		effective := existing.ProjectID
+		if _, projectGiven := input.Raw["project_id"]; projectGiven {
+			effective = input.ProjectID
+		}
+		if effective != nil {
+			inProject, err := repository.HeadingInProject(db, *input.HeadingID, *effective)
+			if err != nil {
+				log.Printf("sync heading check %s: %v", *input.HeadingID, err)
+				return "", "internal error", false
+			}
+			if !inProject {
+				return "heading_id", "heading is not in this project", false
+			}
 		}
 	}
 	for _, tagID := range input.TagIDs {

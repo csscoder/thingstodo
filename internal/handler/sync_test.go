@@ -1115,3 +1115,74 @@ func TestSyncDeleteArea_WithProjectsIsChangeError(t *testing.T) {
 		t.Errorf("expected area and project to survive, got area=%d project=%d", areaCount, projectCount)
 	}
 }
+
+// TestSyncPush_UpdateHeadingFromAnotherProjectIsChangeError pins the REST
+// PATCH/Move heading rule on the sync push path: a task update carrying a
+// heading that does not belong to the effective project is a per-change
+// error with the create-path wording, and the task is left unchanged.
+func TestSyncPush_UpdateHeadingFromAnotherProjectIsChangeError(t *testing.T) {
+	client, changeLogRepo, taskRepo, db := setupSyncRouterWithDB(t)
+
+	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
+	projRepo := repository.NewProjectRepository(db, changeLogRepo)
+	area, err := areaRepo.Create(model.CreateAreaInput{Title: "Sync area"})
+	if err != nil {
+		t.Fatalf("create area: %v", err)
+	}
+	p1, err := projRepo.Create(model.CreateProjectInput{Title: "Sync project one", AreaID: &area.ID})
+	if err != nil {
+		t.Fatalf("create project one: %v", err)
+	}
+	p2, err := projRepo.Create(model.CreateProjectInput{Title: "Sync project two", AreaID: &area.ID})
+	if err != nil {
+		t.Fatalf("create project two: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO headings (id, title, project_id, sort_order) VALUES ('h1', 'Heading One', ?, 0)", p1.ID,
+	); err != nil {
+		t.Fatalf("insert heading: %v", err)
+	}
+	headingID := "h1"
+	task, err := taskRepo.Create(model.CreateTaskInput{
+		Title: "Sync heading guard", ProjectID: &p1.ID, HeadingID: &headingID,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	resp := client.Post("/api/sync/push", map[string]interface{}{
+		"device_id": "test-device",
+		"changes": []map[string]interface{}{{
+			"entity": "task", "entity_id": task.ID, "action": "update",
+			"fields":            []string{"project_id", "heading_id"},
+			"data":              map[string]interface{}{"project_id": p2.ID, "heading_id": "h1"},
+			"client_updated_at": time.Now().Format(time.RFC3339),
+		}},
+	})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	if len(result.Results) != 1 {
+		t.Fatalf("expected one result, got %d (body: %s)", len(result.Results), string(resp.Body))
+	}
+	if result.Results[0].Status != "error" {
+		t.Fatalf("expected per-change error, got %q (body: %s)", result.Results[0].Status, string(resp.Body))
+	}
+	if result.Results[0].Error != "heading_id: heading is not in this project" {
+		t.Errorf("expected 'heading_id: heading is not in this project', got %q", result.Results[0].Error)
+	}
+
+	// The rejected change must not have been applied.
+	var projectID, headingOut sql.NullString
+	if err := db.QueryRow(
+		"SELECT project_id, heading_id FROM tasks WHERE id = ?", task.ID,
+	).Scan(&projectID, &headingOut); err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	if !projectID.Valid || projectID.String != p1.ID {
+		t.Errorf("task project changed: got %v, want %s", projectID, p1.ID)
+	}
+	if !headingOut.Valid || headingOut.String != "h1" {
+		t.Errorf("task heading changed: got %v, want h1", headingOut)
+	}
+}
