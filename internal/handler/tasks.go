@@ -196,6 +196,12 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if v := q.Get("search"); v != "" {
+		// Whitespace-only input has no tokens to quote; an empty MATCH
+		// string would be an FTS5 syntax error, so reject it here (D4).
+		if !repository.HasSearchTokens(v) {
+			bad("search", "search must contain at least one search term")
+			return
+		}
 		f.Search = &v
 	}
 	if v := q.Get("sort"); v != "" {
@@ -218,6 +224,10 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	tasks, nextCursor, err := h.repo.List(f)
 	if err != nil {
+		if errors.Is(err, repository.ErrEmptySearch) {
+			bad("search", "search must contain at least one search term")
+			return
+		}
 		if errors.Is(err, repository.ErrInvalidCursor) {
 			bad("cursor", "invalid cursor")
 			return

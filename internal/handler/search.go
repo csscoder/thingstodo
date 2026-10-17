@@ -26,6 +26,12 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "q parameter is required", "VALIDATION")
 		return
 	}
+	// Whitespace-only input has no tokens to quote; an empty MATCH string
+	// would be an FTS5 syntax error, so reject it here (D4).
+	if !repository.HasSearchTokens(query) {
+		writeFieldError(w, http.StatusBadRequest, "q must contain at least one search term", "VALIDATION", "q")
+		return
+	}
 	limit := 20
 	if q.Has("limit") {
 		n, err := strconv.Atoi(q.Get("limit"))
@@ -38,6 +44,10 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	results, nextCursor, err := h.repo.Search(query, limit, q.Get("cursor"))
 	if err != nil {
+		if errors.Is(err, repository.ErrEmptySearch) {
+			writeFieldError(w, http.StatusBadRequest, "q must contain at least one search term", "VALIDATION", "q")
+			return
+		}
 		if errors.Is(err, repository.ErrInvalidCursor) {
 			writeFieldError(w, http.StatusBadRequest, "invalid cursor", "VALIDATION", "cursor")
 			return

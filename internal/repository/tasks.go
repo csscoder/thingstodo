@@ -306,6 +306,9 @@ func (r *TaskRepository) List(f model.TaskFilters) (tasks []model.TaskListItem, 
 		}
 	}
 	if f.Search != nil {
+		if !HasSearchTokens(*f.Search) {
+			return nil, "", ErrEmptySearch
+		}
 		conditions = append(conditions, "t.rowid IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?)")
 		args = append(args, ftsQuery(*f.Search, false))
 	}

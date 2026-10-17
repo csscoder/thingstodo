@@ -532,6 +532,31 @@ func TestSearch_CyrillicPrefix(t *testing.T) {
 	}
 }
 
+// TestTaskQuery_WhitespaceSearchIs400 pins the D4 boundary rule: a search
+// param with no searchable tokens can never reach FTS5 (an empty MATCH
+// string is a syntax error and would 500).
+func TestTaskQuery_WhitespaceSearchIs400(t *testing.T) {
+	client, _ := setupQueryEnv(t)
+
+	for _, query := range []string{"search=%20", "search=%09"} {
+		resp := client.Get("/api/tasks?" + query)
+		testutil.AssertStatus(t, resp, http.StatusBadRequest)
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "search")
+	}
+}
+
+// TestSearch_WhitespaceQueryIs400 is the /api/search twin: q with only
+// whitespace is rejected with 400 naming q, not a 500.
+func TestSearch_WhitespaceQueryIs400(t *testing.T) {
+	client, _ := setupQueryEnv(t)
+
+	resp := client.Get("/api/search?q=%20")
+	testutil.AssertStatus(t, resp, http.StatusBadRequest)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "q")
+}
+
 func TestSearch_PagesByRankStable(t *testing.T) {
 	client, repo := setupQueryEnv(t)
 

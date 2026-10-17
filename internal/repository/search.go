@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -14,6 +15,20 @@ type SearchRepository struct {
 
 func NewSearchRepository(db *sql.DB) *SearchRepository {
 	return &SearchRepository{db: db}
+}
+
+// ErrEmptySearch marks a query with no searchable tokens: whitespace-only
+// input. An empty MATCH string is an FTS5 syntax error, so it must never
+// reach the database; handlers reject it with 400 VALIDATION first, and
+// this error is the repository's defense in depth when they do not.
+var ErrEmptySearch = errors.New("search query has no searchable terms")
+
+// HasSearchTokens reports whether input carries at least one token that
+// ftsQuery would quote — exactly strings.Fields semantics, shared by the
+// handler boundary check and the repository guards so the two can never
+// disagree about what counts as empty.
+func HasSearchTokens(input string) bool {
+	return len(strings.Fields(input)) > 0
 }
 
 // ftsQuery converts raw user input into a safe FTS5 MATCH expression (D4):
@@ -43,6 +58,9 @@ func ftsQuery(input string, prefix bool) string {
 func (r *SearchRepository) Search(query string, limit int, cursor string) ([]model.SearchResult, string, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	if !HasSearchTokens(query) {
+		return nil, "", ErrEmptySearch
 	}
 
 	var args []any
