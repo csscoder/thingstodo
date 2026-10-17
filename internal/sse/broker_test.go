@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -120,6 +121,62 @@ func TestFormatSSE(t *testing.T) {
 	expected := "event: task_created\ndata: {\"id\":\"abc\"}\n\n"
 	if string(data) != expected {
 		t.Errorf("expected %q, got %q", expected, string(data))
+	}
+}
+
+func TestBroadcastChange_IncludesEntityIDSeq(t *testing.T) {
+	b := NewBroker()
+	b.SetSeqSource(func() (int64, error) { return 42, nil })
+	ch := b.Subscribe("client1")
+
+	b.BroadcastChange("task_updated", "task", "t1", map[string]any{"k": "v"})
+
+	select {
+	case e := <-ch:
+		if e.Type != "task_updated" {
+			t.Errorf("type: expected task_updated, got %s", e.Type)
+		}
+		data, ok := e.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("data: expected map, got %T", e.Data)
+		}
+		if data["entity"] != "task" || data["id"] != "t1" || data["k"] != "v" {
+			t.Errorf("envelope: %v", data)
+		}
+		if data["seq"] != int64(42) {
+			t.Errorf("seq: expected 42, got %v", data["seq"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event")
+	}
+}
+
+func TestBroadcastChange_OmitsSeqWhenUnavailable(t *testing.T) {
+	b := NewBroker()
+	ch := b.Subscribe("client1")
+
+	// No seq source wired, then one that errors: seq must be omitted, never
+	// fabricated.
+	b.BroadcastChange("task_updated", "task", "t1", nil)
+	b.SetSeqSource(func() (int64, error) { return 0, errors.New("boom") })
+	b.BroadcastChange("task_updated", "task", "t2", nil)
+
+	for i, expectID := range []string{"t1", "t2"} {
+		select {
+		case e := <-ch:
+			data, ok := e.Data.(map[string]any)
+			if !ok {
+				t.Fatalf("event %d: data: expected map, got %T", i, e.Data)
+			}
+			if data["id"] != expectID {
+				t.Errorf("event %d: expected id %s, got %v", i, expectID, data["id"])
+			}
+			if _, present := data["seq"]; present {
+				t.Errorf("event %d: seq must be omitted, got %v", i, data["seq"])
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("event %d: timed out", i)
+		}
 	}
 }
 

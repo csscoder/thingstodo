@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"log"
 	"net/http"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
@@ -23,10 +22,10 @@ func NewScheduleHandler(repo *repository.ScheduleRepository, taskRepo *repositor
 func (h *ScheduleHandler) broadcastTaskUpdated(taskID string) {
 	task, err := h.taskRepo.GetByID(taskID)
 	if err != nil || task == nil {
-		h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID})
+		h.broker.BroadcastChange("task_updated", "task", taskID, nil)
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID, "task": task})
+	h.broker.BroadcastChange("task_updated", "task", taskID, map[string]any{"task": task})
 }
 
 func (h *ScheduleHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -129,14 +128,12 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Create rewrites tasks.when_date from the first entry (and logs the
+	// task change) inside the same transaction.
 	item, err := h.repo.Create(taskID, input)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
-	}
-
-	if err := h.repo.SyncPrimary(taskID); err != nil {
-		log.Printf("WARN schedules.Create syncPrimary: %v", err)
 	}
 
 	h.broadcastTaskUpdated(taskID)
@@ -213,10 +210,6 @@ func (h *ScheduleHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.repo.SyncPrimary(item.TaskID); err != nil {
-		log.Printf("WARN schedules.Update syncPrimary: %v", err)
-	}
-
 	h.broadcastTaskUpdated(item.TaskID)
 	writeJSON(w, http.StatusOK, item)
 }
@@ -233,10 +226,6 @@ func (h *ScheduleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.Delete(id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
-	}
-
-	if err := h.repo.SyncPrimary(taskID); err != nil {
-		log.Printf("WARN schedules.Delete syncPrimary: %v", err)
 	}
 
 	h.broadcastTaskUpdated(taskID)
@@ -264,10 +253,6 @@ func (h *ScheduleHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.Reorder(items); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
-	}
-
-	if err := h.repo.SyncPrimary(taskID); err != nil {
-		log.Printf("WARN schedules.Reorder syncPrimary: %v", err)
 	}
 
 	h.broadcastTaskUpdated(taskID)

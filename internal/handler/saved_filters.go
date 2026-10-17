@@ -79,7 +79,7 @@ func (h *SavedFilterHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("saved_filter_changed", map[string]interface{}{"view": f.View})
+	h.broker.BroadcastChange("saved_filter_changed", "saved_filter", f.ID, map[string]any{"view": f.View})
 	writeJSON(w, http.StatusCreated, f)
 }
 
@@ -108,7 +108,7 @@ func (h *SavedFilterHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if view != "" {
-		h.broker.BroadcastJSON("saved_filter_changed", map[string]interface{}{"view": view})
+		h.broker.BroadcastChange("saved_filter_changed", "saved_filter", id, map[string]any{"view": view})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -3,6 +3,7 @@ package handler_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
 	"github.com/collinjanssen/thingstodo/internal/repository"
@@ -18,7 +19,7 @@ func setupScheduleRouter(t *testing.T) *testutil.TestClient {
 	changeLog := repository.NewChangeLogRepository(db)
 	taskRepo := repository.NewTaskRepository(db, changeLog)
 	checklistRepo := repository.NewChecklistRepository(db, changeLog)
-	scheduleRepo := repository.NewScheduleRepository(db, changeLog)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLog).WithTasks(taskRepo)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 
 	taskH := handler.NewTaskHandler(taskRepo, repository.NewReminderRepository(db, changeLog), settingsRepo, broker, nil)
@@ -150,6 +151,61 @@ func TestScheduleReorder_ScopedToTask(t *testing.T) {
 	}
 	if got := sortOrder(taskA, a2); got != 2048 {
 		t.Errorf("task A second entry sort_order: expected 2048, got %v", got)
+	}
+}
+
+// TestChecklistUpdate_EventIDs pins the SSE envelope for a checklist item
+// update: the event identifies the changed entity (entity "checklist_item",
+// the item id) and carries the owning task as task_id context.
+func TestChecklistUpdate_EventIDs(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	broker := sse.NewBroker()
+	changeLog := repository.NewChangeLogRepository(db)
+	taskRepo := repository.NewTaskRepository(db, changeLog)
+	checklistRepo := repository.NewChecklistRepository(db, changeLog)
+	checklistH := handler.NewChecklistHandler(checklistRepo, broker)
+	taskH := handler.NewTaskHandler(taskRepo, repository.NewReminderRepository(db, changeLog), repository.NewUserSettingsRepository(db), broker, nil)
+
+	r := chi.NewRouter()
+	r.Post("/api/tasks", taskH.Create)
+	r.Post("/api/tasks/{id}/checklist", checklistH.Create)
+	r.Patch("/api/checklist/{id}", checklistH.Update)
+	client := testutil.NewTestClient(t, r)
+
+	taskID := createTaskForSchedule(t, client)
+	itemResp := client.Post("/api/tasks/"+taskID+"/checklist", map[string]string{"title": "Item"})
+	if itemResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create checklist item: %d %s", itemResp.StatusCode, string(itemResp.Body))
+	}
+	var item map[string]interface{}
+	itemResp.JSON(t, &item)
+	itemID := item["id"].(string)
+
+	events := broker.Subscribe("checklist-test")
+
+	resp := client.Patch("/api/checklist/"+itemID, map[string]interface{}{"completed": true})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	select {
+	case e := <-events:
+		if e.Type != "task_updated" {
+			t.Errorf("event type: expected task_updated, got %s", e.Type)
+		}
+		data, ok := e.Data.(map[string]interface{})
+		if !ok {
+			t.Fatalf("event data: expected map, got %T", e.Data)
+		}
+		if data["entity"] != "checklist_item" {
+			t.Errorf("entity: expected checklist_item, got %v", data["entity"])
+		}
+		if data["id"] != itemID {
+			t.Errorf("id: expected %s, got %v", itemID, data["id"])
+		}
+		if data["task_id"] != taskID {
+			t.Errorf("task_id: expected %s, got %v", taskID, data["task_id"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for checklist update event")
 	}
 }
 

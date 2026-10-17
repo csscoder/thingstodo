@@ -187,7 +187,7 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.broker.BroadcastJSON("task_created", map[string]interface{}{"id": task.ID, "task": task})
+	h.broker.BroadcastChange("task_created", "task", task.ID, map[string]any{"task": task})
 	writeJSON(w, http.StatusCreated, task)
 }
 
@@ -277,7 +277,7 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	h.broker.BroadcastChange("task_updated", "task", task.ID, map[string]any{"task": task})
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -287,7 +287,7 @@ func (h *TaskHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("task_deleted", map[string]interface{}{"id": id})
+	h.broker.BroadcastChange("task_deleted", "task", id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -297,7 +297,7 @@ func (h *TaskHandler) Purge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("task_purged", map[string]interface{}{"id": id})
+	h.broker.BroadcastChange("task_purged", "task", id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -330,7 +330,7 @@ func (h *TaskHandler) finishTask(w http.ResponseWriter, id, status string) {
 		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	h.broker.BroadcastChange("task_updated", "task", task.ID, map[string]any{"task": task})
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -345,7 +345,7 @@ func (h *TaskHandler) Reopen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	h.broker.BroadcastChange("task_updated", "task", task.ID, map[string]any{"task": task})
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -360,7 +360,7 @@ func (h *TaskHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	h.broker.BroadcastChange("task_updated", "task", task.ID, map[string]any{"task": task})
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -375,7 +375,7 @@ func (h *TaskHandler) Review(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	h.broker.BroadcastChange("task_updated", "task", task.ID, map[string]any{"task": task})
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -415,7 +415,7 @@ func (h *TaskHandler) Move(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
+	h.broker.BroadcastChange("task_updated", "task", task.ID, map[string]any{"task": task})
 	writeJSON(w, http.StatusOK, task)
 }
 

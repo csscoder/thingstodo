@@ -104,7 +104,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("project_updated", map[string]interface{}{"id": project.ID, "project": project})
+	h.broker.BroadcastChange("project_updated", "project", project.ID, map[string]any{"project": project})
 	writeJSON(w, http.StatusCreated, project)
 }
 
@@ -155,7 +155,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("project_updated", map[string]interface{}{"id": project.ID, "project": project})
+	h.broker.BroadcastChange("project_updated", "project", project.ID, map[string]any{"project": project})
 	writeJSON(w, http.StatusOK, project)
 }
 
@@ -204,6 +204,6 @@ func (h *ProjectHandler) Complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("project_updated", map[string]interface{}{"id": project.ID, "project": project})
+	h.broker.BroadcastChange("project_updated", "project", project.ID, map[string]any{"project": project})
 	writeJSON(w, http.StatusOK, project)
 }

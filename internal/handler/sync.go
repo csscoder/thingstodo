@@ -13,6 +13,7 @@ import (
 	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
 	"github.com/collinjanssen/thingstodo/internal/scheduler"
+	"github.com/collinjanssen/thingstodo/internal/sse"
 )
 
 const (
@@ -36,6 +37,7 @@ type SyncHandler struct {
 	repeatRules     *repository.RepeatRuleRepository
 	scheduler       *scheduler.Scheduler
 	loc             *time.Location
+	broker          *sse.Broker
 }
 
 // NewSyncHandler creates a new SyncHandler.
@@ -56,6 +58,9 @@ func NewSyncHandler(
 	// attachmentsPath is the files root the attachment delete path uses to
 	// remove a stored file once its last row is gone.
 	attachmentsPath string,
+	// broker receives single-entity change events for the writes applied
+	// here, so connected SSE clients refresh. May be nil in tests.
+	broker *sse.Broker,
 ) *SyncHandler {
 	if loc == nil {
 		loc = time.UTC
@@ -75,7 +80,17 @@ func NewSyncHandler(
 		repeatRules:     repeatRules,
 		scheduler:       sched,
 		loc:             loc,
+		broker:          broker,
 	}
+}
+
+// broadcastTaskChange emits a single-entity change event for a task written
+// through sync push. Without a broker it is a no-op.
+func (h *SyncHandler) broadcastTaskChange(eventType, taskID string) {
+	if h.broker == nil {
+		return
+	}
+	h.broker.BroadcastChange(eventType, "task", taskID, nil)
 }
 
 // PullResponse is returned by GET /api/sync/pull.
@@ -113,15 +128,16 @@ func (h *SyncHandler) Pull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Detect expired cursor: if the client has a cursor but the oldest entry in the
-	// change log is newer than that cursor, the history has been purged and the client
-	// must fall back to a full sync.
+	// change log is newer than since+1, the history has been purged and the client
+	// must fall back to a full sync. oldest = since+1 is still contiguous — the
+	// client holds every surviving entry's predecessor.
 	if since > 0 {
 		oldest, err := h.changeLog.GetOldestSeq()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 			return
 		}
-		if oldest > 0 && oldest > since {
+		if oldest > 0 && oldest > since+1 {
 			writeError(w, http.StatusGone, "cursor expired: change log has been purged, perform a full sync", "CURSOR_EXPIRED")
 			return
 		}
@@ -419,6 +435,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			return result
 		}
 		_ = task
+		h.broadcastTaskChange("task_created", change.EntityID)
 		result.Status = "applied"
 
 	case "update":
@@ -543,6 +560,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 							result.Error = syncErrorMessage(cErr)
 							return result
 						}
+						h.broadcastTaskChange("task_updated", change.EntityID)
 						result.Status = status
 						return result
 					case "open":
@@ -551,6 +569,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 							result.Error = syncErrorMessage(cErr)
 							return result
 						}
+						h.broadcastTaskChange("task_updated", change.EntityID)
 						result.Status = status
 						return result
 					}
@@ -563,6 +582,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 						result.Error = syncErrorMessage(cErr)
 						return result
 					}
+					h.broadcastTaskChange("task_deleted", change.EntityID)
 					result.Status = status
 					return result
 				}
@@ -572,6 +592,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 					result.Error = syncErrorMessage(cErr)
 					return result
 				}
+				h.broadcastTaskChange("task_updated", change.EntityID)
 				result.Status = status
 				return result
 			}
@@ -587,6 +608,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 				result.Error = syncErrorMessage(err)
 				return result
 			}
+			h.broadcastTaskChange("task_updated", change.EntityID)
 		}
 		result.Status = status
 
@@ -597,6 +619,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			result.Error = syncErrorMessage(err)
 			return result
 		}
+		h.broadcastTaskChange("task_deleted", change.EntityID)
 		result.Status = "applied"
 
 	default:

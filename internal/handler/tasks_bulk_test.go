@@ -35,7 +35,7 @@ func setupBulkRouter(t *testing.T) (*testutil.TestClient, *sql.DB) {
 	areaH := handler.NewAreaHandler(areaRepo, broker)
 	headingH := handler.NewHeadingHandler(headingRepo, broker)
 	scheduleH := handler.NewScheduleHandler(scheduleRepo, taskRepo, broker)
-	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, nil, nil, headingRepo, nil, scheduleRepo, reminderRepo, nil, nil, time.UTC, t.TempDir())
+	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, nil, nil, headingRepo, nil, scheduleRepo, reminderRepo, nil, nil, time.UTC, t.TempDir(), broker)
 
 	r := chi.NewRouter()
 	r.Post("/api/tasks", taskH.Create)

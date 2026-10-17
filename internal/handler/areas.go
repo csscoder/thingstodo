@@ -78,7 +78,7 @@ func (h *AreaHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("area_updated", map[string]interface{}{"id": area.ID, "area": area})
+	h.broker.BroadcastChange("area_updated", "area", area.ID, map[string]any{"area": area})
 	writeJSON(w, http.StatusCreated, area)
 }
 
@@ -106,7 +106,7 @@ func (h *AreaHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "area not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("area_updated", map[string]interface{}{"id": area.ID, "area": area})
+	h.broker.BroadcastChange("area_updated", "area", area.ID, map[string]any{"area": area})
 	writeJSON(w, http.StatusOK, area)
 }
 

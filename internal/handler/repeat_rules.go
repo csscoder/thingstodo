@@ -76,7 +76,7 @@ func (h *RepeatRuleHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID})
+	h.broker.BroadcastChange("task_updated", "task", taskID, nil)
 	writeJSON(w, http.StatusOK, rule)
 }
 

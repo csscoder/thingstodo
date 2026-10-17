@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
@@ -12,10 +13,30 @@ type ScheduleRepository struct {
 	conn      *sql.DB
 	tx        *sql.Tx
 	changeLog *ChangeLogRepository
+	tasks     *TaskRepository
 }
 
 func NewScheduleRepository(db *sql.DB, changeLog *ChangeLogRepository) *ScheduleRepository {
 	return &ScheduleRepository{db: db, conn: db, changeLog: changeLog}
+}
+
+// WithTasks returns a copy of the repository that can load full task
+// snapshots for the change entries SyncPrimary logs. The router chains it
+// after construction; without it SyncPrimary still rewrites when_date but
+// leaves no task entry in the change log.
+func (r *ScheduleRepository) WithTasks(tasks *TaskRepository) *ScheduleRepository {
+	cp := *r
+	cp.tasks = tasks
+	return &cp
+}
+
+// bound returns a repository copy whose statements and change-log writes go
+// through db, the transaction handle of an inTx callback.
+func (r *ScheduleRepository) bound(db DBTX) *ScheduleRepository {
+	if tx, ok := db.(*sql.Tx); ok {
+		return r.WithTx(tx)
+	}
+	return r
 }
 
 // WithTx returns a shallow copy of the repository bound to tx: its statements
@@ -101,7 +122,26 @@ func (r *ScheduleRepository) GetByID(id string) (*model.TaskSchedule, error) {
 	return &s, nil
 }
 
+// Create inserts a new schedule entry and re-syncs tasks.when_date from
+// the first entry, all in one transaction: a failed sync rolls the insert
+// back with it.
 func (r *ScheduleRepository) Create(taskID string, input model.CreateTaskScheduleInput) (*model.TaskSchedule, error) {
+	var item *model.TaskSchedule
+	if err := r.inTx(func(db DBTX) error {
+		tr := r.bound(db)
+		var err error
+		item, err = tr.create(taskID, input)
+		if err != nil {
+			return err
+		}
+		return tr.SyncPrimary(taskID)
+	}); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func (r *ScheduleRepository) create(taskID string, input model.CreateTaskScheduleInput) (*model.TaskSchedule, error) {
 	id := input.ID
 	if id == "" {
 		id = model.NewID()
@@ -123,7 +163,26 @@ func (r *ScheduleRepository) Create(taskID string, input model.CreateTaskSchedul
 	return &s, nil
 }
 
+// Update applies the patch and re-syncs tasks.when_date from the first
+// entry in the same transaction. It returns (nil, nil) when the entry does
+// not exist, like before.
 func (r *ScheduleRepository) Update(id string, input model.UpdateTaskScheduleInput) (*model.TaskSchedule, error) {
+	var item *model.TaskSchedule
+	if err := r.inTx(func(db DBTX) error {
+		tr := r.bound(db)
+		var err error
+		item, err = tr.update(id, input)
+		if err != nil || item == nil {
+			return err
+		}
+		return tr.SyncPrimary(item.TaskID)
+	}); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func (r *ScheduleRepository) update(id string, input model.UpdateTaskScheduleInput) (*model.TaskSchedule, error) {
 	if input.WhenDate != nil {
 		if _, err := r.db.Exec("UPDATE task_schedules SET when_date = ? WHERE id = ?", *input.WhenDate, id); err != nil {
 			return nil, fmt.Errorf("update schedule when_date: %w", err)
@@ -166,35 +225,54 @@ func (r *ScheduleRepository) Update(id string, input model.UpdateTaskScheduleInp
 	return &s, err
 }
 
+// Delete removes the entry and re-syncs tasks.when_date of the task that
+// owned it in the same transaction.
 func (r *ScheduleRepository) Delete(id string) error {
-	_, err := r.db.Exec("DELETE FROM task_schedules WHERE id = ?", id)
-	if err == nil {
-		logChange(r.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", "")
-	}
-	return err
+	return r.inTx(func(db DBTX) error {
+		tr := r.bound(db)
+		var taskID sql.NullString
+		err := db.QueryRow("SELECT task_id FROM task_schedules WHERE id = ?", id).Scan(&taskID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if _, err := db.Exec("DELETE FROM task_schedules WHERE id = ?", id); err != nil {
+			return err
+		}
+		logChange(tr.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", "")
+		if !taskID.Valid {
+			return nil
+		}
+		return tr.SyncPrimary(taskID.String)
+	})
 }
 
+// Reorder rewrites sort_order values, logs every moved entry and re-syncs
+// tasks.when_date from the new first entry, all in one transaction.
 func (r *ScheduleRepository) Reorder(items []model.SimpleReorderItem) error {
-	if err := r.inTx(func(db DBTX) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return r.inTx(func(db DBTX) error {
+		tr := r.bound(db)
 		for _, item := range items {
-			_, err := db.Exec("UPDATE task_schedules SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
-			if err != nil {
+			if _, err := db.Exec("UPDATE task_schedules SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID); err != nil {
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	// Log sort_order changes after successful commit
-	for _, item := range items {
-		var s model.TaskSchedule
-		_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", item.ID).
-			Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
-		logChange(r.changeLog, "schedule", item.ID, "update", []string{"sort_order"}, &s, "", "")
-	}
-	return nil
+		for _, item := range items {
+			var s model.TaskSchedule
+			_ = db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", item.ID).
+				Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
+			if err := logChange(tr.changeLog, "schedule", item.ID, "update", []string{"sort_order"}, &s, "", ""); err != nil {
+				return err
+			}
+		}
+		var taskID string
+		if err := db.QueryRow("SELECT task_id FROM task_schedules WHERE id = ?", items[0].ID).Scan(&taskID); err != nil {
+			return err
+		}
+		return tr.SyncPrimary(taskID)
+	})
 }
 
 // GetTaskIDForSchedule returns the task_id owning the given schedule entry.
@@ -214,29 +292,63 @@ func (r *ScheduleRepository) CountByTask(taskID string) (int, error) {
 	return count, err
 }
 
-// SyncPrimary updates tasks.when_date from the first schedule entry.
-// NOTE: This method does not log a "task" change because the pull client expects
-// a full task snapshot, and ScheduleRepository doesn't have access to TaskRepository.
-// The caller (schedule handler) already triggers task cache invalidation through other paths.
+// SyncPrimary rewrites tasks.when_date from the first schedule entry and
+// logs a "task" change when the value actually changes, so pull clients see
+// the rewrite. The change entry carries the same full task snapshot the
+// TaskRepository logs, loaded through the TaskRepository wired by WithTasks
+// (nil in unit setups: the rewrite still happens, just without a log entry).
+// It must run inside the same transaction as the schedule write that moved
+// the first entry.
 func (r *ScheduleRepository) SyncPrimary(taskID string) error {
 	var whenDate sql.NullString
-
 	err := r.db.QueryRow(
 		"SELECT when_date FROM task_schedules WHERE task_id = ? ORDER BY sort_order ASC LIMIT 1",
 		taskID).Scan(&whenDate)
-
-	if err == sql.ErrNoRows {
-		_, err = r.db.Exec("UPDATE tasks SET when_date = NULL, updated_at = datetime('now') WHERE id = ?", taskID)
-		return err
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("sync primary: %w", err)
 	}
 
-	_, err = r.db.Exec(
+	var current sql.NullString
+	err = r.db.QueryRow("SELECT when_date FROM tasks WHERE id = ?", taskID).Scan(&current)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // unknown task: nothing to sync
+		}
+		return fmt.Errorf("sync primary: %w", err)
+	}
+
+	if current.Valid == whenDate.Valid && (!current.Valid || current.String == whenDate.String) {
+		return nil // no rewrite, no change entry
+	}
+
+	var newDate interface{}
+	if whenDate.Valid {
+		newDate = whenDate.String
+	}
+	if _, err := r.db.Exec(
 		"UPDATE tasks SET when_date = ?, updated_at = datetime('now') WHERE id = ?",
-		whenDate.String, taskID)
-	return err
+		newDate, taskID); err != nil {
+		return err
+	}
+
+	if r.tasks == nil {
+		// No task repository wired (unit setups): rewrite when_date but
+		// leave no entry — a partial snapshot would degrade pull clients,
+		// which replace whole records from snapshots.
+		return nil
+	}
+	tasks := r.tasks
+	if tx, ok := r.db.(*sql.Tx); ok {
+		tasks = r.tasks.WithTx(tx)
+	}
+	detail, err := tasks.GetByID(taskID)
+	if err != nil {
+		return fmt.Errorf("sync primary: load task snapshot: %w", err)
+	}
+	if detail == nil {
+		return nil
+	}
+	return logChange(r.changeLog, "task", taskID, "update", []string{"when_date"}, detail, "", "")
 }
 
 // GetScheduleFields reads the current when_date and start_time for a schedule entry.

@@ -46,8 +46,12 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	userRepo := repository.NewUserRepository(db)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 	savedFilterRepo := repository.NewSavedFilterRepository(db)
-	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo).WithTasks(taskRepo)
 	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
+
+	// Single-entity change events carry the latest change-log seq, read at
+	// broadcast time, so clients can gauge the feed position.
+	broker.SetSeqSource(changeLogRepo.GetLatestSeq)
 	pushSubRepo := repository.NewPushSubscriptionRepository(db)
 
 	// Handlers
@@ -70,7 +74,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	ntfySender := push.NewNtfySender(settingsRepo, userRepo)
 	notifier := push.NewDispatcher(pushSender, ntfySender, settingsRepo, userRepo)
 	pushSubH := handler.NewPushSubscriptionHandler(pushSubRepo, cfg, notifier)
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, cfg.Location, cfg.AttachmentsPath)
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, cfg.Location, cfg.AttachmentsPath, broker)
 	eventH := handler.NewEventHandler(broker)
 
 	var oidcH *handler.OIDCHandler

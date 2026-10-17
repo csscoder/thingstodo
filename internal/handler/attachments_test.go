@@ -282,7 +282,7 @@ func setupSharedAttachmentRouter(t *testing.T) (*testutil.TestClient, *repositor
 
 	attachmentH := handler.NewAttachmentHandler(attachmentRepo, broker, attachmentsPath, 25<<20)
 	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, sched)
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC, attachmentsPath)
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC, attachmentsPath, broker)
 
 	r := chi.NewRouter()
 	r.Post("/api/tasks", taskH.Create)

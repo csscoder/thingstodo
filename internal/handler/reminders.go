@@ -71,7 +71,7 @@ func (h *ReminderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID})
+	h.broker.BroadcastChange("task_updated", "task", taskID, nil)
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -87,7 +87,7 @@ func (h *ReminderHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if taskID != "" {
-		h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID})
+		h.broker.BroadcastChange("task_updated", "task", taskID, nil)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

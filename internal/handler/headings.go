@@ -64,7 +64,7 @@ func (h *HeadingHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("project_updated", map[string]interface{}{"id": projectID})
+	h.broker.BroadcastChange("project_updated", "project", projectID, nil)
 	writeJSON(w, http.StatusCreated, heading)
 }
 
@@ -88,7 +88,7 @@ func (h *HeadingHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "heading not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("project_updated", map[string]interface{}{"id": heading.ProjectID})
+	h.broker.BroadcastChange("project_updated", "project", heading.ProjectID, nil)
 	writeJSON(w, http.StatusOK, heading)
 }
 

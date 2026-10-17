@@ -64,7 +64,7 @@ func (h *ChecklistHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID})
+	h.broker.BroadcastChange("task_updated", "checklist_item", item.ID, map[string]any{"task_id": taskID})
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -88,7 +88,7 @@ func (h *ChecklistHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "checklist item not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": id})
+	h.broker.BroadcastChange("task_updated", "checklist_item", item.ID, map[string]any{"task_id": item.TaskID})
 	writeJSON(w, http.StatusOK, item)
 }
 

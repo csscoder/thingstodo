@@ -118,7 +118,7 @@ func (h *AttachmentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID})
+	h.broker.BroadcastChange("task_updated", "task", taskID, nil)
 	writeJSON(w, http.StatusCreated, att)
 }
 
@@ -177,7 +177,7 @@ func (h *AttachmentHandler) createFile(w http.ResponseWriter, r *http.Request, t
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": taskID})
+	h.broker.BroadcastChange("task_updated", "task", taskID, nil)
 	writeJSON(w, http.StatusCreated, att)
 }
 

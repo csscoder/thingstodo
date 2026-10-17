@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -34,13 +35,14 @@ func setupSyncRouterWithDB(t *testing.T) (*testutil.TestClient, *repository.Chan
 	checklistRepo := repository.NewChecklistRepository(db, changeLogRepo)
 	headingRepo := repository.NewHeadingRepository(db, changeLogRepo)
 
-	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo).WithTasks(taskRepo)
 	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
 	attachmentRepo := repository.NewAttachmentRepository(db, changeLogRepo)
 	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC, t.TempDir())
+	broker := sse.NewBroker()
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC, t.TempDir(), broker)
 
 	r := chi.NewRouter()
 	r.Get("/api/sync/pull", syncH.Pull)
@@ -48,7 +50,6 @@ func setupSyncRouterWithDB(t *testing.T) (*testutil.TestClient, *repository.Chan
 	r.Get("/api/sync/full", syncH.Full)
 
 	// Also mount task endpoints so we can create test data
-	broker := sse.NewBroker()
 	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 
 	r.Route("/api/tasks", func(r chi.Router) {
@@ -56,8 +57,281 @@ func setupSyncRouterWithDB(t *testing.T) (*testutil.TestClient, *repository.Chan
 		r.Get("/{id}", taskH.Get)
 	})
 
+	// Schedule endpoints, so schedule/when_date consistency can be tested
+	// through both the REST and the sync paths.
+	scheduleH := handler.NewScheduleHandler(scheduleRepo, taskRepo, broker)
+	r.Post("/api/tasks/{id}/schedules", scheduleH.Create)
+	r.Get("/api/tasks/{id}/schedules", scheduleH.List)
+	r.Patch("/api/tasks/{id}/schedules/reorder", scheduleH.Reorder)
+	r.Patch("/api/schedules/{id}", scheduleH.Update)
+	r.Delete("/api/schedules/{id}", scheduleH.Delete)
+
 	client := testutil.NewTestClient(t, r)
 	return client, changeLogRepo, taskRepo, db
+}
+// --- Schedule <-> when_date consistency (Task 13) ---
+
+// syncPushSchedule pushes a single schedule change through /api/sync/push
+// and fails the test unless it was applied.
+func syncPushSchedule(t *testing.T, client *testutil.TestClient, action, entityID string, data map[string]interface{}, fields []string) {
+	t.Helper()
+	if fields == nil {
+		fields = []string{}
+	}
+	body := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{{
+			"entity":            "schedule",
+			"entity_id":         entityID,
+			"action":            action,
+			"data":              data,
+			"fields":            fields,
+			"client_updated_at": "2099-01-01T00:00:00Z",
+		}},
+	}
+	resp := client.Post("/api/sync/push", body)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	if len(result.Results) != 1 || result.Results[0].Status != "applied" {
+		t.Fatalf("sync push %s %s: unexpected results %+v", action, entityID, result.Results)
+	}
+}
+
+func taskWhenDate(t *testing.T, db *sql.DB, taskID string) *string {
+	t.Helper()
+	var wd sql.NullString
+	if err := db.QueryRow("SELECT when_date FROM tasks WHERE id = ?", taskID).Scan(&wd); err != nil {
+		t.Fatalf("read tasks.when_date for %s: %v", taskID, err)
+	}
+	if !wd.Valid {
+		return nil
+	}
+	return &wd.String
+}
+
+func firstScheduleID(t *testing.T, db *sql.DB, taskID string) string {
+	t.Helper()
+	var id string
+	if err := db.QueryRow(
+		"SELECT id FROM task_schedules WHERE task_id = ? ORDER BY sort_order ASC LIMIT 1", taskID,
+	).Scan(&id); err != nil {
+		t.Fatalf("read first schedule of %s: %v", taskID, err)
+	}
+	return id
+}
+
+func pullHasTaskEntry(t *testing.T, client *testutil.TestClient, since int64, taskID string) bool {
+	t.Helper()
+	resp := client.Get(fmt.Sprintf("/api/sync/pull?since=%d", since))
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.PullResponse
+	resp.JSON(t, &result)
+	for _, c := range result.Changes {
+		if c.Entity == "task" && c.EntityID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+func createSyncTask(t *testing.T, client *testutil.TestClient, title, whenDate string) string {
+	t.Helper()
+	body := map[string]string{"title": title}
+	if whenDate != "" {
+		body["when_date"] = whenDate
+	}
+	resp := client.Post("/api/tasks", body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create task: %d %s", resp.StatusCode, string(resp.Body))
+	}
+	var created map[string]interface{}
+	resp.JSON(t, &created)
+	return created["id"].(string)
+}
+
+func TestSyncScheduleCreate_UpdatesWhenDate(t *testing.T) {
+	client, changeLog, _, db := setupSyncRouterWithDB(t)
+	taskID := createSyncTask(t, client, "Sync schedule create", "")
+
+	before, err := changeLog.GetLatestSeq()
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+
+	syncPushSchedule(t, client, "create", "schedcr01", map[string]interface{}{
+		"task_id":   taskID,
+		"when_date": "2026-11-02",
+	}, nil)
+
+	if wd := taskWhenDate(t, db, taskID); wd == nil || *wd != "2026-11-02" {
+		t.Errorf("tasks.when_date: expected 2026-11-02, got %v", wd)
+	}
+	if !pullHasTaskEntry(t, client, before, taskID) {
+		t.Error("/sync/pull must return a task entry for the when_date rewrite")
+	}
+}
+
+func TestSyncScheduleUpdate_UpdatesWhenDate(t *testing.T) {
+	client, changeLog, _, db := setupSyncRouterWithDB(t)
+	taskID := createSyncTask(t, client, "Sync schedule update", "2026-11-01")
+	sid := firstScheduleID(t, db, taskID)
+
+	before, err := changeLog.GetLatestSeq()
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+
+	syncPushSchedule(t, client, "update", sid, map[string]interface{}{
+		"task_id":   taskID,
+		"when_date": "2026-11-05",
+	}, []string{"when_date"})
+
+	if wd := taskWhenDate(t, db, taskID); wd == nil || *wd != "2026-11-05" {
+		t.Errorf("tasks.when_date: expected 2026-11-05, got %v", wd)
+	}
+	if !pullHasTaskEntry(t, client, before, taskID) {
+		t.Error("/sync/pull must return a task entry for the when_date rewrite")
+	}
+}
+
+func TestSyncScheduleDelete_UpdatesWhenDate(t *testing.T) {
+	client, changeLog, _, db := setupSyncRouterWithDB(t)
+	taskID := createSyncTask(t, client, "Sync schedule delete", "2026-11-01")
+	sid := firstScheduleID(t, db, taskID)
+
+	before, err := changeLog.GetLatestSeq()
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+
+	syncPushSchedule(t, client, "delete", sid, map[string]interface{}{"task_id": taskID}, nil)
+
+	if wd := taskWhenDate(t, db, taskID); wd != nil {
+		t.Errorf("tasks.when_date: expected NULL, got %s", *wd)
+	}
+	if !pullHasTaskEntry(t, client, before, taskID) {
+		t.Error("/sync/pull must return a task entry for the when_date rewrite")
+	}
+}
+
+func TestSchedulePrimaryChange_InPull(t *testing.T) {
+	client, changeLog, _, db := setupSyncRouterWithDB(t)
+	taskID := createSyncTask(t, client, "Primary change in pull", "2026-03-01")
+	sid := firstScheduleID(t, db, taskID)
+
+	before, err := changeLog.GetLatestSeq()
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+
+	resp := client.Patch("/api/schedules/"+sid, map[string]interface{}{"when_date": "2026-03-10"})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	if !pullHasTaskEntry(t, client, before, taskID) {
+		t.Error("a first-entry date change must produce a task change in /sync/pull")
+	}
+}
+
+func TestPull_CursorBoundary(t *testing.T) {
+	client, changeLog, _, db := setupSyncRouterWithDB(t)
+	for i := 0; i < 3; i++ {
+		if _, err := changeLog.AppendChange("task", fmt.Sprintf("t%d", i), "create", nil, `{"id":"x"}`, "", ""); err != nil {
+			t.Fatalf("append change: %v", err)
+		}
+	}
+
+	// oldest = since+1 → contiguous history, the client missed nothing.
+	if _, err := db.Exec("DELETE FROM change_log WHERE seq <= 1"); err != nil {
+		t.Fatalf("trim change log: %v", err)
+	}
+	resp := client.Get("/api/sync/pull?since=1")
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	// oldest = since+2 → a gap: history was purged under the cursor.
+	if _, err := db.Exec("DELETE FROM change_log WHERE seq <= 2"); err != nil {
+		t.Fatalf("trim change log: %v", err)
+	}
+	resp = client.Get("/api/sync/pull?since=1")
+	testutil.AssertStatus(t, resp, http.StatusGone)
+}
+
+func TestSyncPush_EmitsSSE(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	broker := sse.NewBroker()
+
+	changeLogRepo := repository.NewChangeLogRepository(db)
+	taskRepo := repository.NewTaskRepository(db, changeLogRepo)
+	projectRepo := repository.NewProjectRepository(db, changeLogRepo)
+	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
+	tagRepo := repository.NewTagRepository(db, changeLogRepo)
+	checklistRepo := repository.NewChecklistRepository(db, changeLogRepo)
+	headingRepo := repository.NewHeadingRepository(db, changeLogRepo)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo)
+	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
+	attachmentRepo := repository.NewAttachmentRepository(db, changeLogRepo)
+	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
+	settingsRepo := repository.NewUserSettingsRepository(db)
+
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC, t.TempDir(), broker)
+	broker.SetSeqSource(changeLogRepo.GetLatestSeq)
+
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
+	r := chi.NewRouter()
+	r.Post("/api/sync/push", syncH.Push)
+	r.Post("/api/tasks", taskH.Create)
+	client := testutil.NewTestClient(t, r)
+
+	taskID := createSyncTask(t, client, "SSE push task", "")
+	events := broker.Subscribe("sse-test")
+
+	resp := client.Post("/api/sync/push", map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{{
+			"entity":            "task",
+			"entity_id":         taskID,
+			"action":            "update",
+			"data":              map[string]interface{}{"title": "Pushed and broadcast"},
+			"fields":            []string{"title"},
+			"client_updated_at": "2099-01-01T00:00:00Z",
+		}},
+	})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	if len(result.Results) != 1 || result.Results[0].Status != "applied" {
+		t.Fatalf("push result: %+v", result.Results)
+	}
+
+	select {
+	case e := <-events:
+		if e.Type != "task_updated" {
+			t.Fatalf("event type: expected task_updated, got %s", e.Type)
+		}
+		raw, err := json.Marshal(e.Data)
+		if err != nil {
+			t.Fatalf("marshal event data: %v", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("unmarshal event data: %v", err)
+		}
+		if payload["entity"] != "task" {
+			t.Errorf("entity: expected task, got %v", payload["entity"])
+		}
+		if payload["id"] != taskID {
+			t.Errorf("id: expected %s, got %v", taskID, payload["id"])
+		}
+		seq, ok := payload["seq"].(float64)
+		if !ok {
+			t.Fatalf("seq: expected a number, got %v (%T)", payload["seq"], payload["seq"])
+		}
+		if seq < 1 {
+			t.Errorf("seq: expected >= 1, got %v", seq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for task_updated event")
+	}
 }
 
 // --- Pull tests ---
@@ -914,7 +1188,7 @@ func setupSyncRouterWithScheduler(t *testing.T) (*testutil.TestClient, *reposito
 	tagRepo := repository.NewTagRepository(db, changeLogRepo)
 	checklistRepo := repository.NewChecklistRepository(db, changeLogRepo)
 	headingRepo := repository.NewHeadingRepository(db, changeLogRepo)
-	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo).WithTasks(taskRepo)
 	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
 	attachmentRepo := repository.NewAttachmentRepository(db, changeLogRepo)
 	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
@@ -924,7 +1198,7 @@ func setupSyncRouterWithScheduler(t *testing.T) (*testutil.TestClient, *reposito
 	broker := sse.NewBroker()
 	sched := scheduler.New(db, taskRepo, repeatRuleRepo, checklistRepo, attachmentRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, changeLogRepo, nil, broker, time.UTC)
 
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC, t.TempDir())
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC, t.TempDir(), broker)
 
 	r := chi.NewRouter()
 	r.Post("/api/sync/push", syncH.Push)

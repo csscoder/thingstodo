@@ -11,8 +11,9 @@ type Event struct {
 }
 
 type Broker struct {
-	mu      sync.RWMutex
-	clients map[string]chan Event
+	mu        sync.RWMutex
+	clients   map[string]chan Event
+	seqSource func() (int64, error)
 }
 
 func NewBroker() *Broker {
@@ -55,6 +56,39 @@ func (b *Broker) Broadcast(event Event, excludeClient string) {
 
 func (b *Broker) BroadcastJSON(eventType string, data interface{}) {
 	b.Broadcast(Event{Type: eventType, Data: data}, "")
+}
+
+// SetSeqSource wires the function the broker reads the latest change-log seq
+// from at broadcast time. The router binds it to
+// ChangeLogRepository.GetLatestSeq.
+func (b *Broker) SetSeqSource(f func() (int64, error)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.seqSource = f
+}
+
+// BroadcastChange sends a single-entity change event: data plus the entity,
+// its id and — when the seq source is wired and readable — the latest
+// change-log seq, read after the write that triggered the broadcast, so it
+// is at least the write's own entry. A missing or erroring seq source omits
+// seq instead of fabricating one. bulk_change, connected and reminder_fired
+// keep their own shapes and do not go through this method.
+func (b *Broker) BroadcastChange(eventType, entity, id string, data map[string]any) {
+	payload := make(map[string]any, len(data)+3)
+	for k, v := range data {
+		payload[k] = v
+	}
+	payload["entity"] = entity
+	payload["id"] = id
+	b.mu.RLock()
+	f := b.seqSource
+	b.mu.RUnlock()
+	if f != nil {
+		if seq, err := f(); err == nil {
+			payload["seq"] = seq
+		}
+	}
+	b.BroadcastJSON(eventType, payload)
 }
 
 func FormatSSE(event Event) ([]byte, error) {

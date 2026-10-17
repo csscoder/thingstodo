@@ -1265,28 +1265,43 @@ Response (200):
 ### GET /api/events
 **No auth required.** Response: text/event-stream
 
+On connect the server sends:
+```
+event: connected
+data: {"client_id": "string"}
+```
+
+Every **single-entity** change event carries an envelope: the changed
+`entity`, its `id`, and `seq` — the latest change-log sequence number at
+broadcast time, read after the write, so it is at least the write's own
+change-log entry. `seq` is omitted when it cannot be read. `bulk_change`,
+`connected` and `reminder_fired` keep their own shapes and carry no `seq`.
+
 Event types:
 ```
 event: task_created
-data: {"id": "string", "task": {/* task object */}}
+data: {"entity": "task", "id": "string", "seq": 42, "task": {/* task object */}}
 
 event: task_updated
-data: {"id": "string", "task": {/* task object */}}
+data: {"entity": "task", "id": "string", "seq": 42, "task": {/* task object, when loaded */}}
 
 event: task_deleted
-data: {"id": "string"}
+data: {"entity": "task", "id": "string", "seq": 42}
 
 event: task_purged
-data: {"id": "string"}
+data: {"entity": "task", "id": "string", "seq": 42}
 
 event: project_updated
-data: {"id": "string", "project": {/* project object */}}
+data: {"entity": "project", "id": "string", "seq": 42, "project": {/* project object, when loaded */}}
 
 event: area_updated
-data: {"id": "string", "area": {/* area object */}}
+data: {"entity": "area", "id": "string", "seq": 42, "area": {/* area object */}}
 
 event: tag_updated
-data: {"id": "string", "tag": {/* tag object */}}
+data: {"entity": "tag", "id": "string", "seq": 42, "tag": {/* tag object */}}
+
+event: saved_filter_changed
+data: {"entity": "saved_filter", "id": "string", "seq": 42, "view": "today|upcoming|anytime|someday|logbook"}
 
 event: bulk_change
 data: {"type": "reorder|move|delete", "entity": "task|project|heading|area|tag", "ids": ["string"]}
@@ -1294,6 +1309,19 @@ data: {"type": "reorder|move|delete", "entity": "task|project|heading|area|tag",
 event: reminder_fired
 data: {"task_id": "string", "task_title": "string", "reminder_type": "string", "description": "string"}
 ```
+
+Checklist item writes broadcast a `task_updated` event whose envelope
+identifies the item, with the owning task as context:
+```
+event: task_updated
+data: {"entity": "checklist_item", "id": "<item id>", "task_id": "<owning task id>", "seq": 42}
+```
+
+Schedule, reminder, attachment and repeat-rule writes broadcast
+`task_updated` with `{"entity": "task", "id": "<task id>", "seq": N}`.
+Heading writes broadcast `project_updated` with the heading's project.
+Task mutations applied through `POST /api/sync/push` broadcast the same
+single-entity task events as their REST equivalents.
 
 ---
 

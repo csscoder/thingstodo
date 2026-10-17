@@ -74,7 +74,7 @@ func (h *TagHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	h.broker.BroadcastJSON("tag_updated", map[string]interface{}{"id": tag.ID, "tag": tag})
+	h.broker.BroadcastChange("tag_updated", "tag", tag.ID, map[string]any{"tag": tag})
 	writeJSON(w, http.StatusCreated, tag)
 }
 
@@ -117,7 +117,7 @@ func (h *TagHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "tag not found", "NOT_FOUND")
 		return
 	}
-	h.broker.BroadcastJSON("tag_updated", map[string]interface{}{"id": tag.ID, "tag": tag})
+	h.broker.BroadcastChange("tag_updated", "tag", tag.ID, map[string]any{"tag": tag})
 	writeJSON(w, http.StatusOK, tag)
 }
 
