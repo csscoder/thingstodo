@@ -291,7 +291,7 @@ Response (200): Full task object with nested checklist, attachments, tags, repea
 ```
 
 ### PATCH /api/tasks/:id
-Request: Partial update (any subset of task fields)
+Request: Partial update (any subset of task fields; absent keys are untouched, explicit null clears)
 ```json
 {
   "title": "string",
@@ -305,6 +305,8 @@ Request: Partial update (any subset of task fields)
   "tag_ids": ["string"]
 }
 ```
+
+Container derivation (applies whenever the request includes `project_id`, `area_id` or `heading_id`): a task in a project stores that project's area as `area_id` — a sent `area_id` is only honored on project-less tasks; and when `project_id` changes without a `heading_id`, a heading that does not belong to the new project is cleared.
 
 Response (200): Updated full task object
 
@@ -344,7 +346,7 @@ Marks a task as reviewed by bumping its `updated_at` timestamp. Used by the revi
 Response (200): Updated task
 
 ### PATCH /api/tasks/:id/move
-Move task to a different project, area, or heading.
+Move task to a different project, area, heading, or date. Precise: only keys present in the body are applied — absent keys keep their stored values, explicit null clears.
 
 Request:
 ```json
@@ -355,6 +357,10 @@ Request:
   "when_date": "string|null"
 }
 ```
+
+- `area_id` follows the resolved project (a sent `area_id` only applies to project-less tasks).
+- When `project_id` changes and no `heading_id` is sent, a heading that does not belong to the new project is cleared.
+- A sent `when_date` also syncs the first schedule entry (same as PATCH).
 
 Response (200): Updated task
 
@@ -390,7 +396,7 @@ Request:
 | set_when | `when_date` (string), `when_time` (string, optional) |
 | set_deadline | `deadline` (string) |
 | set_priority | `priority` (number, 0 or 1) |
-| move_project | `project_id` (string or null) |
+| move_project | `project_id` (string or null), `area_id` (string or null, empty = null); the area is derived from the target project and a heading not in it is cleared |
 | add_tags | `tag_ids` (string[]) |
 | remove_tags | `tag_ids` (string[]) |
 | mark_reviewed | _(none)_ — bumps `updated_at` to now |

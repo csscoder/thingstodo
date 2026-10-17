@@ -378,10 +378,12 @@ func (h *TaskHandler) Review(w http.ResponseWriter, r *http.Request) {
 func (h *TaskHandler) Move(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var input model.MoveTaskInput
-	if err := decodeJSON(r, &input); err != nil {
+	raw, err := decodeJSONWithRaw(r, &input)
+	if err != nil {
 		writeDecodeError(w, err)
 		return
 	}
+	input.Raw = raw
 	if input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
 		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
 		return

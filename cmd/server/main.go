@@ -104,6 +104,14 @@ func main() {
 	pushSender := push.NewSender(pushSubRepo, cfg.VAPIDPrivateKey, cfg.VAPIDPublicKey, cfg.VAPIDContact)
 	ntfySender := push.NewNtfySender(settingsRepo, userRepo)
 	notifier := push.NewDispatcher(pushSender, ntfySender, settingsRepo, userRepo)
+	// D5 backfill: a task's area follows its project; repair rows written
+	// before that rule existed. Best-effort — the server keeps starting.
+	if changed, err := taskRepo.BackfillAreasFromProjects(); err != nil {
+		log.Printf("WARNING: task area backfill failed: %v", err)
+	} else {
+		log.Printf("task area backfill: %d task(s) aligned with their project's area", changed)
+	}
+
 	log.Printf("timezone: %s", cfg.Location)
 	sched := scheduler.New(db, taskRepo, ruleRepo, checklistRepo, attachRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, changeLogRepo, notifier, broker, cfg.Location)
 	sched.Start()

@@ -302,6 +302,8 @@ type MoveTaskInput struct {
 	AreaID    *string `json:"area_id"`
 	HeadingID *string `json:"heading_id"`
 	WhenDate  *string `json:"when_date"`
+	// Use json.RawMessage tracking to detect explicit null vs absent
+	Raw map[string]json.RawMessage `json:"-"`
 }
 
 type CreateProjectInput struct {

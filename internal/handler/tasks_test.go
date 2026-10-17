@@ -50,6 +50,7 @@ func setupTaskRouter(t *testing.T) (*testutil.TestClient, *sql.DB) {
 			r.Patch("/cancel", taskHandler.Cancel)
 			r.Patch("/wontdo", taskHandler.WontDo)
 			r.Patch("/reopen", taskHandler.Reopen)
+			r.Patch("/move", taskHandler.Move)
 		})
 	})
 
@@ -703,4 +704,105 @@ func TestComplete_RepeatedRESTCallIs200NoSpawn(t *testing.T) {
 	if instances != 2 { // original + exactly one spawned instance
 		t.Errorf("expected original + one instance after repeated complete, got %d tasks", instances)
 	}
+}
+
+// moveFixture holds the parent ids the move tests share: area a1 with
+// project p1 (heading h1), and area a2 with project p2.
+type moveFixture struct{ area1, area2, project1, project2, heading string }
+
+func setupMoveFixture(t *testing.T, db *sql.DB) moveFixture {
+	t.Helper()
+	f := moveFixture{area1: "a1", area2: "a2", project1: "p1", project2: "p2", heading: "h1"}
+	stmts := []string{
+		"INSERT INTO areas (id, title) VALUES ('a1', 'Area One')",
+		"INSERT INTO areas (id, title) VALUES ('a2', 'Area Two')",
+		"INSERT INTO projects (id, title, area_id) VALUES ('p1', 'Project One', 'a1')",
+		"INSERT INTO projects (id, title, area_id) VALUES ('p2', 'Project Two', 'a2')",
+		"INSERT INTO headings (id, title, project_id, sort_order) VALUES ('h1', 'Heading One', 'p1', 0)",
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("fixture exec %q: %v", s, err)
+		}
+	}
+	return f
+}
+
+// createTaskInHeading creates a task in project p1 under heading h1 and
+// returns its id.
+func createTaskInHeading(t *testing.T, client *testutil.TestClient) string {
+	t.Helper()
+	resp := client.Post("/api/tasks", map[string]interface{}{
+		"title": "Move me", "project_id": "p1", "heading_id": "h1",
+	})
+	testutil.AssertStatus(t, resp, http.StatusCreated)
+	var created map[string]interface{}
+	resp.JSON(t, &created)
+	id, ok := created["id"].(string)
+	if !ok || id == "" {
+		t.Fatalf("no task id in create response: %s", string(resp.Body))
+	}
+	return id
+}
+
+// mustJSONMap decodes the response body as a map for presence checks.
+func mustJSONMap(t *testing.T, resp *testutil.TestResponse) map[string]interface{} {
+	t.Helper()
+	var m map[string]interface{}
+	resp.JSON(t, &m)
+	return m
+}
+
+// TestMove_OnlyPresentKeys pins precise moves: a body that only carries
+// when_date leaves project, area and heading untouched, and the first
+// schedule entry follows the new date.
+func TestMove_OnlyPresentKeys(t *testing.T) {
+	client, db := setupTaskRouter(t)
+	setupMoveFixture(t, db)
+	id := createTaskInHeading(t, client)
+
+	resp := client.Patch("/api/tasks/"+id+"/move", map[string]interface{}{"when_date": "2026-11-01"})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	testutil.AssertJSONField(t, resp, "project_id", "p1")
+	testutil.AssertJSONField(t, resp, "area_id", "a1")
+	testutil.AssertJSONField(t, resp, "heading_id", "h1")
+
+	detail := client.Get("/api/tasks/" + id)
+	testutil.AssertStatus(t, detail, http.StatusOK)
+	var task struct {
+		Schedules []struct {
+			WhenDate string `json:"when_date"`
+		} `json:"schedules"`
+	}
+	detail.JSON(t, &task)
+	if len(task.Schedules) == 0 || task.Schedules[0].WhenDate != "2026-11-01" {
+		t.Errorf("expected first schedule when_date '2026-11-01', got %+v", task.Schedules)
+	}
+}
+
+// TestMove_ProjectChangeClearsForeignHeading pins D5 on both write paths:
+// moving a task to another project drops the old project's heading (when the
+// request names none) and rewrites area_id to the new project's area.
+func TestMove_ProjectChangeClearsForeignHeading(t *testing.T) {
+	run := func(t *testing.T, viaMove bool) {
+		client, db := setupTaskRouter(t)
+		setupMoveFixture(t, db)
+		id := createTaskInHeading(t, client)
+
+		var resp *testutil.TestResponse
+		if viaMove {
+			resp = client.Patch("/api/tasks/"+id+"/move", map[string]interface{}{"project_id": "p2"})
+		} else {
+			resp = client.Patch("/api/tasks/"+id, map[string]interface{}{"project_id": "p2"})
+		}
+		testutil.AssertStatus(t, resp, http.StatusOK)
+		testutil.AssertJSONField(t, resp, "project_id", "p2")
+		testutil.AssertJSONField(t, resp, "area_id", "a2")
+		if _, present := mustJSONMap(t, resp)["heading_id"]; !present {
+			t.Fatalf("response missing heading_id: %s", string(resp.Body))
+		}
+		testutil.AssertJSONField(t, resp, "heading_id", nil)
+	}
+	t.Run("move endpoint", func(t *testing.T) { run(t, true) })
+	t.Run("patch endpoint", func(t *testing.T) { run(t, false) })
 }

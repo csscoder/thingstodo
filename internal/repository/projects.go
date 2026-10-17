@@ -2,6 +2,7 @@ package repository
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -214,63 +215,141 @@ func (r *ProjectRepository) Create(input model.CreateProjectInput) (*model.Proje
 	return project, err
 }
 
+// Update applies the partial project update in one transaction. When
+// area_id actually changes, the same transaction rewrites the area_id of
+// the project's tasks whose area now differs (D5: a task's area follows
+// its project), logging one task change per affected row.
 func (r *ProjectRepository) Update(id string, input model.UpdateProjectInput) (*model.ProjectDetail, error) {
-	var sets []string
-	var args []interface{}
+	_, areaGiven := input.Raw["area_id"]
+	var project *model.ProjectDetail
+	err := r.inTx(func(db DBTX) error {
+		br := r.WithTx(db.(*sql.Tx))
 
-	if input.Title != nil {
-		sets = append(sets, "title = ?")
-		args = append(args, *input.Title)
-	}
-	if input.Notes != nil {
-		sets = append(sets, "notes = ?")
-		args = append(args, *input.Notes)
-	}
-	if _, ok := input.Raw["area_id"]; ok {
-		sets = append(sets, "area_id = ?")
-		args = append(args, input.AreaID)
-	}
-	if input.Status != nil {
-		sets = append(sets, "status = ?")
-		args = append(args, *input.Status)
-	}
-	if _, ok := input.Raw["when_date"]; ok {
-		sets = append(sets, "when_date = ?")
-		args = append(args, input.WhenDate)
-	}
-	if _, ok := input.Raw["deadline"]; ok {
-		sets = append(sets, "deadline = ?")
-		args = append(args, input.Deadline)
-	}
+		var sets []string
+		var args []interface{}
 
-	if len(sets) > 0 {
-		sets = append(sets, "updated_at = datetime('now')")
-		args = append(args, id)
-		_, err := r.db.Exec("UPDATE projects SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...)
-		if err != nil {
-			if isUniqueConstraintError(err) {
-				return nil, ErrDuplicateProjectName
+		if input.Title != nil {
+			sets = append(sets, "title = ?")
+			args = append(args, *input.Title)
+		}
+		if input.Notes != nil {
+			sets = append(sets, "notes = ?")
+			args = append(args, *input.Notes)
+		}
+		if areaGiven {
+			sets = append(sets, "area_id = ?")
+			args = append(args, input.AreaID)
+		}
+		if input.Status != nil {
+			sets = append(sets, "status = ?")
+			args = append(args, *input.Status)
+		}
+		if _, ok := input.Raw["when_date"]; ok {
+			sets = append(sets, "when_date = ?")
+			args = append(args, input.WhenDate)
+		}
+		if _, ok := input.Raw["deadline"]; ok {
+			sets = append(sets, "deadline = ?")
+			args = append(args, input.Deadline)
+		}
+
+		// Is the area really changing? Only then is the task cascade due.
+		cascade := false
+		if areaGiven {
+			var storedArea sql.NullString
+			loadErr := db.QueryRow("SELECT area_id FROM projects WHERE id = ?", id).Scan(&storedArea)
+			if loadErr != nil && !errors.Is(loadErr, sql.ErrNoRows) {
+				return fmt.Errorf("load project area: %w", loadErr)
 			}
-			return nil, err
+			if loadErr == nil {
+				var newArea sql.NullString
+				if input.AreaID != nil {
+					newArea = sql.NullString{String: *input.AreaID, Valid: true}
+				}
+				cascade = newArea.Valid != storedArea.Valid || (newArea.Valid && newArea.String != storedArea.String)
+			}
 		}
-	}
-	if input.TagIDs != nil {
-		if err := r.setTags(id, input.TagIDs); err != nil {
-			return nil, fmt.Errorf("set project tags: %w", err)
-		}
-	}
-	project, err := r.GetByID(id)
-	if err == nil && project != nil {
-		var changedFields []string
-		for k := range input.Raw {
-			changedFields = append(changedFields, k)
+
+		if len(sets) > 0 {
+			sets = append(sets, "updated_at = datetime('now')")
+			args = append(args, id)
+			if _, err := db.Exec("UPDATE projects SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...); err != nil {
+				if isUniqueConstraintError(err) {
+					return ErrDuplicateProjectName
+				}
+				return err
+			}
 		}
 		if input.TagIDs != nil {
-			changedFields = append(changedFields, "tag_ids")
+			if err := br.setTags(id, input.TagIDs); err != nil {
+				return fmt.Errorf("set project tags: %w", err)
+			}
 		}
-		logChange(r.changeLog, "project", id, "update", changedFields, project, "", "")
+
+		// D5 cascade: when the area really changed, rewrite the area_id of the
+		// project's tasks whose area now differs — trashed rows included — with
+		// one task change logged per affected row, inside this transaction.
+		if cascade {
+			tasks := NewTaskRepository(r.conn, r.changeLog).WithTx(db.(*sql.Tx))
+			rows, err := db.Query(
+				"SELECT id FROM tasks WHERE project_id = ? AND area_id IS NOT ? ORDER BY id", id, input.AreaID)
+			if err != nil {
+				return fmt.Errorf("collect project tasks for area cascade: %w", err)
+			}
+			var taskIDs []string
+			for rows.Next() {
+				var tid string
+				if err := rows.Scan(&tid); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("scan project task for area cascade: %w", err)
+				}
+				taskIDs = append(taskIDs, tid)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			for _, tid := range taskIDs {
+				if _, err := db.Exec(
+					"UPDATE tasks SET area_id = ?, updated_at = datetime('now') WHERE id = ?", input.AreaID, tid,
+				); err != nil {
+					return fmt.Errorf("cascade area to task %s: %w", tid, err)
+				}
+				task, err := tasks.GetByID(tid)
+				if err != nil {
+					return err
+				}
+				if err := logChange(tasks.changeLog, "task", tid, "update", []string{"area_id"}, task, "", ""); err != nil {
+					return fmt.Errorf("log area cascade for task %s: %w", tid, err)
+				}
+			}
+		}
+
+		p, err := br.GetByID(id)
+		if err != nil {
+			return err
+		}
+		if p != nil {
+			var changedFields []string
+			for k := range input.Raw {
+				changedFields = append(changedFields, k)
+			}
+			if input.TagIDs != nil {
+				changedFields = append(changedFields, "tag_ids")
+			}
+			if err := logChange(br.changeLog, "project", id, "update", changedFields, p, "", ""); err != nil {
+				return err
+			}
+		}
+		project = p
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return project, err
+	return project, nil
 }
 
 func (r *ProjectRepository) Delete(id string) error {

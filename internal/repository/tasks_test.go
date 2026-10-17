@@ -1,6 +1,8 @@
 package repository_test
 
 import (
+	"database/sql"
+	"encoding/json"
 	"testing"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
@@ -520,5 +522,166 @@ func TestBulkAction_StatusActionsRejected(t *testing.T) {
 	task, _ := repo.GetByID(created.ID)
 	if task == nil || task.Status != "open" {
 		t.Fatalf("task should still be open, got %+v", task)
+	}
+}
+
+// setupParentFixture inserts two areas, a project in the first area and a
+// heading in that project; tests reference the fixed ids directly.
+func setupParentFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec("INSERT INTO areas (id, title) VALUES ('a1', 'Area One')")
+	if err != nil {
+		t.Fatalf("insert area a1: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO areas (id, title) VALUES ('a2', 'Area Two')")
+	if err != nil {
+		t.Fatalf("insert area a2: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO projects (id, title, area_id) VALUES ('p1', 'Project One', 'a1')")
+	if err != nil {
+		t.Fatalf("insert project p1: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO headings (id, title, project_id, sort_order) VALUES ('h1', 'Heading One', 'p1', 0)")
+	if err != nil {
+		t.Fatalf("insert heading h1: %v", err)
+	}
+}
+
+// countTaskChangeLog returns the number of change_log rows for the given
+// task ids with the given action.
+func countTaskChangeLog(t *testing.T, db *sql.DB, action string, ids ...string) int {
+	t.Helper()
+	query := "SELECT COUNT(*) FROM change_log WHERE entity = 'task' AND action = ? AND entity_id IN ("
+	args := []interface{}{action}
+	for i, id := range ids {
+		if i > 0 {
+			query += ", "
+		}
+		query += "?"
+		args = append(args, id)
+	}
+	query += ")"
+	var n int
+	if err := db.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatalf("count change log: %v", err)
+	}
+	return n
+}
+
+// TestTaskCreate_AreaFollowsProject pins D5: a task created in a project
+// stores the project's area, not the area_id the request carried.
+func TestTaskCreate_AreaFollowsProject(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	repo := repository.NewTaskRepository(db, nil)
+	setupParentFixture(t, db)
+
+	task, err := repo.Create(model.CreateTaskInput{
+		Title:     "Area follows project",
+		ProjectID: strPtr("p1"),
+		AreaID:    strPtr("a2"), // contradicts the project's area
+	})
+	if err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+	if task.ProjectID == nil || *task.ProjectID != "p1" {
+		t.Errorf("expected project_id 'p1', got %v", task.ProjectID)
+	}
+	if task.AreaID == nil || *task.AreaID != "a1" {
+		t.Errorf("expected area_id 'a1' (the project's area), got %v", task.AreaID)
+	}
+}
+
+// TestProjectAreaChange_UpdatesTasks pins D5: changing a project's area
+// updates its tasks' area_id in the same transaction, one change-log entry
+// per affected task.
+func TestProjectAreaChange_UpdatesTasks(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	cl := repository.NewChangeLogRepository(db)
+	projRepo := repository.NewProjectRepository(db, cl)
+	taskRepo := repository.NewTaskRepository(db, cl)
+	setupParentFixture(t, db)
+
+	t1, err := taskRepo.Create(model.CreateTaskInput{Title: "T1", ProjectID: strPtr("p1")})
+	if err != nil {
+		t.Fatalf("create t1: %v", err)
+	}
+	t2, err := taskRepo.Create(model.CreateTaskInput{Title: "T2", ProjectID: strPtr("p1")})
+	if err != nil {
+		t.Fatalf("create t2: %v", err)
+	}
+
+	if _, err := projRepo.Update("p1", model.UpdateProjectInput{
+		AreaID: strPtr("a2"),
+		Raw:    map[string]json.RawMessage{"area_id": []byte(`"a2"`)},
+	}); err != nil {
+		t.Fatalf("update project area: %v", err)
+	}
+
+	for _, id := range []string{t1.ID, t2.ID} {
+		task, err := taskRepo.GetByID(id)
+		if err != nil {
+			t.Fatalf("get task %s: %v", id, err)
+		}
+		if task.AreaID == nil || *task.AreaID != "a2" {
+			t.Errorf("task %s: expected area_id 'a2' after project change, got %v", id, task.AreaID)
+		}
+	}
+	if n := countTaskChangeLog(t, db, "update", t1.ID, t2.ID); n != 2 {
+		t.Errorf("expected exactly 2 task change-log entries, got %d", n)
+	}
+}
+
+// TestBackfillAreas_IdempotentAndLogged pins the startup backfill: corrupted
+// rows are aligned with their project's area, each change is logged, and a
+// second run changes nothing.
+func TestBackfillAreas_IdempotentAndLogged(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	cl := repository.NewChangeLogRepository(db)
+	repo := repository.NewTaskRepository(db, cl)
+	setupParentFixture(t, db)
+
+	t1, err := repo.Create(model.CreateTaskInput{Title: "T1", ProjectID: strPtr("p1")})
+	if err != nil {
+		t.Fatalf("create t1: %v", err)
+	}
+	t2, err := repo.Create(model.CreateTaskInput{Title: "T2", ProjectID: strPtr("p1")})
+	if err != nil {
+		t.Fatalf("create t2: %v", err)
+	}
+
+	// Corrupt both rows behind the repository's back.
+	if _, err := db.Exec("UPDATE tasks SET area_id = 'a2' WHERE id IN (?, ?)", t1.ID, t2.ID); err != nil {
+		t.Fatalf("corrupt rows: %v", err)
+	}
+
+	changed, err := repo.BackfillAreasFromProjects()
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if changed != 2 {
+		t.Errorf("expected 2 changed rows on first run, got %d", changed)
+	}
+	for _, id := range []string{t1.ID, t2.ID} {
+		task, err := repo.GetByID(id)
+		if err != nil {
+			t.Fatalf("get task %s: %v", id, err)
+		}
+		if task.AreaID == nil || *task.AreaID != "a1" {
+			t.Errorf("task %s: expected area_id 'a1' after backfill, got %v", id, task.AreaID)
+		}
+	}
+	if n := countTaskChangeLog(t, db, "update", t1.ID, t2.ID); n != 2 {
+		t.Errorf("expected exactly 2 task change-log entries, got %d", n)
+	}
+
+	changed, err = repo.BackfillAreasFromProjects()
+	if err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if changed != 0 {
+		t.Errorf("expected 0 changed rows on second run, got %d", changed)
+	}
+	if n := countTaskChangeLog(t, db, "update", t1.ID, t2.ID); n != 2 {
+		t.Errorf("second run must not log: expected 2 entries, got %d", n)
 	}
 }

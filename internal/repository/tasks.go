@@ -3,11 +3,71 @@ package repository
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
 )
+
+// normalizeParents enforces the container invariant (D5) before parent
+// pointers are written: a task's area is its project's area, and a heading
+// belongs to the task's project.
+//   - When *projectID is non-nil, *areaID is set to that project's area
+//     (nil when the project has none), regardless of what the caller sent.
+//   - When the project changed and no heading was given, a heading that
+//     does not belong to the new project is cleared; with no new project
+//     every heading is foreign and cleared.
+//
+// It applies uniformly to trashed and live rows.
+func normalizeParents(db DBTX, projectID, areaID, headingID **string, projectChanged, headingGiven bool) error {
+	if *projectID != nil {
+		var projectArea sql.NullString
+		err := db.QueryRow("SELECT area_id FROM projects WHERE id = ?", **projectID).Scan(&projectArea)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("normalize parents: load project area: %w", err)
+		}
+		// An unknown project id keeps the no-area result: FK enforcement is
+		// the database's job, bulk moves must not gain a new error path.
+		if projectArea.Valid {
+			a := projectArea.String
+			*areaID = &a
+		} else {
+			*areaID = nil
+		}
+	}
+	if projectChanged && !headingGiven && *headingID != nil {
+		if *projectID == nil {
+			*headingID = nil
+			return nil
+		}
+		inProject, err := HeadingInProject(db, **headingID, **projectID)
+		if err != nil {
+			return fmt.Errorf("normalize parents: heading check: %w", err)
+		}
+		if !inProject {
+			*headingID = nil
+		}
+	}
+	return nil
+}
+
+// nullStrPtr converts a scanned NULL-able string into a string pointer.
+func nullStrPtr(ns sql.NullString) *string {
+	if ns.Valid {
+		s := ns.String
+		return &s
+	}
+	return nil
+}
+
+// sameID reports whether two nullable ids point at the same value.
+func sameID(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
 
 type TaskRepository struct {
 	db        DBTX
@@ -224,6 +284,14 @@ func (r *TaskRepository) Create(input model.CreateTaskInput) (*model.TaskDetail,
 		// transaction instead of escaping to the pool.
 		br := r.WithTx(db.(*sql.Tx))
 
+		// D5: the area follows the project. A new task has no stored
+		// project, so a non-nil project counts as changed; a heading sent
+		// alongside it is the boundary check's to reject, not ours to clear.
+		projectID, areaID, headingID := input.ProjectID, input.AreaID, input.HeadingID
+		if err := normalizeParents(db, &projectID, &areaID, &headingID, input.ProjectID != nil, input.HeadingID != nil); err != nil {
+			return err
+		}
+
 		var maxSort float64
 		_ = db.QueryRow("SELECT COALESCE(MAX(sort_order_today), 0) FROM tasks").Scan(&maxSort)
 
@@ -232,7 +300,7 @@ func (r *TaskRepository) Create(input model.CreateTaskInput) (*model.TaskDetail,
 				project_id, area_id, heading_id, sort_order_today, sort_order_project, sort_order_heading)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, input.Title, input.Notes, input.WhenDate,
-			boolToInt(input.HighPriority), input.Deadline, input.ProjectID, input.AreaID, input.HeadingID,
+			boolToInt(input.HighPriority), input.Deadline, projectID, areaID, headingID,
 			maxSort+1024, maxSort+1024, maxSort+1024,
 		); err != nil {
 			return fmt.Errorf("create task: %w", err)
@@ -268,48 +336,89 @@ func (r *TaskRepository) Create(input model.CreateTaskInput) (*model.TaskDetail,
 }
 
 func (r *TaskRepository) Update(id string, input model.UpdateTaskInput) (*model.TaskDetail, error) {
-	var sets []string
-	var args []interface{}
-
-	if input.Title != nil {
-		sets = append(sets, "title = ?")
-		args = append(args, *input.Title)
-	}
-	if input.Notes != nil {
-		sets = append(sets, "notes = ?")
-		args = append(args, *input.Notes)
-	}
-	if _, ok := input.Raw["when_date"]; ok {
-		sets = append(sets, "when_date = ?")
-		args = append(args, input.WhenDate)
-	}
-	if input.HighPriority != nil {
-		sets = append(sets, "high_priority = ?")
-		args = append(args, boolToInt(*input.HighPriority))
-	}
-	if _, ok := input.Raw["deadline"]; ok {
-		sets = append(sets, "deadline = ?")
-		args = append(args, input.Deadline)
-	}
-	if _, ok := input.Raw["project_id"]; ok {
-		sets = append(sets, "project_id = ?")
-		args = append(args, input.ProjectID)
-	}
-	if _, ok := input.Raw["area_id"]; ok {
-		sets = append(sets, "area_id = ?")
-		args = append(args, input.AreaID)
-	}
-	if _, ok := input.Raw["heading_id"]; ok {
-		sets = append(sets, "heading_id = ?")
-		args = append(args, input.HeadingID)
-	}
-
 	var task *model.TaskDetail
 	err := r.inTx(func(db DBTX) error {
 		// inTx always passes the open *sql.Tx; br is this repository bound to
 		// it, so nested helper methods and change-log writes join the
 		// transaction instead of escaping to the pool.
 		br := r.WithTx(db.(*sql.Tx))
+
+		var sets []string
+		var args []interface{}
+
+		if input.Title != nil {
+			sets = append(sets, "title = ?")
+			args = append(args, *input.Title)
+		}
+		if input.Notes != nil {
+			sets = append(sets, "notes = ?")
+			args = append(args, *input.Notes)
+		}
+		if _, ok := input.Raw["when_date"]; ok {
+			sets = append(sets, "when_date = ?")
+			args = append(args, input.WhenDate)
+		}
+		if input.HighPriority != nil {
+			sets = append(sets, "high_priority = ?")
+			args = append(args, boolToInt(*input.HighPriority))
+		}
+		if _, ok := input.Raw["deadline"]; ok {
+			sets = append(sets, "deadline = ?")
+			args = append(args, input.Deadline)
+		}
+
+		// D5 container normalization, applied only when the request touches a
+		// parent pointer: resolve the effective values, enforce the
+		// invariant, then write the keys the client sent plus the values
+		// normalization actually changed. Absent keys otherwise stay put.
+		var extraFields []string
+		_, projectGiven := input.Raw["project_id"]
+		_, areaGiven := input.Raw["area_id"]
+		_, headingGiven := input.Raw["heading_id"]
+		if projectGiven || areaGiven || headingGiven {
+			var storedProject, storedArea, storedHeading sql.NullString
+			loadErr := db.QueryRow(
+				"SELECT project_id, area_id, heading_id FROM tasks WHERE id = ?", id,
+			).Scan(&storedProject, &storedArea, &storedHeading)
+			if loadErr != nil && !errors.Is(loadErr, sql.ErrNoRows) {
+				return fmt.Errorf("load task parents: %w", loadErr)
+			}
+			if loadErr == nil {
+				oldProject, oldArea, oldHeading := nullStrPtr(storedProject), nullStrPtr(storedArea), nullStrPtr(storedHeading)
+				projectID, areaID, headingID := oldProject, oldArea, oldHeading
+				if projectGiven {
+					projectID = input.ProjectID
+				}
+				if areaGiven {
+					areaID = input.AreaID
+				}
+				if headingGiven {
+					headingID = input.HeadingID
+				}
+				projectChanged := !sameID(projectID, oldProject)
+				if err := normalizeParents(db, &projectID, &areaID, &headingID, projectChanged, headingGiven); err != nil {
+					return err
+				}
+				if projectGiven || !sameID(projectID, oldProject) {
+					sets = append(sets, "project_id = ?")
+					args = append(args, projectID)
+				}
+				if areaGiven || !sameID(areaID, oldArea) {
+					sets = append(sets, "area_id = ?")
+					args = append(args, areaID)
+					if !areaGiven {
+						extraFields = append(extraFields, "area_id")
+					}
+				}
+				if headingGiven || !sameID(headingID, oldHeading) {
+					sets = append(sets, "heading_id = ?")
+					args = append(args, headingID)
+					if !headingGiven {
+						extraFields = append(extraFields, "heading_id")
+					}
+				}
+			}
+		}
 
 		// Always bump updated_at when there are field changes,
 		// or when updated_at is explicitly requested (e.g. review task)
@@ -347,6 +456,7 @@ func (r *TaskRepository) Update(id string, input model.UpdateTaskInput) (*model.
 		for k := range input.Raw {
 			changedFields = append(changedFields, k)
 		}
+		changedFields = append(changedFields, extraFields...)
 		if input.TagIDs != nil {
 			changedFields = append(changedFields, "tag_ids")
 		}
@@ -359,35 +469,101 @@ func (r *TaskRepository) Update(id string, input model.UpdateTaskInput) (*model.
 	return task, nil
 }
 
+// Move relocates a task by exactly the keys present in input.Raw: absent
+// container keys and an absent when_date keep their stored values. The
+// resolved parents then go through the D5 normalization (area follows the
+// project, a foreign heading is cleared unless the request names one), and
+// a present when_date syncs the first schedule entry. Everything runs in
+// one transaction; a body with no recognized keys writes nothing.
 func (r *TaskRepository) Move(id string, input model.MoveTaskInput) (*model.TaskDetail, error) {
-	var sets []string
-	var args []interface{}
+	var task *model.TaskDetail
+	err := r.inTx(func(db DBTX) error {
+		br := r.WithTx(db.(*sql.Tx))
 
-	sets = append(sets, "project_id = ?")
-	args = append(args, input.ProjectID)
+		var storedProject, storedArea, storedHeading sql.NullString
+		loadErr := db.QueryRow(
+			"SELECT project_id, area_id, heading_id FROM tasks WHERE id = ?", id,
+		).Scan(&storedProject, &storedArea, &storedHeading)
+		if errors.Is(loadErr, sql.ErrNoRows) {
+			return nil // unknown task: nothing to move, caller maps nil to 404
+		}
+		if loadErr != nil {
+			return fmt.Errorf("move task: load: %w", loadErr)
+		}
 
-	sets = append(sets, "area_id = ?")
-	args = append(args, input.AreaID)
+		oldProject, oldArea, oldHeading := nullStrPtr(storedProject), nullStrPtr(storedArea), nullStrPtr(storedHeading)
+		projectID, areaID, headingID := oldProject, oldArea, oldHeading
+		_, projectGiven := input.Raw["project_id"]
+		_, areaGiven := input.Raw["area_id"]
+		_, headingGiven := input.Raw["heading_id"]
+		_, whenGiven := input.Raw["when_date"]
+		if projectGiven {
+			projectID = input.ProjectID
+		}
+		if areaGiven {
+			areaID = input.AreaID
+		}
+		if headingGiven {
+			headingID = input.HeadingID
+		}
 
-	sets = append(sets, "heading_id = ?")
-	args = append(args, input.HeadingID)
+		projectChanged := !sameID(projectID, oldProject)
+		if err := normalizeParents(db, &projectID, &areaID, &headingID, projectChanged, headingGiven); err != nil {
+			return err
+		}
 
-	if input.WhenDate != nil {
-		sets = append(sets, "when_date = ?")
-		args = append(args, *input.WhenDate)
-	}
+		var sets []string
+		var args []interface{}
+		var fields []string
+		if projectGiven || !sameID(projectID, oldProject) {
+			sets = append(sets, "project_id = ?")
+			args = append(args, projectID)
+			fields = append(fields, "project_id")
+		}
+		if areaGiven || !sameID(areaID, oldArea) {
+			sets = append(sets, "area_id = ?")
+			args = append(args, areaID)
+			fields = append(fields, "area_id")
+		}
+		if headingGiven || !sameID(headingID, oldHeading) {
+			sets = append(sets, "heading_id = ?")
+			args = append(args, headingID)
+			fields = append(fields, "heading_id")
+		}
+		if whenGiven {
+			sets = append(sets, "when_date = ?")
+			args = append(args, input.WhenDate)
+			fields = append(fields, "when_date")
+		}
 
-	sets = append(sets, "updated_at = datetime('now')")
-	args = append(args, id)
-	_, err := r.db.Exec("UPDATE tasks SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...)
+		if len(sets) > 0 {
+			sets = append(sets, "updated_at = datetime('now')")
+			args = append(args, id)
+			if _, err := db.Exec("UPDATE tasks SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...); err != nil {
+				return fmt.Errorf("move task: %w", err)
+			}
+		}
+
+		if whenGiven {
+			if err := br.syncFirstScheduleDate(id, input.WhenDate); err != nil {
+				return fmt.Errorf("sync first schedule date: %w", err)
+			}
+		}
+
+		t, err := br.GetByID(id)
+		if err != nil {
+			return err
+		}
+		task = t
+		if task != nil && len(fields) > 0 {
+			return logChange(br.changeLog, "task", id, "update", fields, task, "", "")
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("move task: %w", err)
+		return nil, err
 	}
-	task, err := r.GetByID(id)
-	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "update", []string{"project_id", "area_id", "heading_id"}, task, "", "")
-	}
-	return task, err
+	return task, nil
 }
 
 func (r *TaskRepository) Delete(id string) error {
@@ -544,11 +720,36 @@ func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
 				_, execErr = db.Exec(
 					"UPDATE tasks SET high_priority = CASE WHEN high_priority = 1 THEN 0 ELSE 1 END, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
 			case "move_project":
-				projectID, _ := input.Params["project_id"].(string)
-				areaID, _ := input.Params["area_id"].(string)
-				_, execErr = db.Exec(
-					"UPDATE tasks SET project_id = ?, area_id = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
-					bulkNilIfEmpty(projectID), bulkNilIfEmpty(areaID), id)
+				// The params state the target containers (empty = none, as
+				// before); D5 normalization then derives the area from the
+				// target project and clears a heading left behind by the
+				// move. Unknown ids keep their old no-op behavior.
+				projectIDParam, _ := input.Params["project_id"].(string)
+				areaIDParam, _ := input.Params["area_id"].(string)
+				var storedProject, storedArea, storedHeading sql.NullString
+				loadErr := db.QueryRow(
+					"SELECT project_id, area_id, heading_id FROM tasks WHERE id = ?", id,
+				).Scan(&storedProject, &storedArea, &storedHeading)
+				if loadErr != nil && !errors.Is(loadErr, sql.ErrNoRows) {
+					execErr = fmt.Errorf("bulk move: load task %s: %w", id, loadErr)
+				} else if loadErr == nil {
+					var projectID, areaID *string
+					if p := projectIDParam; p != "" {
+						projectID = &p
+					}
+					if a := areaIDParam; a != "" {
+						areaID = &a
+					}
+					headingID := nullStrPtr(storedHeading)
+					projectChanged := !sameID(projectID, nullStrPtr(storedProject))
+					if nErr := normalizeParents(db, &projectID, &areaID, &headingID, projectChanged, false); nErr != nil {
+						execErr = nErr
+					} else {
+						_, execErr = db.Exec(
+							"UPDATE tasks SET project_id = ?, area_id = ?, heading_id = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
+							projectID, areaID, headingID, id)
+					}
+				}
 			case "add_tags":
 				tagIDs, ok := input.Params["tag_ids"].([]interface{})
 				if ok {
@@ -631,6 +832,67 @@ func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
 	}
 
 	return affected, nil
+}
+
+// BackfillAreasFromProjects repairs rows written before a task's area
+// followed its project (D5): every task whose area_id differs from its
+// project's area — trashed rows included — is updated to it, with one
+// change-log entry per row, all in one transaction. It returns the number
+// of rows changed; a second run over consistent data changes nothing.
+func (r *TaskRepository) BackfillAreasFromProjects() (changed int, err error) {
+	err = r.inTx(func(db DBTX) error {
+		rows, err := db.Query(`
+			SELECT t.id FROM tasks t
+			JOIN projects p ON p.id = t.project_id
+			WHERE t.area_id IS NOT p.area_id
+			ORDER BY t.id`)
+		if err != nil {
+			return fmt.Errorf("backfill areas: select: %w", err)
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("backfill areas: scan: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		br := r.WithTx(db.(*sql.Tx))
+		for _, id := range ids {
+			var areaID sql.NullString
+			if err := db.QueryRow(
+				"SELECT p.area_id FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = ?", id,
+			).Scan(&areaID); err != nil {
+				return fmt.Errorf("backfill areas: load project area for %s: %w", id, err)
+			}
+			if _, err := db.Exec(
+				"UPDATE tasks SET area_id = ?, updated_at = datetime('now') WHERE id = ?", areaID, id,
+			); err != nil {
+				return fmt.Errorf("backfill areas: update %s: %w", id, err)
+			}
+			task, err := br.GetByID(id)
+			if err != nil {
+				return err
+			}
+			if err := logChange(br.changeLog, "task", id, "update", []string{"area_id"}, task, "", ""); err != nil {
+				return fmt.Errorf("backfill areas: log %s: %w", id, err)
+			}
+			changed++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return changed, nil
 }
 
 func bulkNilIfEmpty(s string) interface{} {
