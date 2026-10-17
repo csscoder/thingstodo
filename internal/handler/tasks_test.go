@@ -719,6 +719,7 @@ func setupMoveFixture(t *testing.T, db *sql.DB) moveFixture {
 		"INSERT INTO projects (id, title, area_id) VALUES ('p1', 'Project One', 'a1')",
 		"INSERT INTO projects (id, title, area_id) VALUES ('p2', 'Project Two', 'a2')",
 		"INSERT INTO headings (id, title, project_id, sort_order) VALUES ('h1', 'Heading One', 'p1', 0)",
+		"INSERT INTO headings (id, title, project_id, sort_order) VALUES ('h2', 'Heading Two', 'p2', 0)",
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -805,4 +806,90 @@ func TestMove_ProjectChangeClearsForeignHeading(t *testing.T) {
 	}
 	t.Run("move endpoint", func(t *testing.T) { run(t, true) })
 	t.Run("patch endpoint", func(t *testing.T) { run(t, false) })
+}
+
+// TestUpdate_HeadingFromAnotherProjectIs422 pins Create's membership rule on
+// PATCH: a heading sent with a project it does not belong to is rejected
+// with the same 422 shape Create produces, and the task is unchanged. The
+// heading-only variant resolves the stored project the same way.
+func TestUpdate_HeadingFromAnotherProjectIs422(t *testing.T) {
+	t.Run("project and heading sent", func(t *testing.T) {
+		client, db := setupTaskRouter(t)
+		setupMoveFixture(t, db)
+		id := createTaskInHeading(t, client)
+
+		resp := client.Patch("/api/tasks/"+id, map[string]interface{}{"project_id": "p2", "heading_id": "h1"})
+		testutil.AssertStatus(t, resp, http.StatusUnprocessableEntity)
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "heading_id")
+		testutil.AssertJSONField(t, resp, "error", "heading is not in this project")
+
+		detail := client.Get("/api/tasks/" + id)
+		testutil.AssertStatus(t, detail, http.StatusOK)
+		testutil.AssertJSONField(t, detail, "project_id", "p1")
+		testutil.AssertJSONField(t, detail, "heading_id", "h1")
+	})
+	t.Run("heading only, stored project", func(t *testing.T) {
+		client, db := setupTaskRouter(t)
+		setupMoveFixture(t, db)
+		id := createTaskInHeading(t, client)
+
+		// h2 belongs to p2, the task stays in p1: rejected against the
+		// stored project.
+		resp := client.Patch("/api/tasks/"+id, map[string]interface{}{"heading_id": "h2"})
+		testutil.AssertStatus(t, resp, http.StatusUnprocessableEntity)
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "heading_id")
+
+		detail := client.Get("/api/tasks/" + id)
+		testutil.AssertStatus(t, detail, http.StatusOK)
+		testutil.AssertJSONField(t, detail, "project_id", "p1")
+		testutil.AssertJSONField(t, detail, "heading_id", "h1")
+	})
+}
+
+// TestMove_HeadingFromAnotherProjectIs422 pins the same rule on the move
+// endpoint: a heading that does not belong to the move's effective project
+// (sent or stored) is rejected with Create's 422 shape.
+func TestMove_HeadingFromAnotherProjectIs422(t *testing.T) {
+	t.Run("project and heading sent", func(t *testing.T) {
+		client, db := setupTaskRouter(t)
+		setupMoveFixture(t, db)
+		id := createTaskInHeading(t, client)
+
+		resp := client.Patch("/api/tasks/"+id+"/move", map[string]interface{}{"project_id": "p2", "heading_id": "h1"})
+		testutil.AssertStatus(t, resp, http.StatusUnprocessableEntity)
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "heading_id")
+		testutil.AssertJSONField(t, resp, "error", "heading is not in this project")
+
+		detail := client.Get("/api/tasks/" + id)
+		testutil.AssertStatus(t, detail, http.StatusOK)
+		testutil.AssertJSONField(t, detail, "project_id", "p1")
+		testutil.AssertJSONField(t, detail, "heading_id", "h1")
+	})
+	t.Run("heading only, stored project", func(t *testing.T) {
+		client, db := setupTaskRouter(t)
+		setupMoveFixture(t, db)
+		id := createTaskInHeading(t, client)
+
+		resp := client.Patch("/api/tasks/"+id+"/move", map[string]interface{}{"heading_id": "h2"})
+		testutil.AssertStatus(t, resp, http.StatusUnprocessableEntity)
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "heading_id")
+	})
+}
+
+// TestMove_KeepsHeadingBelongingToNewProject pins the keep-case: a heading
+// that belongs to the new project survives the move.
+func TestMove_KeepsHeadingBelongingToNewProject(t *testing.T) {
+	client, db := setupTaskRouter(t)
+	setupMoveFixture(t, db)
+	id := createTaskInHeading(t, client)
+
+	resp := client.Patch("/api/tasks/"+id+"/move", map[string]interface{}{"project_id": "p2", "heading_id": "h2"})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	testutil.AssertJSONField(t, resp, "project_id", "p2")
+	testutil.AssertJSONField(t, resp, "heading_id", "h2")
+	testutil.AssertJSONField(t, resp, "area_id", "a2")
 }

@@ -226,6 +226,10 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 		!refExists(w, db, "headings", "heading", "heading_id", *input.HeadingID) {
 		return
 	}
+	_, projectGiven := input.Raw["project_id"]
+	if !h.checkHeadingMembership(w, db, id, input.HeadingID, projectGiven, input.ProjectID) {
+		return
+	}
 	if input.TagIDs != nil && !tagsExist(w, db, "tag_ids", input.TagIDs) {
 		return
 	}
@@ -398,6 +402,10 @@ func (h *TaskHandler) Move(w http.ResponseWriter, r *http.Request) {
 	if input.HeadingID != nil && !refExists(w, db, "headings", "heading", "heading_id", *input.HeadingID) {
 		return
 	}
+	_, projectGiven := input.Raw["project_id"]
+	if !h.checkHeadingMembership(w, db, id, input.HeadingID, projectGiven, input.ProjectID) {
+		return
+	}
 	task, err := h.repo.Move(id, input)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
@@ -409,6 +417,43 @@ func (h *TaskHandler) Move(w http.ResponseWriter, r *http.Request) {
 	}
 	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
 	writeJSON(w, http.StatusOK, task)
+}
+
+// checkHeadingMembership applies Create's heading rule to a partial change:
+// when the request carries a heading, it must belong to the effective
+// project — the project the request sets, or the task's stored one when the
+// request leaves the project untouched. With no effective project the plain
+// existence check (already run) is enough, matching Create's shape. It
+// writes the error response and returns false when validation fails.
+func (h *TaskHandler) checkHeadingMembership(w http.ResponseWriter, db repository.DBTX, taskID string, headingID *string, projectGiven bool, projectID *string) bool {
+	if headingID == nil {
+		return true
+	}
+	effective := projectID
+	if !projectGiven {
+		existing, err := h.repo.GetByID(taskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+			return false
+		}
+		if existing == nil {
+			return true // unknown task: the repository's 404 path handles it
+		}
+		effective = existing.ProjectID
+	}
+	if effective == nil {
+		return true
+	}
+	inProject, err := repository.HeadingInProject(db, *headingID, *effective)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return false
+	}
+	if !inProject {
+		writeFieldError(w, http.StatusUnprocessableEntity, "heading is not in this project", "VALIDATION", "heading_id")
+		return false
+	}
+	return true
 }
 
 func (h *TaskHandler) Reorder(w http.ResponseWriter, r *http.Request) {

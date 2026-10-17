@@ -306,7 +306,7 @@ Request: Partial update (any subset of task fields; absent keys are untouched, e
 }
 ```
 
-Container derivation (applies whenever the request includes `project_id`, `area_id` or `heading_id`): a task in a project stores that project's area as `area_id` — a sent `area_id` is only honored on project-less tasks; and when `project_id` changes without a `heading_id`, a heading that does not belong to the new project is cleared.
+Container derivation (applies whenever the request includes `project_id`, `area_id` or `heading_id`): a task in a project stores that project's area as `area_id` — a sent `area_id` is only honored on project-less tasks; and when `project_id` changes without a `heading_id`, a heading that does not belong to the new project is cleared. A sent `heading_id` must belong to the effective project — the sent one, or the task's stored project when none is sent — otherwise 422 VALIDATION on `heading_id` (same as create).
 
 Response (200): Updated full task object
 
@@ -360,6 +360,7 @@ Request:
 
 - `area_id` follows the resolved project (a sent `area_id` only applies to project-less tasks).
 - When `project_id` changes and no `heading_id` is sent, a heading that does not belong to the new project is cleared.
+- A sent `heading_id` must belong to the effective project (the sent one, or the task's stored one when none is sent); otherwise 422 VALIDATION on `heading_id`.
 - A sent `when_date` also syncs the first schedule entry (same as PATCH).
 
 Response (200): Updated task
