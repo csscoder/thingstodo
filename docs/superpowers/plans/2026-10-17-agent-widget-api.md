@@ -105,20 +105,34 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
   - `func InTx(db *sql.DB, fn func(tx *sql.Tx) error) error`: commits on nil, rolls back on error or panic (re-panics).
   - For `Task`, `Schedule`, `Checklist`, `Attachment`, `Reminder`, `RepeatRule`, `Project`, `Area` and `ChangeLog` repositories:
     - the `db` field becomes `DBTX`;
-    - a `conn *sql.DB` field is kept;
-    - each gets `WithTx(tx *sql.Tx) *XRepository`, a shallow copy using `tx`. Its `changeLog` is `changeLog.WithTx(tx)`, and it is nil-safe.
+    - a `conn *sql.DB` field and a `tx *sql.Tx` field (nil when unbound) are kept;
+    - each gets `WithTx(tx *sql.Tx) *XRepository`, a shallow copy with `db = tx` and `tx = tx`. Its `changeLog` is `changeLog.WithTx(tx)`, and it is nil-safe.
+  - **One transaction owner.** Each of these repositories gets `func (r *XRepository) inTx(fn func(db DBTX) error) error`:
+    - when `r.tx != nil` it calls `fn(r.tx)`, with no new `Begin`;
+    - otherwise it runs `InTx(r.conn, …)`.
+    - Every method that opens a transaction today switches to `r.inTx`. That means every `r.db.Begin()` in these repositories (`areas.go:207,256`, `projects.go:267,304`, `schedules.go:138,256`, `tasks.go:429,460,620`) and in the helper `setProjectTags` (`projects.go:365`, which takes the `DBTX`).
+    - Nested calls therefore never open a second SQLite transaction.
+    - `headings.go:118` and `tags.go:120` keep `Begin` on their own `*sql.DB`, because those repositories are not converted.
   - `func (r *TaskRepository) Conn() *sql.DB`.
-  - `logChange(...)` now returns `error`. Existing call sites may keep ignoring it; code inside `InTx` must return it.
+  - `logChange(...)` now returns `error`. Existing call sites may keep ignoring it; code inside `inTx` must return it.
 
 - [ ] **Step 1: Write failing tests.**
   - `TestInTx_RollsBackOnError`: insert an area inside `InTx`, return an error; the area does not exist.
   - `TestInTx_RollsBackOnPanic`: same, but panic; the test recovers.
   - `TestTaskCreate_BadTagWritesNothing`: `POST /api/tasks {"title":"x","tag_ids":["nope0000"]}` gets non-2xx. Then `SELECT COUNT(*) FROM tasks` = 0 and `change_log` has no task row.
   - `TestTaskCreate_DuplicateTimelessScheduleRollsBack`: an update that fails `syncFirstScheduleDate` leaves `tasks.when_date` unchanged. This is the audit's B18 probe.
+  - `TestTaskCreate_DefaultReminderFailureRollsBack`:
+    - force the reminder insert to fail by setting `user_settings.default_reminder_type` to a value the `reminders.type` CHECK rejects, via SQL;
+    - `POST /api/tasks` → 500 `INTERNAL`;
+    - no task, schedule or change-log row exists.
+    - Today `handler/tasks.go:109-120` only logs that error.
+  - `TestTaskCreate_WithDefaultReminderSucceeds`: a valid default reminder → 201, with the reminder present. This catches nested-transaction deadlocks.
+  - `TestWithTx_NoNestedBegin`: calling `Reorder` on a `WithTx`-bound repository inside `InTx` completes, and its writes commit or roll back with the outer transaction.
 - [ ] **Step 2: Run them.** Expected: FAIL. Today the task row survives, and `Create` ignores the `syncFirstScheduleDate` error at `tasks.go:212`.
 - [ ] **Step 3: Implement.**
-  - `TaskRepository.Create` and `Update` run row, tags, first schedule and change log through one `InTx`, returning any error. Stop ignoring the `syncFirstScheduleDate` error.
-  - `TaskHandler.Create` creates the default reminder in the same transaction: `InTx(h.repo.Conn(), …)` with `h.repo.WithTx(tx)` and `h.reminderRepo.WithTx(tx)`.
+  - `TaskRepository.Create` and `Update` run row, tags, first schedule and change log through `r.inTx`, returning any error. Stop ignoring the `syncFirstScheduleDate` error.
+  - `TaskHandler.Create` owns the transaction: `repository.InTx(h.repo.Conn(), func(tx) error { … h.repo.WithTx(tx).Create(…); h.reminderRepo.WithTx(tx).Create(…) … })`. The bound repositories reuse `tx` through `inTx`. A reminder error is returned, not logged.
+  - Run `go build ./...` right after converting the `db` fields, before writing the tests' GREEN code.
   - Until Task 4 maps it to 422, a failed tag insert may surface as 500.
 - [ ] **Step 4: Run** `go test ./... -race`. Expected: PASS.
 - [ ] **Step 5: Commit.** `fix: make task create and update atomic`
@@ -145,7 +159,7 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
   - `TestTaskCreate_RejectsUnknownProject`: → 422 `project_id`. Also `TestTaskCreate_RejectsUnknownTag` → 422 `tag_ids`.
   - `TestTaskCreate_RejectsHeadingFromOtherProject`: → 422 `heading_id`.
   - `TestTaskUpdate_RejectsEmptyTitle`: → 400 `title`. Same for project, area, tag, heading and checklist update.
-  - `TestTaskCreate_RejectsBadClientID`: `"id":"a b"` → 400 `id`.
+  - `TestCreate_RejectsBadClientID`: a table test over every create endpoint that accepts `id`: tasks, projects, areas, tags, headings, checklist items, schedules, reminders, link attachments, and sync creates. `"id":"a b"` → 400 `id`, and for sync a per-change error.
   - `TestScheduleCreate_RejectsBadTimes`: `start_time:"9:00"` → 400 `start_time`; `end_time` ≤ `start_time` → 400 `end_time`.
   - `TestScheduleCreate_UnknownTaskIs422`: today this is 500 (FK); now 422 `task_id`. Same for checklist create.
   - `TestSyncPush_BadWhenDateIsChangeError`: sync task create with `when_date:"tomorrow"` gets a per-change `error` containing `when_date`. The batch continues.
@@ -201,7 +215,7 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
 - [ ] **Step 1: Write failing tests.**
   - `TestCreate_RepeatWithSameIDReturnsExisting`: a table test over tasks, projects, areas, tags, headings, checklist items, schedules, reminders and link attachments.
     - First POST → 201.
-    - Second POST with the same `id` and a different title → 200, with the first title.
+    - Second POST with the same `id` and one changed field → 200, and the body equals the first stored entity. The changed field is the title where one exists, `when_date` for schedules, `type` for reminders, and `url` for attachments.
     - The row count is 1.
 - [ ] **Step 2: Run it.** Expected: FAIL. Today the result is 500, 409 or a duplicate, depending on the table.
 - [ ] **Step 3: Implement.** In each handler, after validation: if `input.ID != ""` and `GetByID` finds it, `writeJSON(w, 200, existing)` and return.
@@ -368,6 +382,9 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
   - `TestBulkSetPriority_HighPriorityParam`: `{"high_priority":true}` sets it; the legacy `{"priority":1}` still sets it.
   - `TestBulkAffected_IgnoresUnknownIDs`: a non-status action over 1 real and 1 unknown id → `affected: 1`.
   - `TestBulkSetWhen_EmptyClears`: `when_date:""` → `when_date` null and no schedule rows (today a phantom `''` row is created).
+  - `TestBulkSetWhen_DateMovesFirstSchedule`: two tasks with first schedules on `2026-11-01`; bulk `set_when` `2026-11-05` → both first schedules are on `2026-11-05`, and `/sync/pull` has a schedule entry for each.
+  - `TestBulkSetWhen_FailureRollsBack`: one task has a timeless schedule on `2026-11-05` already, so moving its first entry there would be a duplicate. → non-2xx, and neither task's `when_date` nor schedule changed.
+  - Implement both: bulk `set_when` runs `syncFirstScheduleDate` for every task in one `inTx` (today `tasks.go:484-488` only writes `tasks.when_date`).
   - `TestBulkMoveProject_SetsAreaClearsHeading`.
   - `TestSettingsFirstPatchSaved`: with no `user_settings` row, the first PATCH `{"review_after_days":3}` → the response and a later GET show 3.
   - `TestScheduleReorder_ScopedToTask`: reordering with another task's schedule id → that schedule is unchanged and the result is 400 `VALIDATION`, field `items`.
@@ -428,6 +445,7 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
   - `TestToday_CompletedTodayLocal`: a task completed at `2026-10-16 21:10:00` UTC (00:10 local) is in Today's Completed section.
   - `TestToday_UsesLocalDate`: a task with `when_date` `2026-10-17` is in Today, not Upcoming.
   - `TestLogbook_GroupsByLocalDate`: that completion is grouped under `2026-10-17`.
+  - `TestTrash_GroupsByLocalDate`: a task deleted at `2026-10-16 21:10:00` UTC is grouped under `2026-10-17`. Today `views.go:689-691` slices the UTC string.
   - `TestInbox_ReviewCutoffLocal`: the review boundary uses the local date.
 - [ ] **Step 2: Run them.** Expected: FAIL.
 - [ ] **Step 3: Implement.** In `router.go`, pass `cfg.Location`.
@@ -609,9 +627,12 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
 **Interfaces:**
 - Consumes: the full router built in `router.New`.
 - Produces:
-  - `func New(api http.Handler) http.Handler` returns `mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})`. The router mounts it at `/mcp` behind CORS and `mw.Auth`.
+  - `func New(api http.Handler, proxyHeader string) http.Handler` returns `mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true})`. The router mounts it at `/mcp` behind CORS and `mw.Auth`.
   - `func call(ctx context.Context, api http.Handler, hdr http.Header, method, path string, body any) (json.RawMessage, error)`:
-    - builds an in-process request with the caller's `Authorization` header, taken from the go-sdk request's `Extra.Header`. Verify that field in v1.8.0 before writing tools; if it does not exist, stop and report.
+    - builds an in-process request carrying the caller's credentials: the `Authorization`, `Cookie` and `cfg.AuthProxyHeader` headers, copied from the go-sdk request's `Extra.Header`.
+    - Verify that field in v1.8.0 before writing tools; if it does not exist, stop and report.
+    - `New` therefore takes `proxyHeader string`: `New(api http.Handler, proxyHeader string)`.
+    - The internal request has no `Origin`, so the Task 18 guard does not apply to it. The outer `/mcp` request was already checked.
     - serves it via `httptest.NewRecorder`;
     - returns the body for 2xx, otherwise an error whose text is the API error body.
   - A tool handler error becomes an MCP tool error result (`IsError: true`).
@@ -634,6 +655,7 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
   - `TestMCP_CreateRetryWithSameID`: two calls → one task.
   - `TestMCP_CompleteRecurringOnce`.
   - `TestMCP_Unauthenticated401`: a raw HTTP POST to `/mcp` without a token → 401.
+  - `TestMCP_ProxySessionWorks`: in proxy mode, an MCP call carrying only `Remote-User` succeeds through the internal dispatch.
 - [ ] **Step 3: Run** `go test ./internal/mcpserver/`. Expected: FAIL.
 - [ ] **Step 4: Implement.** Delete `mcp/`. Remove the MCP section that builds the TS server from README, replace it with the Hermes config from spec B, and update `CHANGELOG.md`.
 - [ ] **Step 5: Run** `go test ./... -race && go vet ./...`. Expected: PASS.
@@ -672,7 +694,11 @@ New middleware covers CORS and the cross-origin session guard. A hand-written Op
   - Build and run a local server (`AUTH_MODE=builtin`, a `JWT_SECRET`, an `API_KEY`, `TZ=Europe/Moscow`), then:
     1. `ttd token create widget` → a token.
     2. `curl -i -X OPTIONS -H 'Origin: http://localhost:8080' -H 'Access-Control-Request-Method: GET' -H 'Access-Control-Request-Headers: authorization' localhost:2999/api/tasks` → 204 with the A2 headers. Then a `GET` with the token and that `Origin` → 200 with `Access-Control-Allow-Origin: *`.
-    3. Connect an MCP client, e.g. `npx @modelcontextprotocol/inspector` run outside the repo, to `http://localhost:2999/mcp` with `Authorization: Bearer <token>`. List tools; create a daily recurring task; complete it; `query_tasks` shows exactly one new open instance.
-    4. `curl '/api/search?q=c%2B%2B'`, `email:` and `milk-2` → 200 with results.
-  - Record the commands and their outputs in the final report.
+    3. Connect an MCP client, e.g. `npx @modelcontextprotocol/inspector` run outside the repo, to `http://localhost:2999/mcp` with `Authorization: Bearer $TOKEN`. List tools; create a daily recurring task; complete it; `query_tasks` shows exactly one new open instance.
+    4. **Hermes.** Hermes is installed locally (`hermes` on PATH).
+       - Add the spec B config to a copy of `~/.hermes/config.yaml` that points at the local server. Use `HERMES_HOME` or the CLI's config flag if it has one; otherwise back up the original and restore it afterwards.
+       - Run `hermes config show | grep -A 8 mcp_servers`, then list the MCP tools from Hermes.
+       - If the installed version uses different keys, correct the README snippet to match. If Hermes cannot be run, mark the README config `unverified` in the final report.
+    5. `curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:2999/api/search?q=c%2B%2B'`, then the same with `q=email%3A` and `q=milk-2` → 200 with results.
+  - **Record the commands and their outputs in the final report with every secret redacted.** Keep the token in the shell variable `$TOKEN`. Print `ttd token create` output only as `ttd_****`, and replace any `Authorization` value with `Bearer ***`. Never paste a token, the env `API_KEY` or a `JWT_SECRET` into the report, a commit or a file.
 - [ ] **Step 6: Commit.** `docs: OpenAPI contract with drift test; reconcile API docs`.

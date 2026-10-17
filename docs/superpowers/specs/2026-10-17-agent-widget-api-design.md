@@ -1,7 +1,7 @@
 # API and MCP for Hermes and Widgets, on Correct Data — Design
 
 Date: 2026-10-17
-Status: draft, awaiting owner approval
+Status: approved by owner 2026-10-17
 
 ## Intent
 
