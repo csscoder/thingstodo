@@ -582,7 +582,7 @@ func getTaskListItems(db DBTX, filterCol, filterVal string) []model.TaskListItem
 	}
 	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(db, rows)
-	populateActionableScheduleFlags(db, tasks)
+	populateActionableScheduleFlagsNow(db, tasks)
 	return tasks
 }
 
@@ -611,7 +611,7 @@ func getTaskListItemsNoHeading(db DBTX, projectID string) []model.TaskListItem {
 	}
 	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(db, rows)
-	populateActionableScheduleFlags(db, tasks)
+	populateActionableScheduleFlagsNow(db, tasks)
 	return tasks
 }
 

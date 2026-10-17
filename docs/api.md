@@ -68,6 +68,9 @@ All entities with `sort_order` use REAL (float) for fractional positioning. New 
 ### IDs
 All entity IDs are nanoid strings (8-10 chars). Task IDs double as permalink slugs.
 
+### Timestamps and Timezones
+All timestamps (`created_at`, `updated_at`, `completed_at`, `canceled_at`, `deleted_at`, reminder `exact_at`) are stored and returned as UTC. Calendar-day boundaries are computed in the server timezone set by the `TZ` environment variable: "Today" (including This Evening and the Completed-today section), Logbook and Trash date grouping, and the review staleness cutoff all use the local calendar date of that zone, with stored UTC timestamps compared against the UTC instants of local midnight. `when_date`, `deadline` and schedule dates are plain local calendar dates and are matched literally.
+
 ### Validation Rules
 Mutation endpoints validate request fields at the API boundary, before any write reaches the database. Every validation error uses the error envelope above with code `VALIDATION` and the offending `field`:
 

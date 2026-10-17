@@ -9,11 +9,73 @@ import (
 )
 
 type ViewRepository struct {
-	db *sql.DB
+	db  *sql.DB
+	loc *time.Location
+	now func() time.Time
 }
 
-func NewViewRepository(db *sql.DB) *ViewRepository {
-	return &ViewRepository{db: db}
+// NewViewRepository binds the view queries to the server timezone loc. A nil
+// loc defensively defaults to time.UTC. The clock defaults to time.Now and
+// can be overridden with SetClock.
+func NewViewRepository(db *sql.DB, loc *time.Location) *ViewRepository {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return &ViewRepository{db: db, loc: loc, now: time.Now}
+}
+
+// SetClock overrides the view clock (default time.Now). "Today" and every
+// date boundary is resolved as r.now().In(r.loc).
+func (r *ViewRepository) SetClock(now func() time.Time) {
+	if now != nil {
+		r.now = now
+	}
+}
+
+// today returns the current calendar date in the server timezone.
+func (r *ViewRepository) today() string {
+	return r.now().In(r.loc).Format("2006-01-02")
+}
+
+// reviewCutoff returns the local date that review staleness is measured
+// against: local today minus days.
+func (r *ViewRepository) reviewCutoff(days int) string {
+	return r.now().In(r.loc).AddDate(0, 0, -days).Format("2006-01-02")
+}
+
+// localDayUTCBounds returns the UTC instants of local midnight starting the
+// calendar day day (inclusive) and of the next local midnight (exclusive),
+// both formatted "2006-01-02 15:04:05" so stored UTC timestamp strings can be
+// compared lexically. DST-safe: the end bound is constructed as the next
+// calendar midnight in loc, not as start + 24h, so 23- and 25-hour days come
+// out right. An unparseable day yields empty strings.
+func localDayUTCBounds(day string, loc *time.Location) (startUTC, endUTC string) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	start, err := time.ParseInLocation("2006-01-02", day, loc)
+	if err != nil {
+		return "", ""
+	}
+	y, m, d := start.Date()
+	end := time.Date(y, m, d+1, 0, 0, 0, 0, loc)
+	return start.UTC().Format("2006-01-02 15:04:05"), end.UTC().Format("2006-01-02 15:04:05")
+}
+
+// utcToLocalDay converts a stored UTC timestamp to its calendar date in loc.
+// Timestamps are written by SQLite datetime('now') as "2006-01-02 15:04:05";
+// RFC 3339 forms (sync-pushed values) are accepted too. Unparseable input
+// falls back to its date prefix so grouping never drops a task.
+func utcToLocalDay(ts string, loc *time.Location) string {
+	if len(ts) < 10 {
+		return ts
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339} {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t.In(loc).Format("2006-01-02")
+		}
+	}
+	return ts[:10]
 }
 
 func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*model.InboxView, error) {
@@ -43,7 +105,7 @@ func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*mo
 	}
 	defer func() { _ = rows.Close() }()
 	inboxTasks := scanTaskListItems(r.db, rows)
-	populateActionableScheduleFlags(r.db, inboxTasks)
+	populateActionableScheduleFlags(r.db, inboxTasks, r.today())
 
 	// Collect inbox task IDs to exclude from review
 	inboxIDs := make(map[string]bool, len(inboxTasks))
@@ -72,14 +134,14 @@ func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*mo
 				(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
 			FROM tasks t
 			WHERE t.status = 'open' AND t.deleted_at IS NULL
-				AND date(t.updated_at) < date('now', '-' || ? || ' days')
-			ORDER BY t.updated_at ASC`, *reviewAfterDays)
+				AND date(t.updated_at) < ?
+			ORDER BY t.updated_at ASC`, r.reviewCutoff(*reviewAfterDays))
 		if err != nil {
 			return nil, err
 		}
 		defer func() { _ = reviewRows.Close() }()
 		allReview := scanTaskListItems(r.db, reviewRows)
-		populateActionableScheduleFlags(r.db, allReview)
+		populateActionableScheduleFlags(r.db, allReview, r.today())
 
 		// Exclude tasks already in inbox, and optionally exclude recurring tasks
 		for _, t := range allReview {
@@ -100,7 +162,7 @@ func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*mo
 }
 
 func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error) {
-	today := time.Now().Format("2006-01-02")
+	today := r.today()
 
 	// Today tasks: JOIN task_schedules so multi-schedule entries for today each appear.
 	// Includes tasks where ANY schedule entry matches today (not just when_date).
@@ -141,7 +203,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	}
 	defer func() { _ = todayRows.Close() }()
 	todayTasks := scanTodayTaskListItems(r.db, todayRows)
-	populateActionableScheduleFlags(r.db, todayTasks)
+	populateActionableScheduleFlags(r.db, todayTasks, r.today())
 
 	// Evening tasks: schedule entry's start_time >= eveningStartsAt
 	eveningRows, err := r.db.Query(`
@@ -179,7 +241,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	}
 	defer func() { _ = eveningRows.Close() }()
 	eveningTasks := scanTodayTaskListItems(r.db, eveningRows)
-	populateActionableScheduleFlags(r.db, eveningTasks)
+	populateActionableScheduleFlags(r.db, eveningTasks, r.today())
 
 	// Overdue
 	overdueRows, err := r.db.Query(`
@@ -207,7 +269,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	}
 	defer func() { _ = overdueRows.Close() }()
 	overdueTasks := scanTaskListItems(r.db, overdueRows)
-	populateActionableScheduleFlags(r.db, overdueTasks)
+	populateActionableScheduleFlags(r.db, overdueTasks, r.today())
 
 	// Earlier: tasks with when_date before today, but not overdue (no overdue deadline)
 	// Only include tasks that have at least one uncompleted past schedule entry
@@ -242,9 +304,12 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	defer func() { _ = earlierRows.Close() }()
 	earlierTasks := scanTodayTaskListItems(r.db, earlierRows)
 	populatePastScheduleCounts(r.db, earlierTasks, today)
-	populateActionableScheduleFlags(r.db, earlierTasks)
+	populateActionableScheduleFlags(r.db, earlierTasks, r.today())
 
-	// Completed today
+	// Completed today: the stored UTC timestamps must fall inside the local
+	// calendar day, i.e. between the UTC instants of this local midnight
+	// (inclusive) and the next one (exclusive).
+	completedStart, completedEnd := localDayUTCBounds(today, r.loc)
 	completedRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -265,8 +330,9 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 		FROM tasks t
 		WHERE t.status IN ('completed', 'canceled', 'wont_do')
 			AND COALESCE(t.completed_at, t.canceled_at, t.updated_at) >= ?
+			AND COALESCE(t.completed_at, t.canceled_at, t.updated_at) < ?
 			AND t.deleted_at IS NULL
-		ORDER BY COALESCE(t.completed_at, t.canceled_at, t.updated_at) DESC`, today)
+		ORDER BY COALESCE(t.completed_at, t.canceled_at, t.updated_at) DESC`, completedStart, completedEnd)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +352,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 
 func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	if from == "" {
-		from = time.Now().Format("2006-01-02")
+		from = r.today()
 	}
 	// JOIN task_schedules so a task with multiple schedule dates appears once per date
 	rows, err := r.db.Query(`
@@ -333,7 +399,7 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	var dates []model.DateGroup
 	for _, d := range dateOrder {
 		group := dateMap[d]
-		populateActionableScheduleFlags(r.db, group)
+		populateActionableScheduleFlags(r.db, group, r.today())
 		dates = append(dates, model.DateGroup{Date: d, Tasks: group})
 	}
 	if dates == nil {
@@ -366,7 +432,7 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	}
 	defer func() { _ = overdueRows.Close() }()
 	overdueTasks := scanTaskListItems(r.db, overdueRows)
-	populateActionableScheduleFlags(r.db, overdueTasks)
+	populateActionableScheduleFlags(r.db, overdueTasks, r.today())
 
 	// Earlier: tasks with when_date before the from date, not someday, not overdue
 	// Only include tasks that have at least one uncompleted past schedule entry
@@ -401,7 +467,7 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	defer func() { _ = earlierRows.Close() }()
 	earlierTasks := scanTodayTaskListItems(r.db, earlierRows)
 	populatePastScheduleCounts(r.db, earlierTasks, from)
-	populateActionableScheduleFlags(r.db, earlierTasks)
+	populateActionableScheduleFlags(r.db, earlierTasks, r.today())
 
 	return &model.UpcomingView{Overdue: overdueTasks, Dates: dates, Earlier: earlierTasks}, nil
 }
@@ -537,7 +603,7 @@ func (r *ViewRepository) getAnytimeTasks(projectID, areaID *string, byProject, s
 	}
 	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(r.db, rows)
-	populateActionableScheduleFlags(r.db, tasks)
+	populateActionableScheduleFlags(r.db, tasks, r.today())
 	return tasks
 }
 
@@ -577,7 +643,7 @@ func (r *ViewRepository) getAnytimeStandaloneNoArea(somedayOnly bool) []model.Ta
 	}
 	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(r.db, rows)
-	populateActionableScheduleFlags(r.db, tasks)
+	populateActionableScheduleFlags(r.db, tasks, r.today())
 	return tasks
 }
 
@@ -617,17 +683,17 @@ func (r *ViewRepository) Logbook(limit, offset int) (*model.LogbookView, error) 
 
 	tasks := scanTaskListItems(r.db, rows)
 
-	// Group by completion date
+	// Group by completion date in the server timezone
 	dateMap := make(map[string][]model.TaskListItem)
 	var dateOrder []string
 	for _, t := range tasks {
 		d := ""
 		if t.CompletedAt != nil {
-			d = (*t.CompletedAt)[:10]
+			d = utcToLocalDay(*t.CompletedAt, r.loc)
 		} else if t.CanceledAt != nil {
-			d = (*t.CanceledAt)[:10]
+			d = utcToLocalDay(*t.CanceledAt, r.loc)
 		} else {
-			d = t.UpdatedAt[:10]
+			d = utcToLocalDay(t.UpdatedAt, r.loc)
 		}
 		if _, ok := dateMap[d]; !ok {
 			dateOrder = append(dateOrder, d)
@@ -682,13 +748,13 @@ func (r *ViewRepository) Trash(limit, offset int) (*model.LogbookView, error) {
 
 	tasks := scanTaskListItems(r.db, rows)
 
-	// Group by deletion date
+	// Group by deletion date in the server timezone
 	dateMap := make(map[string][]model.TaskListItem)
 	var dateOrder []string
 	for _, t := range tasks {
-		d := t.UpdatedAt[:10]
+		d := utcToLocalDay(t.UpdatedAt, r.loc)
 		if t.DeletedAt != nil {
-			d = (*t.DeletedAt)[:10]
+			d = utcToLocalDay(*t.DeletedAt, r.loc)
 		}
 		if _, ok := dateMap[d]; !ok {
 			dateOrder = append(dateOrder, d)
@@ -869,7 +935,7 @@ func groupByProject(db *sql.DB, tasks []model.TaskListItem) []model.TaskGroup {
 }
 
 func (r *ViewRepository) Counts(reviewAfterDays *int, includeRecurring bool) (*model.ViewCounts, error) {
-	today := time.Now().Format("2006-01-02")
+	today := r.today()
 	var c model.ViewCounts
 	err := r.db.QueryRow(`
 		SELECT
@@ -894,9 +960,9 @@ func (r *ViewRepository) Counts(reviewAfterDays *int, includeRecurring bool) (*m
 		_ = r.db.QueryRow(`
 			SELECT COUNT(*) FROM tasks
 			WHERE status = 'open' AND deleted_at IS NULL
-				AND date(updated_at) < date('now', '-' || ? || ' days')
+				AND date(updated_at) < ?
 				AND NOT (project_id IS NULL AND area_id IS NULL AND when_date IS NULL)
-		`+recurringClause, *reviewAfterDays).Scan(&c.Review)
+		`+recurringClause, r.reviewCutoff(*reviewAfterDays)).Scan(&c.Review)
 	}
 
 	return &c, nil
@@ -914,16 +980,21 @@ func ParseIntDefault(s string, def int) int {
 	return n
 }
 
+// populateActionableScheduleFlagsNow is the server-clock fallback used by the
+// area/project/tag listings, which do not carry the owner's timezone yet.
+func populateActionableScheduleFlagsNow(db DBTX, tasks []model.TaskListItem) {
+	populateActionableScheduleFlags(db, tasks, time.Now().Format("2006-01-02"))
+}
+
 // populateActionableScheduleFlags sets HasActionableSchedules on each task
 // that has uncompleted schedule entries requiring confirmation — i.e. past
 // entries (will be auto-completed) or future/someday entries (will be deleted).
 // If the only uncompleted entries are for today, no flag is set because
 // completing today's entry is the normal expected behavior.
-func populateActionableScheduleFlags(db DBTX, tasks []model.TaskListItem) {
+func populateActionableScheduleFlags(db DBTX, tasks []model.TaskListItem, today string) {
 	if len(tasks) == 0 {
 		return
 	}
-	today := time.Now().Format("2006-01-02")
 	for i, t := range tasks {
 		var count int
 		err := db.QueryRow(

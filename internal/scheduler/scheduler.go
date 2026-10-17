@@ -326,7 +326,7 @@ func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, patter
 }
 
 func (s *Scheduler) processReminders() {
-	now := time.Now().In(s.loc)
+	now := s.now().In(s.loc)
 	windowStart := now.Add(-1 * time.Minute)
 	windowEnd := now.Add(1 * time.Minute)
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
 	"github.com/collinjanssen/thingstodo/internal/model"
@@ -197,7 +198,7 @@ func setupProjectTrashRouter(t *testing.T) (*testutil.TestClient, *sql.DB, *repo
 	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 	taskHandler := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
-	viewHandler := handler.NewViewHandler(repository.NewViewRepository(db), settingsRepo)
+	viewHandler := handler.NewViewHandler(repository.NewViewRepository(db, time.UTC), settingsRepo)
 
 	r := chi.NewRouter()
 	r.Route("/api/areas", func(r chi.Router) {

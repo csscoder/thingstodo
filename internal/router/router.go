@@ -42,7 +42,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	attachmentRepo := repository.NewAttachmentRepository(db, changeLogRepo)
 	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
 	searchRepo := repository.NewSearchRepository(db)
-	viewRepo := repository.NewViewRepository(db)
+	viewRepo := repository.NewViewRepository(db, cfg.Location)
 	userRepo := repository.NewUserRepository(db)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 	savedFilterRepo := repository.NewSavedFilterRepository(db)

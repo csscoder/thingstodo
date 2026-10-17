@@ -1330,7 +1330,7 @@ func TestSyncDeleteProject_TasksGoToTrash(t *testing.T) {
 	}
 
 	// The trashed tasks are visible in the trash view.
-	viewRepo := repository.NewViewRepository(db)
+	viewRepo := repository.NewViewRepository(db, time.UTC)
 	view, err := viewRepo.Trash(50, 0)
 	if err != nil {
 		t.Fatalf("load trash view: %v", err)
