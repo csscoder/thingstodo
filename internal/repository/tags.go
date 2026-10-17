@@ -17,6 +17,12 @@ func NewTagRepository(db *sql.DB, changeLog *ChangeLogRepository) *TagRepository
 	return &TagRepository{db: db, changeLog: changeLog}
 }
 
+// Conn returns the underlying connection pool, for boundary validation
+// lookups (repository.Exists) outside repository transactions.
+func (r *TagRepository) Conn() *sql.DB {
+	return r.db
+}
+
 func (r *TagRepository) List() ([]model.Tag, error) {
 	rows, err := r.db.Query(`
 		SELECT t.id, t.title, t.color, t.parent_tag_id, t.sort_order,

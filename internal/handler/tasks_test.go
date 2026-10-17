@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -420,4 +421,251 @@ func TestTaskCreate_WithDefaultReminderSucceeds(t *testing.T) {
 		t.Errorf("expected reminder type %q, got %q", "at_start", created.Reminders[0].Type)
 	}
 	assertCount(t, db, 1, "SELECT COUNT(*) FROM reminders")
+}
+
+// --- API boundary validation (D1) ---
+
+// setupValidationRouter mounts every create/update endpoint that accepts a
+// client-supplied id, plus the sync push endpoint, for validation tests.
+func setupValidationRouter(t *testing.T) *testutil.TestClient {
+	t.Helper()
+	db := testutil.SetupTestDB(t)
+	broker := sse.NewBroker()
+	changeLog := repository.NewChangeLogRepository(db)
+	taskRepo := repository.NewTaskRepository(db, changeLog)
+	projectRepo := repository.NewProjectRepository(db, changeLog)
+	areaRepo := repository.NewAreaRepository(db, changeLog)
+	tagRepo := repository.NewTagRepository(db, changeLog)
+	headingRepo := repository.NewHeadingRepository(db, changeLog)
+	checklistRepo := repository.NewChecklistRepository(db, changeLog)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLog)
+	reminderRepo := repository.NewReminderRepository(db, changeLog)
+	attachmentRepo := repository.NewAttachmentRepository(db, changeLog)
+	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLog)
+	settingsRepo := repository.NewUserSettingsRepository(db)
+
+	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, nil)
+	projectH := handler.NewProjectHandler(projectRepo, broker)
+	areaH := handler.NewAreaHandler(areaRepo, broker)
+	tagH := handler.NewTagHandler(tagRepo, broker)
+	headingH := handler.NewHeadingHandler(headingRepo, broker)
+	checklistH := handler.NewChecklistHandler(checklistRepo, broker)
+	scheduleH := handler.NewScheduleHandler(scheduleRepo, taskRepo, broker)
+	reminderH := handler.NewReminderHandler(reminderRepo, broker)
+	attachmentH := handler.NewAttachmentHandler(attachmentRepo, broker, "", 1<<20)
+	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil)
+
+	r := chi.NewRouter()
+	r.Post("/api/tasks", taskH.Create)
+	r.Patch("/api/tasks/{id}", taskH.Update)
+	r.Post("/api/projects", projectH.Create)
+	r.Patch("/api/projects/{id}", projectH.Update)
+	r.Post("/api/areas", areaH.Create)
+	r.Patch("/api/areas/{id}", areaH.Update)
+	r.Post("/api/tags", tagH.Create)
+	r.Patch("/api/tags/{id}", tagH.Update)
+	r.Post("/api/projects/{id}/headings", headingH.Create)
+	r.Patch("/api/headings/{id}", headingH.Update)
+	r.Post("/api/tasks/{id}/checklist", checklistH.Create)
+	r.Patch("/api/checklist/{id}", checklistH.Update)
+	r.Post("/api/tasks/{id}/schedules", scheduleH.Create)
+	r.Post("/api/tasks/{id}/reminders", reminderH.Create)
+	r.Post("/api/tasks/{id}/attachments", attachmentH.Create)
+	r.Post("/api/sync/push", syncH.Push)
+
+	return testutil.NewTestClient(t, r)
+}
+
+func validationFixtureIDs(t *testing.T, client *testutil.TestClient) (areaID, projectID, taskID string) {
+	t.Helper()
+	resp := client.Post("/api/areas", map[string]string{"title": "VArea"})
+	var area map[string]interface{}
+	resp.JSON(t, &area)
+	areaID = area["id"].(string)
+
+	resp = client.Post("/api/projects", map[string]interface{}{"title": "VProject", "area_id": areaID})
+	var project map[string]interface{}
+	resp.JSON(t, &project)
+	projectID = project["id"].(string)
+
+	resp = client.Post("/api/tasks", map[string]string{"title": "VTask"})
+	var task map[string]interface{}
+	resp.JSON(t, &task)
+	taskID = task["id"].(string)
+	return areaID, projectID, taskID
+}
+
+func TestTaskCreate_RejectsBadWhenDate(t *testing.T) {
+	client, _ := setupTaskRouter(t)
+
+	resp := client.Post("/api/tasks", map[string]string{"title": "T", "when_date": "tomorrow"})
+	testutil.AssertStatus(t, resp, http.StatusBadRequest)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "when_date")
+}
+
+func TestTaskCreate_RejectsBadDeadline(t *testing.T) {
+	client, _ := setupTaskRouter(t)
+
+	resp := client.Post("/api/tasks", map[string]string{"title": "T", "when_date": "2026-03-01", "deadline": "2026-02-31"})
+	testutil.AssertStatus(t, resp, http.StatusBadRequest)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "deadline")
+}
+
+func TestTaskCreate_RejectsUnknownProject(t *testing.T) {
+	client, _ := setupTaskRouter(t)
+
+	resp := client.Post("/api/tasks", map[string]string{"title": "T", "project_id": "nope1234"})
+	testutil.AssertStatus(t, resp, http.StatusUnprocessableEntity)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "project_id")
+}
+
+func TestTaskCreate_RejectsUnknownTag(t *testing.T) {
+	client, _ := setupTaskRouter(t)
+
+	resp := client.Post("/api/tasks", map[string]interface{}{"title": "T", "tag_ids": []string{"nope1234"}})
+	testutil.AssertStatus(t, resp, http.StatusUnprocessableEntity)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "tag_ids")
+}
+
+func TestTaskCreate_RejectsHeadingFromOtherProject(t *testing.T) {
+	client := setupValidationRouter(t)
+	areaID, _, _ := validationFixtureIDs(t, client)
+
+	p1 := client.Post("/api/projects", map[string]interface{}{"title": "P1", "area_id": areaID})
+	var project1 map[string]interface{}
+	p1.JSON(t, &project1)
+	p2 := client.Post("/api/projects", map[string]interface{}{"title": "P2", "area_id": areaID})
+	var project2 map[string]interface{}
+	p2.JSON(t, &project2)
+
+	h := client.Post("/api/projects/"+project2["id"].(string)+"/headings", map[string]string{"title": "H"})
+	var heading map[string]interface{}
+	h.JSON(t, &heading)
+
+	resp := client.Post("/api/tasks", map[string]interface{}{
+		"title": "T", "project_id": project1["id"], "heading_id": heading["id"],
+	})
+	testutil.AssertStatus(t, resp, http.StatusUnprocessableEntity)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "heading_id")
+}
+
+func TestTaskUpdate_RejectsEmptyTitle(t *testing.T) {
+	client, _ := setupTaskRouter(t)
+
+	createResp := client.Post("/api/tasks", map[string]string{"title": "Original"})
+	var created map[string]interface{}
+	createResp.JSON(t, &created)
+
+	resp := client.Patch("/api/tasks/"+created["id"].(string), map[string]string{"title": ""})
+	testutil.AssertStatus(t, resp, http.StatusBadRequest)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "title")
+}
+
+func TestEntityUpdate_RejectsEmptyTitle(t *testing.T) {
+	client := setupValidationRouter(t)
+	areaID, projectID, taskID := validationFixtureIDs(t, client)
+
+	h := client.Post("/api/projects/"+projectID+"/headings", map[string]string{"title": "H"})
+	var heading map[string]interface{}
+	h.JSON(t, &heading)
+	c := client.Post("/api/tasks/"+taskID+"/checklist", map[string]string{"title": "C"})
+	var checklistItem map[string]interface{}
+	c.JSON(t, &checklistItem)
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"project", "/api/projects/" + projectID},
+		{"area", "/api/areas/" + areaID},
+		{"tag", "/api/tags/tagfixture01"},
+		{"heading", "/api/headings/" + heading["id"].(string)},
+		{"checklist", "/api/checklist/" + checklistItem["id"].(string)},
+	}
+	for _, tc := range cases {
+		resp := client.Patch(tc.path, map[string]string{"title": ""})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: expected status 400, got %d (body: %s)", tc.name, resp.StatusCode, string(resp.Body))
+			continue
+		}
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "title")
+	}
+}
+
+func TestCreate_RejectsBadClientID(t *testing.T) {
+	client := setupValidationRouter(t)
+	areaID, projectID, taskID := validationFixtureIDs(t, client)
+
+	cases := []struct {
+		name string
+		path string
+		body map[string]interface{}
+	}{
+		{"task", "/api/tasks", map[string]interface{}{"id": "a b", "title": "T"}},
+		{"project", "/api/projects", map[string]interface{}{"id": "a b", "title": "P", "area_id": areaID}},
+		{"area", "/api/areas", map[string]interface{}{"id": "a b", "title": "A"}},
+		{"tag", "/api/tags", map[string]interface{}{"id": "a b", "title": "tg"}},
+		{"heading", "/api/projects/" + projectID + "/headings", map[string]interface{}{"id": "a b", "title": "H"}},
+		{"checklist item", "/api/tasks/" + taskID + "/checklist", map[string]interface{}{"id": "a b", "title": "C"}},
+		{"schedule", "/api/tasks/" + taskID + "/schedules", map[string]interface{}{"id": "a b", "when_date": "2026-03-01"}},
+		{"reminder", "/api/tasks/" + taskID + "/reminders", map[string]interface{}{"id": "a b", "type": "at_start"}},
+		{"link attachment", "/api/tasks/" + taskID + "/attachments", map[string]interface{}{"id": "a b", "type": "link", "title": "L", "url": "https://x.test"}},
+	}
+	for _, tc := range cases {
+		resp := client.Post(tc.path, tc.body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: expected status 400, got %d (body: %s)", tc.name, resp.StatusCode, string(resp.Body))
+			continue
+		}
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "id")
+	}
+
+	// Sync creates report the same rule as a per-change error; the batch
+	// continues with the valid change after it.
+	pushBody := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{
+			{
+				"entity":            "task",
+				"entity_id":         "a b",
+				"action":            "create",
+				"data":              map[string]interface{}{"title": "Bad id"},
+				"fields":            []string{"title"},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+			{
+				"entity":            "task",
+				"entity_id":         "sync-cid-ok1",
+				"action":            "create",
+				"data":              map[string]interface{}{"title": "Good id"},
+				"fields":            []string{"title"},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+		},
+	}
+	resp := client.Post("/api/sync/push", pushBody)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	if len(result.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d (body: %s)", len(result.Results), string(resp.Body))
+	}
+	if result.Results[0].Status != "error" {
+		t.Errorf("sync create with bad id: expected status 'error', got %q", result.Results[0].Status)
+	}
+	if !strings.Contains(result.Results[0].Error, "id") {
+		t.Errorf("sync create with bad id: expected error mentioning id, got %q", result.Results[0].Error)
+	}
+	if result.Results[1].Status != "applied" {
+		t.Errorf("batch must continue after a per-change error, got %q (error: %s)", result.Results[1].Status, result.Results[1].Error)
+	}
 }

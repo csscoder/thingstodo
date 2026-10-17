@@ -56,12 +56,30 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
 	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "title is required", "VALIDATION", "title")
+		return
+	}
+	if input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
+		return
+	}
+	if input.Deadline != nil && !isDate(*input.Deadline) {
+		writeFieldError(w, http.StatusBadRequest, "deadline must be YYYY-MM-DD", "VALIDATION", "deadline")
 		return
 	}
 	if input.AreaID == nil || *input.AreaID == "" {
-		writeError(w, http.StatusBadRequest, "area_id is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "area_id is required", "VALIDATION", "area_id")
+		return
+	}
+	if !refExists(w, h.repo.Conn(), "areas", "area", "area_id", *input.AreaID) {
+		return
+	}
+	if !tagsExist(w, h.repo.Conn(), "tag_ids", input.TagIDs) {
 		return
 	}
 	project, err := h.repo.Create(input)
@@ -86,6 +104,26 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Raw = raw
+
+	if input.Title != nil && *input.Title == "" {
+		writeFieldError(w, http.StatusBadRequest, "title cannot be empty", "VALIDATION", "title")
+		return
+	}
+	if _, ok := input.Raw["when_date"]; ok && input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
+		return
+	}
+	if _, ok := input.Raw["deadline"]; ok && input.Deadline != nil && !isDate(*input.Deadline) {
+		writeFieldError(w, http.StatusBadRequest, "deadline must be YYYY-MM-DD", "VALIDATION", "deadline")
+		return
+	}
+	if _, ok := input.Raw["area_id"]; ok && input.AreaID != nil &&
+		!refExists(w, h.repo.Conn(), "areas", "area", "area_id", *input.AreaID) {
+		return
+	}
+	if input.TagIDs != nil && !tagsExist(w, h.repo.Conn(), "tag_ids", input.TagIDs) {
+		return
+	}
 
 	project, err := h.repo.Update(id, input)
 	if err != nil {

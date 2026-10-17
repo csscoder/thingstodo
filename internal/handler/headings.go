@@ -35,8 +35,15 @@ func (h *HeadingHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
+	if !refExists(w, h.repo.Conn(), "projects", "project", "project_id", projectID) {
+		return
+	}
 	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "title is required", "VALIDATION", "title")
 		return
 	}
 	heading, err := h.repo.Create(projectID, input)
@@ -53,6 +60,10 @@ func (h *HeadingHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var input model.UpdateHeadingInput
 	if err := decodeJSON(r, &input); err != nil {
 		writeDecodeError(w, err)
+		return
+	}
+	if input.Title != nil && *input.Title == "" {
+		writeFieldError(w, http.StatusBadRequest, "title cannot be empty", "VALIDATION", "title")
 		return
 	}
 	heading, err := h.repo.Update(id, input)

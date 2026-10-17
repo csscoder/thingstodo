@@ -93,12 +93,49 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
 	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "title is required", "VALIDATION", "title")
+		return
+	}
+	if input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
+		return
+	}
+	if input.Deadline != nil && !isDate(*input.Deadline) {
+		writeFieldError(w, http.StatusBadRequest, "deadline must be YYYY-MM-DD", "VALIDATION", "deadline")
 		return
 	}
 	if input.WhenDate != nil && input.Deadline != nil && *input.WhenDate != "someday" && *input.Deadline < *input.WhenDate {
-		writeError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION", "deadline")
+		return
+	}
+	db := h.repo.Conn()
+	if input.ProjectID != nil && !refExists(w, db, "projects", "project", "project_id", *input.ProjectID) {
+		return
+	}
+	if input.AreaID != nil && !refExists(w, db, "areas", "area", "area_id", *input.AreaID) {
+		return
+	}
+	if input.HeadingID != nil {
+		if input.ProjectID != nil {
+			inProject, err := repository.HeadingInProject(db, *input.HeadingID, *input.ProjectID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+				return
+			}
+			if !inProject {
+				writeFieldError(w, http.StatusUnprocessableEntity, "heading is not in this project", "VALIDATION", "heading_id")
+				return
+			}
+		} else if !refExists(w, db, "headings", "heading", "heading_id", *input.HeadingID) {
+			return
+		}
+	}
+	if !tagsExist(w, db, "tag_ids", input.TagIDs) {
 		return
 	}
 	// Read the settings before opening the transaction: GetOrCreate may write
@@ -154,12 +191,41 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Raw = raw
 
+	if input.Title != nil && *input.Title == "" {
+		writeFieldError(w, http.StatusBadRequest, "title cannot be empty", "VALIDATION", "title")
+		return
+	}
+	if _, ok := input.Raw["when_date"]; ok && input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
+		return
+	}
+	if _, ok := input.Raw["deadline"]; ok && input.Deadline != nil && !isDate(*input.Deadline) {
+		writeFieldError(w, http.StatusBadRequest, "deadline must be YYYY-MM-DD", "VALIDATION", "deadline")
+		return
+	}
+	db := h.repo.Conn()
+	if _, ok := input.Raw["project_id"]; ok && input.ProjectID != nil &&
+		!refExists(w, db, "projects", "project", "project_id", *input.ProjectID) {
+		return
+	}
+	if _, ok := input.Raw["area_id"]; ok && input.AreaID != nil &&
+		!refExists(w, db, "areas", "area", "area_id", *input.AreaID) {
+		return
+	}
+	if _, ok := input.Raw["heading_id"]; ok && input.HeadingID != nil &&
+		!refExists(w, db, "headings", "heading", "heading_id", *input.HeadingID) {
+		return
+	}
+	if input.TagIDs != nil && !tagsExist(w, db, "tag_ids", input.TagIDs) {
+		return
+	}
+
 	// Validate deadline >= when_date: resolve effective values from input + existing task
 	if _, hasWhen := input.Raw["when_date"]; hasWhen {
 		if _, hasDeadline := input.Raw["deadline"]; hasDeadline {
 			// Both changing — validate directly
 			if input.WhenDate != nil && input.Deadline != nil && *input.WhenDate != "someday" && *input.Deadline < *input.WhenDate {
-				writeError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION")
+				writeFieldError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION", "deadline")
 				return
 			}
 		}
@@ -179,7 +245,7 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 			deadline = input.Deadline
 		}
 		if whenDate != nil && deadline != nil && *whenDate != "someday" && *deadline < *whenDate {
-			writeError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION")
+			writeFieldError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION", "deadline")
 			return
 		}
 	}
@@ -330,6 +396,20 @@ func (h *TaskHandler) Move(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
+		return
+	}
+	db := h.repo.Conn()
+	if input.ProjectID != nil && !refExists(w, db, "projects", "project", "project_id", *input.ProjectID) {
+		return
+	}
+	if input.AreaID != nil && !refExists(w, db, "areas", "area", "area_id", *input.AreaID) {
+		return
+	}
+	if input.HeadingID != nil && !refExists(w, db, "headings", "heading", "heading_id", *input.HeadingID) {
+		return
+	}
 	task, err := h.repo.Move(id, input)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
@@ -389,6 +469,31 @@ func (h *TaskHandler) BulkAction(w http.ResponseWriter, r *http.Request) {
 	if !validActions[input.Action] {
 		writeError(w, http.StatusBadRequest, "invalid action: "+input.Action, "BAD_REQUEST")
 		return
+	}
+
+	// Date params of bulk actions are validated at the boundary like every
+	// other date field. An empty string clears the date and stays allowed.
+	for _, tc := range []struct {
+		action string
+		param  string
+		valid  func(string) bool
+		msg    string
+	}{
+		{"set_when", "when_date", isWhenDate, "when_date must be YYYY-MM-DD or 'someday'"},
+		{"set_deadline", "deadline", isDate, "deadline must be YYYY-MM-DD"},
+	} {
+		if input.Action != tc.action {
+			continue
+		}
+		v, present := input.Params[tc.param]
+		if !present || v == nil {
+			continue
+		}
+		s, isStr := v.(string)
+		if !isStr || (s != "" && !tc.valid(s)) {
+			writeFieldError(w, http.StatusBadRequest, tc.msg, "VALIDATION", tc.param)
+			return
+		}
 	}
 
 	if input.Action == "complete" || input.Action == "cancel" || input.Action == "wontdo" {

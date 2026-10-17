@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	mw "github.com/collinjanssen/thingstodo/internal/middleware"
+	"github.com/collinjanssen/thingstodo/internal/repository"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -24,6 +25,34 @@ func writeError(w http.ResponseWriter, status int, msg, code string) {
 // request field the error is about (e.g. a validation failure).
 func writeFieldError(w http.ResponseWriter, status int, msg, code, field string) {
 	mw.WriteError(w, status, msg, code, field)
+}
+
+// refExists checks that a referenced entity id exists and writes the error
+// response when it does not: 422 VALIDATION naming the request field. It
+// returns false once the response has been written, so callers write:
+//
+//	if !refExists(w, db, "projects", "project", "project_id", id) { return }
+func refExists(w http.ResponseWriter, db repository.DBTX, table, entity, field, id string) bool {
+	ok, err := repository.Exists(db, table, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+		return false
+	}
+	if !ok {
+		writeFieldError(w, http.StatusUnprocessableEntity, entity+" not found", "VALIDATION", field)
+		return false
+	}
+	return true
+}
+
+// tagsExist checks every tag id in tagIDs the same way refExists checks one.
+func tagsExist(w http.ResponseWriter, db repository.DBTX, field string, tagIDs []string) bool {
+	for _, id := range tagIDs {
+		if !refExists(w, db, "tags", "tag", field, id) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeDecodeError maps a request body decode failure to the right client

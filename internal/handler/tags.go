@@ -36,8 +36,15 @@ func (h *TagHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
 	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "title is required", "VALIDATION", "title")
+		return
+	}
+	if input.ParentTagID != nil && !refExists(w, h.repo.Conn(), "tags", "tag", "parent_tag_id", *input.ParentTagID) {
 		return
 	}
 	input.Title = strings.ToLower(input.Title)
@@ -68,12 +75,20 @@ func (h *TagHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Raw = raw
 	if input.Title != nil {
+		if *input.Title == "" {
+			writeFieldError(w, http.StatusBadRequest, "title cannot be empty", "VALIDATION", "title")
+			return
+		}
 		lower := strings.ToLower(*input.Title)
 		input.Title = &lower
 		if lower == "siyuan" || lower == "obsidian" {
 			writeError(w, http.StatusForbidden, fmt.Sprintf("%q is a reserved tag name", lower), "RESERVED")
 			return
 		}
+	}
+	if _, ok := input.Raw["parent_tag_id"]; ok && input.ParentTagID != nil &&
+		!refExists(w, h.repo.Conn(), "tags", "tag", "parent_tag_id", *input.ParentTagID) {
+		return
 	}
 
 	tag, err := h.repo.Update(id, input)

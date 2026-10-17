@@ -35,8 +35,15 @@ func (h *ChecklistHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
+	if !refExists(w, h.repo.Conn(), "tasks", "task", "task_id", taskID) {
+		return
+	}
 	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "title is required", "VALIDATION", "title")
 		return
 	}
 	item, err := h.repo.Create(taskID, input)
@@ -53,6 +60,10 @@ func (h *ChecklistHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var input model.UpdateChecklistInput
 	if err := decodeJSON(r, &input); err != nil {
 		writeDecodeError(w, err)
+		return
+	}
+	if input.Title != nil && *input.Title == "" {
+		writeFieldError(w, http.StatusBadRequest, "title cannot be empty", "VALIDATION", "title")
 		return
 	}
 	item, err := h.repo.Update(id, input)

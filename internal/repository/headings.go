@@ -16,6 +16,12 @@ func NewHeadingRepository(db *sql.DB, changeLog *ChangeLogRepository) *HeadingRe
 	return &HeadingRepository{db: db, changeLog: changeLog}
 }
 
+// Conn returns the underlying connection pool, for boundary validation
+// lookups (repository.Exists) outside repository transactions.
+func (r *HeadingRepository) Conn() *sql.DB {
+	return r.db
+}
+
 func (r *HeadingRepository) ListByProject(projectID string) ([]model.Heading, error) {
 	rows, err := r.db.Query(
 		"SELECT id, title, project_id, sort_order FROM headings WHERE project_id = ? ORDER BY sort_order", projectID)

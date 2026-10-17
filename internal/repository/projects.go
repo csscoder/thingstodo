@@ -23,6 +23,12 @@ func NewProjectRepository(db *sql.DB, changeLog *ChangeLogRepository) *ProjectRe
 	return &ProjectRepository{db: db, conn: db, changeLog: changeLog}
 }
 
+// Conn returns the underlying connection pool, for boundary validation
+// lookups (repository.Exists) outside repository transactions.
+func (r *ProjectRepository) Conn() *sql.DB {
+	return r.conn
+}
+
 // WithTx returns a shallow copy of the repository bound to tx: its statements
 // and nested inTx calls reuse tx instead of opening new transactions. It is
 // nil-safe for the change log.

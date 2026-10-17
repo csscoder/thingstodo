@@ -397,6 +397,10 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			}
 		}
 
+		if field, msg, ok := h.validateTaskCreate(input); !ok {
+			return syncFieldError(result, field, msg)
+		}
+
 		task, err := h.tasks.Create(input)
 		if err != nil {
 			result.Status = "error"
@@ -584,6 +588,9 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 		}
 
 		if len(input.Raw) > 0 {
+			if field, msg, ok := h.validateTaskUpdate(input); !ok {
+				return syncFieldError(result, field, msg)
+			}
 			_, err = h.tasks.Update(change.EntityID, input)
 			if err != nil {
 				result.Status = "error"
@@ -608,6 +615,95 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 	}
 
 	return result
+}
+
+// validateTaskCreate applies the same boundary rules as POST /api/tasks:
+// id format, date formats, the deadline >= when_date rule, and existence of
+// every referenced id. It returns the failing field and message for a
+// per-change error.
+func (h *SyncHandler) validateTaskCreate(input model.CreateTaskInput) (string, string, bool) {
+	if field, msg, ok := validClientID(input.ID); !ok {
+		return field, msg, false
+	}
+	if input.Title == "" {
+		return "title", "title is required", false
+	}
+	if input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		return "when_date", "must be YYYY-MM-DD or 'someday'", false
+	}
+	if input.Deadline != nil && !isDate(*input.Deadline) {
+		return "deadline", "must be YYYY-MM-DD", false
+	}
+	if input.WhenDate != nil && input.Deadline != nil && *input.WhenDate != "someday" && *input.Deadline < *input.WhenDate {
+		return "deadline", "cannot be before the when date", false
+	}
+	db := h.tasks.Conn()
+	if input.ProjectID != nil {
+		if field, msg, ok := refFound(db, "projects", "project_id", "project not found", *input.ProjectID); !ok {
+			return field, msg, false
+		}
+	}
+	if input.AreaID != nil {
+		if field, msg, ok := refFound(db, "areas", "area_id", "area not found", *input.AreaID); !ok {
+			return field, msg, false
+		}
+	}
+	if input.HeadingID != nil {
+		if input.ProjectID != nil {
+			inProject, err := repository.HeadingInProject(db, *input.HeadingID, *input.ProjectID)
+			if err != nil {
+				log.Printf("sync heading check %s: %v", *input.HeadingID, err)
+				return "", "internal error", false
+			}
+			if !inProject {
+				return "heading_id", "heading is not in this project", false
+			}
+		} else if field, msg, ok := refFound(db, "headings", "heading_id", "heading not found", *input.HeadingID); !ok {
+			return field, msg, false
+		}
+	}
+	for _, tagID := range input.TagIDs {
+		if field, msg, ok := refFound(db, "tags", "tag_ids", "tag not found", tagID); !ok {
+			return field, msg, false
+		}
+	}
+	return "", "", true
+}
+
+// validateTaskUpdate applies the same boundary rules as PATCH /api/tasks to
+// the fields a sync update actually changes.
+func (h *SyncHandler) validateTaskUpdate(input model.UpdateTaskInput) (string, string, bool) {
+	if input.Title != nil && *input.Title == "" {
+		return "title", "cannot be empty", false
+	}
+	if _, ok := input.Raw["when_date"]; ok && input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		return "when_date", "must be YYYY-MM-DD or 'someday'", false
+	}
+	if _, ok := input.Raw["deadline"]; ok && input.Deadline != nil && !isDate(*input.Deadline) {
+		return "deadline", "must be YYYY-MM-DD", false
+	}
+	db := h.tasks.Conn()
+	if _, ok := input.Raw["project_id"]; ok && input.ProjectID != nil {
+		if field, msg, ok := refFound(db, "projects", "project_id", "project not found", *input.ProjectID); !ok {
+			return field, msg, false
+		}
+	}
+	if _, ok := input.Raw["area_id"]; ok && input.AreaID != nil {
+		if field, msg, ok := refFound(db, "areas", "area_id", "area not found", *input.AreaID); !ok {
+			return field, msg, false
+		}
+	}
+	if _, ok := input.Raw["heading_id"]; ok && input.HeadingID != nil {
+		if field, msg, ok := refFound(db, "headings", "heading_id", "heading not found", *input.HeadingID); !ok {
+			return field, msg, false
+		}
+	}
+	for _, tagID := range input.TagIDs {
+		if field, msg, ok := refFound(db, "tags", "tag_ids", "tag not found", tagID); !ok {
+			return field, msg, false
+		}
+	}
+	return "", "", true
 }
 
 // --- Project change application ---
@@ -648,6 +744,29 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 				return fieldTypeError(result, "deadline")
 			}
 			input.Deadline = s
+		}
+
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if input.Title == "" {
+			return syncFieldError(result, "title", "title is required")
+		}
+		if input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+			return syncFieldError(result, "when_date", "must be YYYY-MM-DD or 'someday'")
+		}
+		if input.Deadline != nil && !isDate(*input.Deadline) {
+			return syncFieldError(result, "deadline", "must be YYYY-MM-DD")
+		}
+		if input.AreaID != nil {
+			if field, msg, ok := refFound(h.tasks.Conn(), "areas", "area_id", "area not found", *input.AreaID); !ok {
+				return syncFieldError(result, field, msg)
+			}
+		}
+		for _, tagID := range input.TagIDs {
+			if field, msg, ok := refFound(h.tasks.Conn(), "tags", "tag_ids", "tag not found", tagID); !ok {
+				return syncFieldError(result, field, msg)
+			}
 		}
 
 		_, err = h.projects.Create(input)
@@ -723,6 +842,20 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 		}
 
 		if len(input.Raw) > 0 {
+			if input.Title != nil && *input.Title == "" {
+				return syncFieldError(result, "title", "cannot be empty")
+			}
+			if _, ok := input.Raw["when_date"]; ok && input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+				return syncFieldError(result, "when_date", "must be YYYY-MM-DD or 'someday'")
+			}
+			if _, ok := input.Raw["deadline"]; ok && input.Deadline != nil && !isDate(*input.Deadline) {
+				return syncFieldError(result, "deadline", "must be YYYY-MM-DD")
+			}
+			if _, ok := input.Raw["area_id"]; ok && input.AreaID != nil {
+				if field, msg, ok := refFound(h.tasks.Conn(), "areas", "area_id", "area not found", *input.AreaID); !ok {
+					return syncFieldError(result, field, msg)
+				}
+			}
 			_, err = h.projects.Update(change.EntityID, input)
 			if err != nil {
 				result.Status = "error"
@@ -766,6 +899,12 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 			ID:    change.EntityID,
 			Title: stringFromData(change.Data, "title"),
 		}
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if input.Title == "" {
+			return syncFieldError(result, "title", "title is required")
+		}
 		_, err = h.areas.Create(input)
 		if err != nil {
 			result.Status = "error"
@@ -800,6 +939,9 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 					input.SortOrder = &f
 				}
 			}
+		}
+		if input.Title != nil && *input.Title == "" {
+			return syncFieldError(result, "title", "cannot be empty")
 		}
 
 		_, err = h.areas.Update(change.EntityID, input)
@@ -851,6 +993,17 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 			}
 			input.ParentTagID = s
 		}
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if input.Title == "" {
+			return syncFieldError(result, "title", "title is required")
+		}
+		if input.ParentTagID != nil {
+			if field, msg, ok := refFound(h.tasks.Conn(), "tags", "parent_tag_id", "tag not found", *input.ParentTagID); !ok {
+				return syncFieldError(result, field, msg)
+			}
+		}
 		_, err = h.tags.Create(input)
 		if err != nil {
 			result.Status = "error"
@@ -897,6 +1050,14 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 			}
 		}
 
+		if input.Title != nil && *input.Title == "" {
+			return syncFieldError(result, "title", "cannot be empty")
+		}
+		if _, ok := input.Raw["parent_tag_id"]; ok && input.ParentTagID != nil {
+			if field, msg, ok := refFound(h.tasks.Conn(), "tags", "parent_tag_id", "tag not found", *input.ParentTagID); !ok {
+				return syncFieldError(result, field, msg)
+			}
+		}
 		_, err := h.tags.Update(change.EntityID, input)
 		if err != nil {
 			result.Status = "error"
@@ -953,6 +1114,24 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 			}
 			input.EndTime = s
 		}
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if !isWhenDate(input.WhenDate) {
+			return syncFieldError(result, "when_date", "must be YYYY-MM-DD or 'someday'")
+		}
+		if input.StartTime != nil && !isClock(*input.StartTime) {
+			return syncFieldError(result, "start_time", "must be HH:MM in 24-hour form")
+		}
+		if input.EndTime != nil && !isClock(*input.EndTime) {
+			return syncFieldError(result, "end_time", "must be HH:MM in 24-hour form")
+		}
+		if input.StartTime != nil && input.EndTime != nil && *input.EndTime <= *input.StartTime {
+			return syncFieldError(result, "end_time", "must be after start_time")
+		}
 		_, err := h.schedules.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"
@@ -1004,6 +1183,18 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 				}
 			}
 		}
+		if _, ok := input.Raw["when_date"]; ok && input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+			return syncFieldError(result, "when_date", "must be YYYY-MM-DD or 'someday'")
+		}
+		if input.StartTime != nil && !isClock(*input.StartTime) {
+			return syncFieldError(result, "start_time", "must be HH:MM in 24-hour form")
+		}
+		if input.EndTime != nil && !isClock(*input.EndTime) {
+			return syncFieldError(result, "end_time", "must be HH:MM in 24-hour form")
+		}
+		if input.StartTime != nil && input.EndTime != nil && *input.EndTime <= *input.StartTime {
+			return syncFieldError(result, "end_time", "must be after start_time")
+		}
 		_, err := h.schedules.Update(change.EntityID, input)
 		if err != nil {
 			result.Status = "error"
@@ -1045,6 +1236,15 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 			ID:    change.EntityID,
 			Title: stringFromData(change.Data, "title"),
 		}
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if input.Title == "" {
+			return syncFieldError(result, "title", "title is required")
+		}
 		_, err := h.checklist.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"
@@ -1070,6 +1270,9 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 					input.SortOrder = &f
 				}
 			}
+		}
+		if input.Title != nil && *input.Title == "" {
+			return syncFieldError(result, "title", "cannot be empty")
 		}
 		_, err := h.checklist.Update(change.EntityID, input)
 		if err != nil {
@@ -1119,6 +1322,12 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 			if f, ok := v.(float64); ok {
 				input.FileSize = int64(f)
 			}
+		}
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
+			return syncFieldError(result, field, msg)
 		}
 		if err := normalizeLinkInput(&input); err != nil {
 			result.Status = "error"
@@ -1174,6 +1383,12 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 			}
 			input.ExactAt = s
 		}
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
+			return syncFieldError(result, field, msg)
+		}
 		_, err := h.reminders.Create(taskID, input)
 		if err != nil {
 			result.Status = "error"
@@ -1215,6 +1430,15 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 			ID:    change.EntityID,
 			Title: stringFromData(change.Data, "title"),
 		}
+		if field, msg, ok := validClientID(input.ID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if input.Title == "" {
+			return syncFieldError(result, "title", "title is required")
+		}
+		if field, msg, ok := refFound(h.tasks.Conn(), "projects", "project_id", "project not found", projectID); !ok {
+			return syncFieldError(result, field, msg)
+		}
 		_, err := h.headings.Create(projectID, input)
 		if err != nil {
 			result.Status = "error"
@@ -1236,6 +1460,9 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 					input.SortOrder = &f
 				}
 			}
+		}
+		if input.Title != nil && *input.Title == "" {
+			return syncFieldError(result, "title", "cannot be empty")
 		}
 		_, err := h.headings.Update(change.EntityID, input)
 		if err != nil {
@@ -1298,6 +1525,40 @@ func fieldTypeError(result SyncPushResult, field string) SyncPushResult {
 	result.Status = "error"
 	result.Error = "invalid type for field " + field
 	return result
+}
+
+// syncFieldError marks a sync change result as failed boundary validation.
+// The error is "<field>: <msg>" (the field alone for internal errors), and
+// the rest of the batch continues.
+func syncFieldError(result SyncPushResult, field, msg string) SyncPushResult {
+	result.Status = "error"
+	if field == "" {
+		result.Error = msg
+	} else {
+		result.Error = field + ": " + msg
+	}
+	return result
+}
+
+// validClientID is the sync twin of the REST id check.
+func validClientID(id string) (string, string, bool) {
+	if id != "" && !isClientID(id) {
+		return "id", "must be 8-21 characters of A-Za-z0-9_-", false
+	}
+	return "", "", true
+}
+
+// refFound wraps repository.Exists for the sync per-change error style.
+func refFound(db repository.DBTX, table, field, notFoundMsg, id string) (string, string, bool) {
+	ok, err := repository.Exists(db, table, id)
+	if err != nil {
+		log.Printf("sync validation for %s %s: %v", table, id, err)
+		return "", "internal error", false
+	}
+	if !ok {
+		return field, notFoundMsg, false
+	}
+	return "", "", true
 }
 
 func stringFromData(data map[string]interface{}, key string) string {

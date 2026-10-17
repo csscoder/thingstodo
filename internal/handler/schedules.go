@@ -46,8 +46,27 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
+	if !refExists(w, h.taskRepo.Conn(), "tasks", "task", "task_id", taskID) {
+		return
+	}
 	if input.WhenDate == "" {
-		writeError(w, http.StatusBadRequest, "when_date is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "when_date is required", "VALIDATION", "when_date")
+		return
+	}
+	if !isWhenDate(input.WhenDate) {
+		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
+		return
+	}
+	if input.StartTime != nil && !isClock(*input.StartTime) {
+		writeFieldError(w, http.StatusBadRequest, "start_time must be HH:MM in 24-hour form", "VALIDATION", "start_time")
+		return
+	}
+	if input.EndTime != nil && !isClock(*input.EndTime) {
+		writeFieldError(w, http.StatusBadRequest, "end_time must be HH:MM in 24-hour form", "VALIDATION", "end_time")
 		return
 	}
 
@@ -70,7 +89,11 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	// start_time requires end_time
 	if input.StartTime != nil && input.EndTime == nil {
-		writeError(w, http.StatusBadRequest, "end_time is required when start_time is set", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "end_time is required when start_time is set", "VALIDATION", "end_time")
+		return
+	}
+	if input.StartTime != nil && input.EndTime != nil && *input.EndTime <= *input.StartTime {
+		writeFieldError(w, http.StatusBadRequest, "end_time must be after start_time", "VALIDATION", "end_time")
 		return
 	}
 
@@ -110,6 +133,23 @@ func (h *ScheduleHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Raw = raw
+
+	if _, ok := input.Raw["when_date"]; ok && input.WhenDate != nil && !isWhenDate(*input.WhenDate) {
+		writeFieldError(w, http.StatusBadRequest, "when_date must be YYYY-MM-DD or 'someday'", "VALIDATION", "when_date")
+		return
+	}
+	if input.StartTime != nil && !isClock(*input.StartTime) {
+		writeFieldError(w, http.StatusBadRequest, "start_time must be HH:MM in 24-hour form", "VALIDATION", "start_time")
+		return
+	}
+	if input.EndTime != nil && !isClock(*input.EndTime) {
+		writeFieldError(w, http.StatusBadRequest, "end_time must be HH:MM in 24-hour form", "VALIDATION", "end_time")
+		return
+	}
+	if input.StartTime != nil && input.EndTime != nil && *input.EndTime <= *input.StartTime {
+		writeFieldError(w, http.StatusBadRequest, "end_time must be after start_time", "VALIDATION", "end_time")
+		return
+	}
 
 	// Block duplicate timeless dates when changing date or clearing time
 	if input.WhenDate != nil || input.Raw["start_time"] != nil {

@@ -35,16 +35,23 @@ func (h *ReminderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
+	if !refExists(w, h.repo.Conn(), "tasks", "task", "task_id", taskID) {
+		return
+	}
 	switch input.Type {
 	case model.ReminderAtStart, model.ReminderOnDay, model.ReminderMinutesBefore,
 		model.ReminderHoursBefore, model.ReminderDaysBefore, model.ReminderExact:
 		// valid
 	default:
-		writeError(w, http.StatusBadRequest, "invalid reminder type", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "invalid reminder type", "VALIDATION", "type")
 		return
 	}
 	if input.Type == model.ReminderExact && input.ExactAt == nil {
-		writeError(w, http.StatusBadRequest, "exact_at is required for exact type", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "exact_at is required for exact type", "VALIDATION", "exact_at")
 		return
 	}
 	item, err := h.repo.Create(taskID, input)

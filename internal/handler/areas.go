@@ -48,8 +48,12 @@ func (h *AreaHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	if input.ID != "" && !isClientID(input.ID) {
+		writeFieldError(w, http.StatusBadRequest, "id must be 8-21 characters of A-Za-z0-9_-", "VALIDATION", "id")
+		return
+	}
 	if input.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required", "VALIDATION")
+		writeFieldError(w, http.StatusBadRequest, "title is required", "VALIDATION", "title")
 		return
 	}
 	area, err := h.repo.Create(input)
@@ -70,6 +74,10 @@ func (h *AreaHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var input model.UpdateAreaInput
 	if err := decodeJSON(r, &input); err != nil {
 		writeDecodeError(w, err)
+		return
+	}
+	if input.Title != nil && *input.Title == "" {
+		writeFieldError(w, http.StatusBadRequest, "title cannot be empty", "VALIDATION", "title")
 		return
 	}
 	area, err := h.repo.Update(id, input)

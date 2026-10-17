@@ -30,7 +30,7 @@ Error codes:
 | `NOT_FOUND` | 404 | Unknown `/api` route, or entity does not exist |
 | `METHOD_NOT_ALLOWED` | 405 | Method not registered for a known `/api` route; `Allow` header lists supported methods |
 | `BAD_REQUEST` | 400 | Malformed JSON body or invalid request parameters |
-| `VALIDATION` | 400 | Request field failed validation (may carry `field`) |
+| `VALIDATION` | 400/422 | Request field failed validation; 400 for malformed values, 422 for referenced ids that do not exist (carries `field`) |
 | `RESERVED` | 403 | Reserved tag name |
 | `DUPLICATE_NAME` | 409 | Project/area/tag title already exists |
 | `HAS_PROJECTS` | 409 | Area still contains projects |
@@ -62,6 +62,17 @@ All entities with `sort_order` use REAL (float) for fractional positioning. New 
 
 ### IDs
 All entity IDs are nanoid strings (8-10 chars). Task IDs double as permalink slugs.
+
+### Validation Rules
+Mutation endpoints validate request fields at the API boundary, before any write reaches the database. Every validation error uses the error envelope above with code `VALIDATION` and the offending `field`:
+
+- **Malformed values → 400** `VALIDATION`: dates that are not real `YYYY-MM-DD` calendar dates (`2026-02-31` is rejected), `when_date` values that are neither a date nor `someday`, times not in `HH:MM` 24-hour form (`9:00`, `24:00`), client-supplied `id` values outside `^[A-Za-z0-9_-]{8,21}$`, empty titles on create/update, and `end_time` earlier than or equal to `start_time`.
+- **Referenced ids that do not exist → 422** `VALIDATION`: `project_id`, `area_id`, `heading_id`, `tag_ids`, `parent_tag_id` and `task_id` (URL or body) must reference an existing row. A task create with both `project_id` and `heading_id` requires the heading to belong to that project.
+- Client ids apply to every create endpoint that accepts a body `id`: tasks, projects, areas, tags, headings, checklist items, schedules, reminders, link attachments, and sync creates.
+- Bulk `set_when`/`set_deadline` validate their date params the same way (an empty string clears the date and stays allowed); `PATCH /api/tasks/:id/move` validates `when_date` and its reference params.
+- `deadline >= when_date` is enforced on task create and update (including cross-field updates resolved against the stored task).
+
+**Sync** (`POST /api/sync/push`) applies the same rules per change: a violation produces a result with `status: "error"` and `error: "<field>: <message>"`, and the rest of the batch continues.
 
 ---
 
@@ -951,6 +962,8 @@ Validation:
 - Maximum 12 schedule entries per task
 - Only the first entry can have `when_date = 'someday'`
 - `start_time` requires `end_time`
+- `when_date` must be `YYYY-MM-DD` or `someday` (400 `when_date`); `start_time`/`end_time` must be `HH:MM` 24h (400 `start_time`/`end_time`); `end_time` must be after `start_time` (400 `end_time`)
+- Unknown `task_id` → 422 `VALIDATION` `task_id`
 
 SSE: broadcasts `task_updated`
 
@@ -1409,7 +1422,7 @@ Response (200):
 |--------|---------|
 | `applied` | Change was applied without conflict |
 | `conflict_resolved` | Change conflicted with server state (server was newer), but was still recorded for audit |
-| `error` | Change could not be applied; check `error` field for details. Internal failures report the generic `internal error`; user-facing messages (validation, not found, duplicate name, unsupported entity/action) keep their own text |
+| `error` | Change could not be applied; check `error` field for details. Internal failures report the generic `internal error`; user-facing messages (validation, not found, duplicate name, unsupported entity/action) keep their own text. Boundary validation failures use `"<field>: <message>"` (e.g. `when_date: must be YYYY-MM-DD or 'someday'`) and do not fail the batch |
 
 **Supported entities:** task, project, area, tag
 

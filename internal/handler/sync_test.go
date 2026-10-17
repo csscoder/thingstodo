@@ -200,7 +200,7 @@ func TestSyncPushCreateTask(t *testing.T) {
 		"changes": []map[string]interface{}{
 			{
 				"entity":            "task",
-				"entity_id":         "sync-t1",
+				"entity_id":         "sync-task-01",
 				"action":            "create",
 				"data":              map[string]interface{}{"title": "Synced task"},
 				"fields":            []string{"title"},
@@ -381,7 +381,7 @@ func TestSyncPushMultipleChanges(t *testing.T) {
 		"changes": []map[string]interface{}{
 			{
 				"entity":            "task",
-				"entity_id":         "mt1",
+				"entity_id":         "multi-task-1",
 				"action":            "create",
 				"data":              map[string]interface{}{"title": "Task 1"},
 				"fields":            []string{"title"},
@@ -389,7 +389,7 @@ func TestSyncPushMultipleChanges(t *testing.T) {
 			},
 			{
 				"entity":            "task",
-				"entity_id":         "mt2",
+				"entity_id":         "multi-task-2",
 				"action":            "create",
 				"data":              map[string]interface{}{"title": "Task 2"},
 				"fields":            []string{"title"},
@@ -422,7 +422,7 @@ func TestSyncPushCreateArea(t *testing.T) {
 		"changes": []map[string]interface{}{
 			{
 				"entity":            "area",
-				"entity_id":         "a1",
+				"entity_id":         "area-sync-01",
 				"action":            "create",
 				"data":              map[string]interface{}{"title": "Work"},
 				"fields":            []string{"title"},
@@ -442,7 +442,7 @@ func TestSyncPushCreateArea(t *testing.T) {
 	}
 
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM areas WHERE id = ?", "a1").Scan(&count); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM areas WHERE id = ?", "area-sync-01").Scan(&count); err != nil {
 		t.Fatalf("failed to query created area: %v", err)
 	}
 	if count != 1 {
@@ -458,7 +458,7 @@ func TestSyncPushCreateTag(t *testing.T) {
 		"changes": []map[string]interface{}{
 			{
 				"entity":            "tag",
-				"entity_id":         "tag1",
+				"entity_id":         "tag-sync-001",
 				"action":            "create",
 				"data":              map[string]interface{}{"title": "urgent"},
 				"fields":            []string{"title"},
@@ -478,7 +478,7 @@ func TestSyncPushCreateTag(t *testing.T) {
 	}
 
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM tags WHERE id = ?", "tag1").Scan(&count); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM tags WHERE id = ?", "tag-sync-001").Scan(&count); err != nil {
 		t.Fatalf("failed to query created tag: %v", err)
 	}
 	if count != 1 {
@@ -847,5 +847,53 @@ func TestSyncPush_AttachmentLinkApplied(t *testing.T) {
 	}
 	if result.Results[0].Status != "applied" {
 		t.Fatalf("expected status 'applied', got %q (error: %s)", result.Results[0].Status, result.Results[0].Error)
+	}
+}
+
+func TestSyncPush_BadWhenDateIsChangeError(t *testing.T) {
+	client, _, _ := setupSyncRouter(t)
+
+	body := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{
+			{
+				"entity":    "task",
+				"entity_id": "sync-badwd-01",
+				"action":    "create",
+				"data": map[string]interface{}{
+					"title":     "Bad when date",
+					"when_date": "tomorrow",
+				},
+				"fields":            []string{"title", "when_date"},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+			{
+				"entity":            "task",
+				"entity_id":         "sync-goodwd-1",
+				"action":            "create",
+				"data":              map[string]interface{}{"title": "Good when date"},
+				"fields":            []string{"title"},
+				"client_updated_at": "2026-01-01T00:00:00Z",
+			},
+		},
+	}
+
+	resp := client.Post("/api/sync/push", body)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+
+	if len(result.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d (body: %s)", len(result.Results), string(resp.Body))
+	}
+	if result.Results[0].Status != "error" {
+		t.Errorf("expected status 'error', got %q", result.Results[0].Status)
+	}
+	if !strings.Contains(result.Results[0].Error, "when_date") {
+		t.Errorf("expected error mentioning when_date, got %q", result.Results[0].Error)
+	}
+	if result.Results[1].Status != "applied" {
+		t.Errorf("batch must continue after a per-change error, got %q (error: %s)", result.Results[1].Status, result.Results[1].Error)
 	}
 }
