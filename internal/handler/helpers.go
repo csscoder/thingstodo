@@ -3,10 +3,11 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"strings"
+
+	mw "github.com/collinjanssen/thingstodo/internal/middleware"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -16,14 +17,13 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg, code string) {
-	if status >= http.StatusInternalServerError {
-		// Never leak internal error text (driver messages, schema details) to
-		// clients; log it server-side and send the generic body instead.
-		log.Printf("http %d: %s", status, msg)
-		writeJSON(w, status, map[string]string{"error": "internal error", "code": "INTERNAL"})
-		return
-	}
-	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+	mw.WriteError(w, status, msg, code, "")
+}
+
+// writeFieldError writes the JSON error envelope with the name of the
+// request field the error is about (e.g. a validation failure).
+func writeFieldError(w http.ResponseWriter, status int, msg, code, field string) {
+	mw.WriteError(w, status, msg, code, field)
 }
 
 // writeDecodeError maps a request body decode failure to the right client

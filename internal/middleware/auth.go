@@ -31,7 +31,7 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 						if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.APIKey)) == 1 {
 							userID, err := apiKeyUserLookup()
 							if err != nil || userID == "" {
-								http.Error(w, `{"error":"api key user not found","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+								WriteError(w, http.StatusUnauthorized, "api key user not found", "UNAUTHORIZED", "")
 								return
 							}
 							ctx := context.WithValue(r.Context(), UserIDKey, userID)
@@ -39,7 +39,7 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 							return
 						}
 						// Header present but key doesn't match — reject immediately
-						http.Error(w, `{"error":"invalid api key","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+						WriteError(w, http.StatusUnauthorized, "invalid api key", "UNAUTHORIZED", "")
 						return
 					}
 				}
@@ -50,7 +50,7 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 				// No authentication — for development use only
 				userID, err := apiKeyUserLookup()
 				if err != nil || userID == "" {
-					http.Error(w, `{"error":"no users found","code":"INTERNAL"}`, http.StatusInternalServerError)
+					WriteError(w, http.StatusInternalServerError, "no users found", "INTERNAL", "")
 					return
 				}
 				ctx := context.WithValue(r.Context(), UserIDKey, userID)
@@ -61,7 +61,7 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 				// Trust proxy header
 				userHeader := r.Header.Get(cfg.AuthProxyHeader)
 				if userHeader == "" {
-					http.Error(w, `{"error":"unauthorized","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					WriteError(w, http.StatusUnauthorized, "unauthorized", "UNAUTHORIZED", "")
 					return
 				}
 				ctx := context.WithValue(r.Context(), UserIDKey, userHeader)
@@ -70,7 +70,7 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 			default: // "builtin" and "oidc": JWT cookie auth
 				cookie, err := r.Cookie("token")
 				if err != nil {
-					http.Error(w, `{"error":"unauthorized","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					WriteError(w, http.StatusUnauthorized, "unauthorized", "UNAUTHORIZED", "")
 					return
 				}
 
@@ -78,31 +78,31 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 					return []byte(cfg.JWTSecret), nil
 				}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired())
 				if err != nil || !jwtToken.Valid {
-					http.Error(w, `{"error":"invalid token","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					WriteError(w, http.StatusUnauthorized, "invalid token", "UNAUTHORIZED", "")
 					return
 				}
 
 				claims, ok := jwtToken.Claims.(jwt.MapClaims)
 				if !ok {
-					http.Error(w, `{"error":"invalid claims","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					WriteError(w, http.StatusUnauthorized, "invalid claims", "UNAUTHORIZED", "")
 					return
 				}
 
 				// OIDC state cookies are signed with the same secret but are
 				// not session tokens; never accept them as authentication.
 				if typ, _ := claims["typ"].(string); typ == "oidc_state" {
-					http.Error(w, `{"error":"invalid token","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					WriteError(w, http.StatusUnauthorized, "invalid token", "UNAUTHORIZED", "")
 					return
 				}
 
 				sub, _ := claims["sub"].(string)
 				if sub == "" {
-					http.Error(w, `{"error":"invalid claims","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					WriteError(w, http.StatusUnauthorized, "invalid claims", "UNAUTHORIZED", "")
 					return
 				}
 				exists, err := userExists(sub)
 				if err != nil || !exists {
-					http.Error(w, `{"error":"invalid claims","code":"UNAUTHORIZED"}`, http.StatusUnauthorized)
+					WriteError(w, http.StatusUnauthorized, "invalid claims", "UNAUTHORIZED", "")
 					return
 				}
 

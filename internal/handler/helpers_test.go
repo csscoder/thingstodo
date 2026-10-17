@@ -54,6 +54,16 @@ func TestWriteError_4xxPassesThrough(t *testing.T) {
 	}
 }
 
+func TestWriteError_FieldIncluded(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeFieldError(rec, http.StatusBadRequest, "bad", "VALIDATION", "when_date")
+
+	want := `{"error":"bad","code":"VALIDATION","field":"when_date"}`
+	if got := strings.TrimSpace(rec.Body.String()); got != want {
+		t.Errorf("expected body %s, got %s", want, got)
+	}
+}
+
 func TestSyncErrorMessage(t *testing.T) {
 	tests := []struct {
 		name string

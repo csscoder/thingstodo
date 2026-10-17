@@ -97,6 +97,27 @@ func doReq(t *testing.T, client *testutil.TestClient, method, path, userID strin
 	return &testutil.TestResponse{Response: resp, Body: respBody}
 }
 
+func TestRouter_UnknownAPIRouteIsJSON404(t *testing.T) {
+	client, _ := newRouterClient(t, config.Config{})
+
+	resp := doReq(t, client, http.MethodGet, "/api/nope", "u1", nil, "")
+
+	testutil.AssertStatus(t, resp, http.StatusNotFound)
+	testutil.AssertJSONField(t, resp, "code", "NOT_FOUND")
+}
+
+func TestRouter_WrongMethodIsJSON405(t *testing.T) {
+	client, _ := newRouterClient(t, config.Config{})
+
+	resp := doReq(t, client, http.MethodPut, "/api/tasks", "u1", nil, "")
+
+	testutil.AssertStatus(t, resp, http.StatusMethodNotAllowed)
+	testutil.AssertJSONField(t, resp, "code", "METHOD_NOT_ALLOWED")
+	if resp.Header.Get("Allow") == "" {
+		t.Error("expected non-empty Allow header on 405 response")
+	}
+}
+
 func TestRouter_OversizedJSONIs413(t *testing.T) {
 	client, db := newRouterClient(t, config.Config{})
 

@@ -12,11 +12,35 @@ All endpoints return JSON. All mutations broadcast SSE events. Authentication vi
 ```json
 {
   "error": "Human-readable error message",
-  "code": "ERROR_CODE"
+  "code": "ERROR_CODE",
+  "field": "offending request field (optional)"
 }
 ```
 
+Every error response — including auth middleware rejections, unknown `/api` routes (404) and unsupported methods on known `/api` routes (405, which keeps the `Allow` header chi computes) — uses this single JSON envelope with `Content-Type: application/json`. The `field` property is omitted unless the error is about a specific request field.
+
 `5xx` responses always carry the generic body `{ "error": "internal error", "code": "INTERNAL" }`; the underlying cause is logged server-side and never included in the response.
+
+Error codes:
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `UNAUTHORIZED` | 401 | Missing/invalid session cookie, proxy header, API key, or credentials |
+| `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. OIDC email not permitted) |
+| `NOT_FOUND` | 404 | Unknown `/api` route, or entity does not exist |
+| `METHOD_NOT_ALLOWED` | 405 | Method not registered for a known `/api` route; `Allow` header lists supported methods |
+| `BAD_REQUEST` | 400 | Malformed JSON body or invalid request parameters |
+| `VALIDATION` | 400 | Request field failed validation (may carry `field`) |
+| `RESERVED` | 403 | Reserved tag name |
+| `DUPLICATE_NAME` | 409 | Project/area/tag title already exists |
+| `HAS_PROJECTS` | 409 | Area still contains projects |
+| `CURSOR_EXPIRED` | 410 | Sync cursor purged; perform a full sync |
+| `BODY_TOO_LARGE` | 413 | Request body over the size cap |
+| `LIMIT_REACHED` | 422 | Per-view saved filter cap reached |
+| `RATE_LIMITED` | 429 | Too many failed login attempts |
+| `FILE_TOO_LARGE` | 400 | Uploaded file over `MAX_UPLOAD_SIZE` |
+| `NOT_CONFIGURED` | 400 | Notification provider not configured |
+| `INTERNAL` | 5xx | Generic server error; details only in server logs |
 
 ### Request Body Limit
 JSON request bodies are capped at 10 MiB (10485760 bytes), regardless of `Content-Type`. Larger bodies are rejected before decoding with **413 Payload Too Large**:

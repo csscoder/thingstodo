@@ -92,6 +92,13 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
+		// Unknown /api routes and wrong methods return the JSON error
+		// envelope instead of chi's plain-text defaults.
+		r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+			mw.WriteError(w, http.StatusNotFound, "not found", "NOT_FOUND", "")
+		})
+		r.Use(methodNotAllowedJSON)
+
 		// Auth endpoints (no middleware)
 		r.Post("/auth/login", authH.Login)
 		r.Delete("/auth/logout", authH.Logout)
@@ -270,4 +277,38 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	}))
 
 	return r
+}
+
+// methodNotAllowedJSON keeps chi's default 405 responder — the only way to
+// preserve the Allow header chi computes from the route table (chi v5 drops
+// that header when a custom MethodNotAllowed handler is installed) — and
+// swaps its empty body for the standard JSON error envelope. It applies to
+// the /api sub-router only, leaving the SPA fallback untouched.
+func methodNotAllowedJSON(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&methodNotAllowedBody{ResponseWriter: w}, r)
+	})
+}
+
+// methodNotAllowedBody replaces the body of chi's default 405 response with
+// the JSON error envelope. Flush is forwarded so SSE streaming on
+// GET /api/events keeps working through the wrapper.
+type methodNotAllowedBody struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *methodNotAllowedBody) WriteHeader(status int) {
+	if status == http.StatusMethodNotAllowed && !w.wrote {
+		w.wrote = true
+		mw.WriteError(w.ResponseWriter, status, "method not allowed", "METHOD_NOT_ALLOWED", "")
+		return
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *methodNotAllowedBody) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
