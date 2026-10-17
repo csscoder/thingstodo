@@ -167,7 +167,23 @@ Required env vars: `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_
 ## Tasks
 
 ### GET /api/tasks
-Query params: `status`, `project_id`, `area_id`, `heading_id`, `tag_ids` (comma-separated), `when_date`, `when_before`, `when_after`, `has_deadline`, `search`
+Query params (all optional, combined with AND). Unknown params or invalid
+values get 400 `VALIDATION` with `field`.
+
+| Param | Meaning |
+|---|---|
+| `status` | Comma list of `open,completed,canceled,wont_do`. Default: every status. Applies independently of `list`. |
+| `list` | `inbox`, `today`, `upcoming`, `anytime`, `someday`, `logbook`, `trash`. A task matches when it appears in that view (same predicates as `/api/views/*`). Every query excludes trashed tasks (`deleted_at IS NULL`) except `list=trash`, which selects only them (`deleted_at IS NOT NULL`), including tasks with `status=open`. `today` is resolved in the server timezone. |
+| `project_id`, `area_id`, `heading_id` | Exact id match. `area_id` matches the stored `tasks.area_id`, which is kept equal to the project's area. |
+| `tag_ids` | Comma list of tag ids. With `tag_mode=any` (default) a task matching any tag returns; with `tag_mode=all` it must carry every listed tag. |
+| `when_date`, `when_before`, `when_after` | `when_date` is `YYYY-MM-DD` or `someday`; the bounds are dates, `someday` never matches a bound. |
+| `deadline_before`, `deadline_after` | Inclusive date bounds. |
+| `has_deadline`, `has_when`, `high_priority` | `true` or `false`. `has_when` counts `someday` as a when date. |
+| `updated_since`, `created_since` | Inclusive UTC timestamp: `YYYY-MM-DD HH:MM:SS` or RFC 3339 (normalized to UTC). |
+| `search` | FTS over title and notes; each whitespace token is quoted as an FTS5 string (punctuation is literal, tokens are ANDed) with **no** prefix matching. See `/api/search`. |
+| `sort` | `manual` (default), `when_date`, `deadline`, `created_at`, `updated_at`, `title`; prefix `-` for descending. `manual` orders by `sort_order_heading` when `heading_id` is given, `sort_order_project` when `project_id` is given, otherwise `sort_order_today`. NULL `when_date`/`deadline` keys sort first ascending and last descending. Every sort tie-breaks by `id` ascending. |
+| `limit` | 1–500. Pagination is opt-in: without `limit`, all matching tasks return (existing callers such as the CLI keep working). An explicit `limit=0` is a 400. |
+| `cursor` | Opaque string from the previous response's `next_cursor`; requires the same filters and sort. |
 
 Response (200):
 ```json
@@ -204,9 +220,13 @@ Response (200):
       "first_schedule_time": "string|null",
       "first_schedule_end_time": "string|null"
     }
-  ]
+  ],
+  "next_cursor": "string (present only when limit was given and more rows exist; omitted otherwise)"
 }
 ```
+
+`project_name` and `area_name` are always filled (null when the task has no
+project or area).
 
 ### POST /api/tasks
 Request:
@@ -1263,19 +1283,31 @@ Response (200):
 ## Search
 
 ### GET /api/search
-Query params: `q` (required, FTS5 query string), `limit` (default 20)
+Query params: `q` (required), `limit` (default 20, max 500), `cursor`
+(optional, from the previous response).
+
+The query is made safe (never a 500): every whitespace token is quoted as an
+FTS5 string with any `"` doubled, so operators and punctuation are literal —
+`c++`, `email:`, `milk-2` match as plain words. Tokens are ANDed. Each token
+is also a **prefix** match: `mil` finds "milk". The `unicode61` tokenizer
+case-folds, so `покуп` finds "Покупки на неделю".
+
+Results are ordered by `rank`, then `id` as the unique tie-breaker; the
+cursor encodes both. Pagination follows the same opt-in rules as
+`GET /api/tasks`, except that the default limit is 20.
 
 Response (200):
 ```json
 {
   "results": [
     {
-      "task": {/* task object */},
+      "task": {/* task object, same shape as GET /api/tasks items */},
       "title_snippet": "string with <mark>highlights</mark>",
       "notes_snippet": "string with <mark>highlights</mark>",
       "rank": -1.5
     }
-  ]
+  ],
+  "next_cursor": "string (present only when more rows exist; omitted otherwise)"
 }
 ```
 

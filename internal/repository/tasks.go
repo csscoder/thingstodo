@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
 )
@@ -74,10 +75,37 @@ type TaskRepository struct {
 	conn      *sql.DB
 	tx        *sql.Tx
 	changeLog *ChangeLogRepository
+	loc       *time.Location
+	now       func() time.Time
 }
 
 func NewTaskRepository(db *sql.DB, changeLog *ChangeLogRepository) *TaskRepository {
-	return &TaskRepository{db: db, conn: db, changeLog: changeLog}
+	return &TaskRepository{db: db, conn: db, changeLog: changeLog, loc: time.UTC, now: time.Now}
+}
+
+// WithLocation returns a copy of the repository whose clock runs in loc, so
+// the list= filter resolves "today" in the server timezone like the view
+// repository does. A nil loc keeps UTC.
+func (r *TaskRepository) WithLocation(loc *time.Location) *TaskRepository {
+	if loc == nil {
+		return r
+	}
+	cp := *r
+	cp.loc = loc
+	return &cp
+}
+
+// SetClock overrides the repository clock (default time.Now). The list=
+// filter resolves today from it, in the repository's location.
+func (r *TaskRepository) SetClock(now func() time.Time) {
+	if now != nil {
+		r.now = now
+	}
+}
+
+// today returns the current calendar date in the repository timezone.
+func (r *TaskRepository) today() string {
+	return r.now().In(r.loc).Format("2006-01-02")
 }
 
 // Conn returns the underlying connection pool. Handlers that own a
@@ -109,7 +137,60 @@ func (r *TaskRepository) inTx(fn func(db DBTX) error) error {
 	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
 }
 
-func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error) {
+// taskSort builds the ORDER BY expression and the cursor key extractor for
+// a sort name (C1): manual, when_date, deadline, created_at, updated_at,
+// title, with an optional leading "-" for descending. manual picks the
+// column that owns the task's position: sort_order_heading under a heading
+// filter, sort_order_project under a project filter, otherwise
+// sort_order_today. numeric reports whether the key is a float (the manual
+// sort orders), which is how the cursor decodes it back. NULL when/deadline
+// keys sort as the empty string — first ascending, last descending, like
+// SQLite NULLs.
+func taskSort(f model.TaskFilters) (orderExpr string, numeric bool, keyOf func(model.TaskListItem) any, err error) {
+	name := strings.TrimPrefix(f.Sort, "-")
+	switch name {
+	case "", "manual":
+		switch {
+		case f.HeadingID != nil:
+			return "t.sort_order_heading", true, func(t model.TaskListItem) any { return t.SortOrderHeading }, nil
+		case f.ProjectID != nil:
+			return "t.sort_order_project", true, func(t model.TaskListItem) any { return t.SortOrderProject }, nil
+		default:
+			return "t.sort_order_today", true, func(t model.TaskListItem) any { return t.SortOrderToday }, nil
+		}
+	case "when_date":
+		return "COALESCE(t.when_date, '')", false, func(t model.TaskListItem) any {
+			if t.WhenDate != nil {
+				return *t.WhenDate
+			}
+			return ""
+		}, nil
+	case "deadline":
+		return "COALESCE(t.deadline, '')", false, func(t model.TaskListItem) any {
+			if t.Deadline != nil {
+				return *t.Deadline
+			}
+			return ""
+		}, nil
+	case "created_at":
+		return "t.created_at", false, func(t model.TaskListItem) any { return t.CreatedAt }, nil
+	case "updated_at":
+		return "t.updated_at", false, func(t model.TaskListItem) any { return t.UpdatedAt }, nil
+	case "title":
+		return "t.title", false, func(t model.TaskListItem) any { return t.Title }, nil
+	default:
+		return "", false, nil, fmt.Errorf("list tasks: unknown sort %q", f.Sort)
+	}
+}
+
+// List returns the tasks matching f (C1): one page of at most f.Limit rows
+// (0 = unlimited, the default for existing callers) plus the cursor of the
+// next page — "" (omitted in JSON) on the last page. list= reuses the
+// shared view predicates (E3); list=trash selects only soft-deleted rows,
+// every other query excludes them. project_name and area_name are filled
+// through LEFT JOINs, and every sort tie-breaks by id so cursor pages have
+// no duplicates or gaps.
+func (r *TaskRepository) List(f model.TaskFilters) (tasks []model.TaskListItem, nextCursor string, err error) {
 	query := `
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -126,8 +207,12 @@ func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error)
 			(SELECT value FROM reminders WHERE task_id = t.id ORDER BY created_at LIMIT 1),
 			(SELECT exact_at FROM reminders WHERE task_id = t.id ORDER BY created_at LIMIT 1),
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
-			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
-		FROM tasks t`
+			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
+			p.title,
+			a.title
+		FROM tasks t
+		LEFT JOIN projects p ON p.id = t.project_id
+		LEFT JOIN areas a ON a.id = t.area_id`
 
 	var conditions []string
 	var args []interface{}
@@ -135,6 +220,14 @@ func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error)
 	if f.Status != nil {
 		conditions = append(conditions, "t.status = ?")
 		args = append(args, *f.Status)
+	}
+	if len(f.Statuses) > 0 {
+		placeholders := make([]string, len(f.Statuses))
+		for i, s := range f.Statuses {
+			placeholders[i] = "?"
+			args = append(args, s)
+		}
+		conditions = append(conditions, "t.status IN ("+strings.Join(placeholders, ",")+")")
 	}
 	if f.ProjectID != nil {
 		conditions = append(conditions, "t.project_id = ?")
@@ -160,6 +253,21 @@ func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error)
 		conditions = append(conditions, "t.when_date >= ? AND t.when_date != 'someday'")
 		args = append(args, *f.WhenAfter)
 	}
+	if f.HasWhen != nil {
+		if *f.HasWhen {
+			conditions = append(conditions, "t.when_date IS NOT NULL")
+		} else {
+			conditions = append(conditions, "t.when_date IS NULL")
+		}
+	}
+	if f.DeadlineBefore != nil {
+		conditions = append(conditions, "t.deadline <= ?")
+		args = append(args, *f.DeadlineBefore)
+	}
+	if f.DeadlineAfter != nil {
+		conditions = append(conditions, "t.deadline >= ?")
+		args = append(args, *f.DeadlineAfter)
+	}
 	if f.HasDeadline != nil {
 		if *f.HasDeadline {
 			conditions = append(conditions, "t.deadline IS NOT NULL")
@@ -167,38 +275,109 @@ func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error)
 			conditions = append(conditions, "t.deadline IS NULL")
 		}
 	}
+	if f.HighPriority != nil {
+		conditions = append(conditions, "t.high_priority = ?")
+		args = append(args, boolToInt(*f.HighPriority))
+	}
+	if f.UpdatedSince != nil {
+		conditions = append(conditions, "t.updated_at >= ?")
+		args = append(args, *f.UpdatedSince)
+	}
+	if f.CreatedSince != nil {
+		conditions = append(conditions, "t.created_at >= ?")
+		args = append(args, *f.CreatedSince)
+	}
 	if len(f.TagIDs) > 0 {
 		placeholders := make([]string, len(f.TagIDs))
 		for i, id := range f.TagIDs {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
-		conditions = append(conditions, fmt.Sprintf(
-			"t.id IN (SELECT task_id FROM task_tags WHERE tag_id IN (%s))",
-			strings.Join(placeholders, ",")))
+		// tag_mode=all requires every listed tag; any (the default) keeps
+		// the historical IN semantics.
+		if f.TagMode == "all" {
+			conditions = append(conditions, fmt.Sprintf(
+				"t.id IN (SELECT task_id FROM task_tags WHERE tag_id IN (%s) GROUP BY task_id HAVING COUNT(DISTINCT tag_id) = %d)",
+				strings.Join(placeholders, ","), len(f.TagIDs)))
+		} else {
+			conditions = append(conditions, fmt.Sprintf(
+				"t.id IN (SELECT task_id FROM task_tags WHERE tag_id IN (%s))",
+				strings.Join(placeholders, ",")))
+		}
 	}
 	if f.Search != nil {
 		conditions = append(conditions, "t.rowid IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?)")
-		args = append(args, *f.Search)
+		args = append(args, ftsQuery(*f.Search, false))
+	}
+	if f.List != nil {
+		if *f.List == "trash" {
+			conditions = append(conditions, "t.deleted_at IS NOT NULL")
+		} else {
+			// listCondition implies not-trashed for every non-trash list.
+			cond, condArgs, err := listCondition(*f.List, r.today(), "")
+			if err != nil {
+				return nil, "", err
+			}
+			conditions = append(conditions, cond)
+			args = append(args, condArgs...)
+		}
+	} else {
+		conditions = append(conditions, "t.deleted_at IS NULL")
 	}
 
-	conditions = append(conditions, "t.deleted_at IS NULL")
+	orderExpr, numeric, keyOf, err := taskSort(f)
+	if err != nil {
+		return nil, "", err
+	}
+	desc := strings.HasPrefix(f.Sort, "-")
+	if f.Cursor != "" {
+		sortKey, id, cerr := decodeCursor(f.Cursor)
+		if cerr != nil {
+			return nil, "", cerr
+		}
+		var keyArg interface{}
+		if numeric {
+			keyArg, cerr = decodeFloatCursor(sortKey)
+		} else {
+			keyArg = sortKey
+		}
+		if cerr != nil {
+			return nil, "", cerr
+		}
+		// The keyset mirrors the ORDER BY (key, id): rows strictly beyond
+		// the last row the previous page returned. It is appended last so
+		// its placeholders line up with the tail of args.
+		cmp := ">"
+		if desc {
+			cmp = "<"
+		}
+		conditions = append(conditions, fmt.Sprintf("(%s %s ? OR (%s = ? AND t.id > ?))", orderExpr, cmp, orderExpr))
+		args = append(args, keyArg, keyArg, id)
+	}
 
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
-	query += " ORDER BY t.sort_order_today ASC, t.created_at ASC"
+	dir := "ASC"
+	if desc {
+		dir = "DESC"
+	}
+	query += " ORDER BY " + orderExpr + " " + dir + ", t.id ASC"
+	if f.Limit > 0 {
+		// Fetch one row past the page to learn whether a next page exists.
+		query += fmt.Sprintf(" LIMIT %d", f.Limit+1)
+	}
 
 	rows, err := r.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list tasks: %w", err)
+		return nil, "", fmt.Errorf("list tasks: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var tasks []model.TaskListItem
 	for rows.Next() {
 		var t model.TaskListItem
 		var whenEvening, highPriority, hasNotes, hasLinks, hasFiles, hasRepeat, hasReminders int
+		var projectName, areaName sql.NullString
 		if err := rows.Scan(
 			&t.ID, &t.Title, &t.Notes, &t.Status, &t.WhenDate, &whenEvening, &highPriority,
 			&t.Deadline, &t.ProjectID, &t.AreaID, &t.HeadingID,
@@ -208,8 +387,9 @@ func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error)
 			&hasNotes, &hasLinks, &hasFiles, &hasRepeat, &hasReminders,
 			&t.FirstReminderType, &t.FirstReminderValue, &t.FirstReminderExactAt,
 			&t.FirstScheduleTime, &t.FirstScheduleEndTime,
+			&projectName, &areaName,
 		); err != nil {
-			return nil, fmt.Errorf("scan task: %w", err)
+			return nil, "", fmt.Errorf("scan task: %w", err)
 		}
 		_ = whenEvening // column retained in DB but no longer exposed
 		t.HighPriority = highPriority == 1
@@ -218,15 +398,23 @@ func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error)
 		t.HasFiles = hasFiles == 1
 		t.HasRepeatRule = hasRepeat == 1
 		t.HasReminders = hasReminders == 1
+		t.ProjectName = nullStrPtr(projectName)
+		t.AreaName = nullStrPtr(areaName)
 		t.Tags, _ = r.getTaskTags(t.ID)
 		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("list tasks: %w", err)
+	}
+	if f.Limit > 0 && len(tasks) > f.Limit {
+		tasks = tasks[:f.Limit]
+		nextCursor = encodeCursor(keyOf(tasks[f.Limit-1]), tasks[f.Limit-1].ID)
 	}
 	if tasks == nil {
 		tasks = []model.TaskListItem{}
 	}
-	return tasks, rows.Err()
+	return tasks, nextCursor, nil
 }
-
 func (r *TaskRepository) GetByID(id string) (*model.TaskDetail, error) {
 	var t model.TaskDetail
 	var whenEvening, highPriority int

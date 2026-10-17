@@ -16,7 +16,7 @@ func TestSearchByTitle(t *testing.T) {
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Buy groceries at the store"})
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Call the dentist"})
 
-	results, err := searchRepo.Search("groceries", 20)
+	results, _, err := searchRepo.Search("groceries", 20, "")
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestSearchByNotes(t *testing.T) {
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Shopping", Notes: "milk eggs bread butter"})
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Reading"})
 
-	results, err := searchRepo.Search("milk", 20)
+	results, _, err := searchRepo.Search("milk", 20, "")
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestSearchNoResults(t *testing.T) {
 
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Something"})
 
-	results, err := searchRepo.Search("nonexistent", 20)
+	results, _, err := searchRepo.Search("nonexistent", 20, "")
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestSearchSnippets(t *testing.T) {
 
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Buy groceries", Notes: "Need to get milk"})
 
-	results, err := searchRepo.Search("groceries", 20)
+	results, _, err := searchRepo.Search("groceries", 20, "")
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestSearchLimit(t *testing.T) {
 		_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Test task for search"})
 	}
 
-	results, err := searchRepo.Search("test", 3)
+	results, _, err := searchRepo.Search("test", 3, "")
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
 	}

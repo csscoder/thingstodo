@@ -2,8 +2,11 @@ package handler
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	mw "github.com/collinjanssen/thingstodo/internal/middleware"
@@ -26,12 +29,82 @@ func NewTaskHandler(repo *repository.TaskRepository, reminderRepo *repository.Re
 	return &TaskHandler{repo: repo, reminderRepo: reminderRepo, settingsRepo: settingsRepo, broker: broker, scheduler: sched}
 }
 
+// taskQueryParams is the allowlist of GET /api/tasks query params (C1);
+// anything else is a 400 naming the parameter.
+var taskQueryParams = map[string]bool{
+	"status": true, "project_id": true, "area_id": true, "heading_id": true,
+	"tag_ids": true, "tag_mode": true, "when_date": true, "when_before": true,
+	"when_after": true, "deadline_before": true, "deadline_after": true,
+	"has_deadline": true, "has_when": true, "high_priority": true,
+	"updated_since": true, "created_since": true, "search": true,
+	"list": true, "sort": true, "limit": true, "cursor": true,
+}
+
+var taskStatusFilterValues = map[string]bool{
+	"open": true, "completed": true, "canceled": true, "wont_do": true,
+}
+
+var taskListValues = map[string]bool{
+	"inbox": true, "today": true, "upcoming": true, "anytime": true,
+	"someday": true, "logbook": true, "trash": true,
+}
+
+var taskSortValues = map[string]bool{
+	"manual": true, "when_date": true, "deadline": true,
+	"created_at": true, "updated_at": true, "title": true,
+}
+
+// parseBoolParam reads a "true"/"false" query param. ok is false when the
+// param was sent with a value that is neither.
+func parseBoolParam(q url.Values, name string) (b *bool, ok bool) {
+	v := q.Get(name)
+	if v == "" {
+		return nil, true
+	}
+	switch v {
+	case "true":
+		t := true
+		return &t, true
+	case "false":
+		f := false
+		return &f, true
+	}
+	return nil, false
+}
+
+// List serves GET /api/tasks: every C1 filter, sort and cursor param,
+// validated at the boundary, answered with {"tasks": [...]} plus
+// next_cursor when a limit was given and more rows exist.
 func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := model.TaskFilters{}
 
+	bad := func(field, msg string) {
+		writeFieldError(w, http.StatusBadRequest, msg, "VALIDATION", field)
+	}
+
+	for key := range q {
+		if !taskQueryParams[key] {
+			bad(key, "unknown parameter")
+			return
+		}
+	}
+
 	if v := q.Get("status"); v != "" {
-		f.Status = &v
+		f.Statuses = strings.Split(v, ",")
+		for _, s := range f.Statuses {
+			if !taskStatusFilterValues[s] {
+				bad("status", "status must be a comma list of open, completed, canceled, wont_do")
+				return
+			}
+		}
+	}
+	if v := q.Get("list"); v != "" {
+		if !taskListValues[v] {
+			bad("list", "list must be one of inbox, today, upcoming, anytime, someday, logbook, trash")
+			return
+		}
+		f.List = &v
 	}
 	if v := q.Get("project_id"); v != "" {
 		f.ProjectID = &v
@@ -43,33 +116,121 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 		f.HeadingID = &v
 	}
 	if v := q.Get("tag_ids"); v != "" {
-		f.TagIDs = strings.Split(v, ",")
+		for _, id := range strings.Split(v, ",") {
+			if id != "" {
+				f.TagIDs = append(f.TagIDs, id)
+			}
+		}
+	}
+	if v := q.Get("tag_mode"); v != "" {
+		if v != "any" && v != "all" {
+			bad("tag_mode", "tag_mode must be any or all")
+			return
+		}
+		f.TagMode = v
 	}
 	if v := q.Get("when_date"); v != "" {
+		if !isWhenDate(v) {
+			bad("when_date", "when_date must be YYYY-MM-DD or 'someday'")
+			return
+		}
 		f.WhenDate = &v
 	}
 	if v := q.Get("when_before"); v != "" {
+		if !isDate(v) {
+			bad("when_before", "when_before must be YYYY-MM-DD")
+			return
+		}
 		f.WhenBefore = &v
 	}
 	if v := q.Get("when_after"); v != "" {
+		if !isDate(v) {
+			bad("when_after", "when_after must be YYYY-MM-DD")
+			return
+		}
 		f.WhenAfter = &v
 	}
-	if v := q.Get("has_deadline"); v != "" {
-		b := v == "true"
-		f.HasDeadline = &b
+	if v := q.Get("deadline_before"); v != "" {
+		if !isDate(v) {
+			bad("deadline_before", "deadline_before must be YYYY-MM-DD")
+			return
+		}
+		f.DeadlineBefore = &v
+	}
+	if v := q.Get("deadline_after"); v != "" {
+		if !isDate(v) {
+			bad("deadline_after", "deadline_after must be YYYY-MM-DD")
+			return
+		}
+		f.DeadlineAfter = &v
+	}
+	for _, name := range []string{"has_deadline", "has_when", "high_priority"} {
+		b, ok := parseBoolParam(q, name)
+		if !ok {
+			bad(name, name+" must be true or false")
+			return
+		}
+		switch name {
+		case "has_deadline":
+			f.HasDeadline = b
+		case "has_when":
+			f.HasWhen = b
+		case "high_priority":
+			f.HighPriority = b
+		}
+	}
+	for _, name := range []string{"updated_since", "created_since"} {
+		v := q.Get(name)
+		if v == "" {
+			continue
+		}
+		norm, ok := normalizeTimestamp(v)
+		if !ok {
+			bad(name, name+" must be a UTC timestamp, YYYY-MM-DD HH:MM:SS or RFC 3339")
+			return
+		}
+		if name == "updated_since" {
+			f.UpdatedSince = &norm
+		} else {
+			f.CreatedSince = &norm
+		}
 	}
 	if v := q.Get("search"); v != "" {
 		f.Search = &v
 	}
+	if v := q.Get("sort"); v != "" {
+		if !taskSortValues[strings.TrimPrefix(v, "-")] {
+			bad("sort", "sort must be manual, when_date, deadline, created_at, updated_at or title, with an optional - prefix")
+			return
+		}
+		f.Sort = v
+	}
+	if q.Has("limit") {
+		// An explicit limit is validated: omitted means unlimited.
+		n, err := strconv.Atoi(q.Get("limit"))
+		if err != nil || n < 1 || n > 500 {
+			bad("limit", "limit must be between 1 and 500")
+			return
+		}
+		f.Limit = n
+	}
+	f.Cursor = q.Get("cursor")
 
-	tasks, err := h.repo.List(f)
+	tasks, nextCursor, err := h.repo.List(f)
 	if err != nil {
+		if errors.Is(err, repository.ErrInvalidCursor) {
+			bad("cursor", "invalid cursor")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"tasks": tasks})
+	resp := map[string]interface{}{"tasks": tasks}
+	if nextCursor != "" {
+		resp["next_cursor"] = nextCursor
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
-
 func (h *TaskHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	task, err := h.repo.GetByID(id)

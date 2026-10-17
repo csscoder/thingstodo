@@ -33,7 +33,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 
 	// Repositories
 	changeLogRepo := repository.NewChangeLogRepository(db)
-	taskRepo := repository.NewTaskRepository(db, changeLogRepo)
+	taskRepo := repository.NewTaskRepository(db, changeLogRepo).WithLocation(cfg.Location)
 	projectRepo := repository.NewProjectRepository(db, changeLogRepo)
 	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
 	tagRepo := repository.NewTagRepository(db, changeLogRepo)

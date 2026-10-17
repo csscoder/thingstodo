@@ -132,3 +132,17 @@ func validateSettingsPatch(input *model.UpdateUserSettingsInput) (string, string
 func isProjectStatus(s string) bool {
 	return projectStatuses[s]
 }
+
+// normalizeTimestamp validates a UTC timestamp query param (updated_since,
+// created_since) and returns it in the storage layout YYYY-MM-DD
+// HH:MM:SS, so lexical comparison against created_at/updated_at works.
+// The storage layout itself and RFC 3339 (converted to UTC) are accepted.
+func normalizeTimestamp(s string) (string, bool) {
+	if _, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return s, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format("2006-01-02 15:04:05"), true
+	}
+	return "", false
+}

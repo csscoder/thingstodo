@@ -418,16 +418,42 @@ type BulkActionInput struct {
 }
 
 type TaskFilters struct {
-	Status      *string
-	ProjectID   *string
-	AreaID      *string
-	HeadingID   *string
-	TagIDs      []string
-	WhenDate    *string
-	WhenBefore  *string
-	WhenAfter   *string
-	HasDeadline *bool
-	Search      *string
+	Status *string
+	// Statuses is the comma-list form of the status param; when set it
+	// replaces the single-status form.
+	Statuses []string
+	// List selects a view's membership (C1): inbox, today, upcoming,
+	// anytime, someday, logbook, trash. trash selects only soft-deleted
+	// rows; every other value excludes them.
+	List      *string
+	ProjectID *string
+	AreaID    *string
+	HeadingID *string
+	TagIDs    []string
+	// TagMode is "any" (default) or "all".
+	TagMode    string
+	WhenDate   *string
+	WhenBefore *string
+	WhenAfter  *string
+	HasWhen    *bool
+	// DeadlineBefore and DeadlineAfter are inclusive date bounds.
+	DeadlineBefore *string
+	DeadlineAfter  *string
+	HasDeadline    *bool
+	HighPriority   *bool
+	// UpdatedSince and CreatedSince are inclusive UTC timestamps in the
+	// storage layout YYYY-MM-DD HH:MM:SS.
+	UpdatedSince *string
+	CreatedSince *string
+	Search       *string
+	// Sort names a sort key with an optional leading "-" for descending
+	// (manual, when_date, deadline, created_at, updated_at, title).
+	Sort string
+	// Limit is the page size; 0 means unlimited.
+	Limit int
+	// Cursor resumes a previous page; it must come with the same filters
+	// and sort.
+	Cursor string
 }
 
 // --- View response types ---

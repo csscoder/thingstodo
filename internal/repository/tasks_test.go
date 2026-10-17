@@ -149,7 +149,7 @@ func TestTaskDelete(t *testing.T) {
 	}
 
 	// But it should not appear in List (filtered by deleted_at IS NULL)
-	tasks, _ := repo.List(model.TaskFilters{})
+	tasks, _, _ := repo.List(model.TaskFilters{})
 	for _, tl := range tasks {
 		if tl.ID == created.ID {
 			t.Error("soft-deleted task should not appear in list")
@@ -166,7 +166,7 @@ func TestTaskDelete(t *testing.T) {
 	}
 
 	// Now it should appear in List again
-	tasks2, _ := repo.List(model.TaskFilters{})
+	tasks2, _, _ := repo.List(model.TaskFilters{})
 	found := false
 	for _, tl := range tasks2 {
 		if tl.ID == created.ID {
@@ -283,7 +283,7 @@ func TestTaskListEmpty(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	repo := repository.NewTaskRepository(db, nil)
 
-	tasks, err := repo.List(model.TaskFilters{})
+	tasks, _, err := repo.List(model.TaskFilters{})
 	if err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestTaskListAll(t *testing.T) {
 	_, _ = repo.Create(model.CreateTaskInput{Title: "Task 2"})
 	_, _ = repo.Create(model.CreateTaskInput{Title: "Task 3"})
 
-	tasks, err := repo.List(model.TaskFilters{})
+	tasks, _, err := repo.List(model.TaskFilters{})
 	if err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestTaskListFilterByStatus(t *testing.T) {
 	_, _ = repo.SetDoneStatus(t2.ID, "completed")
 	_ = t1
 
-	tasks, err := repo.List(model.TaskFilters{Status: strPtr("completed")})
+	tasks, _, err := repo.List(model.TaskFilters{Status: strPtr("completed")})
 	if err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestTaskListFilterByProject(t *testing.T) {
 	_, _ = repo.Create(model.CreateTaskInput{Title: "Project task", ProjectID: strPtr("p1")})
 	_, _ = repo.Create(model.CreateTaskInput{Title: "No project task"})
 
-	tasks, err := repo.List(model.TaskFilters{ProjectID: strPtr("p1")})
+	tasks, _, err := repo.List(model.TaskFilters{ProjectID: strPtr("p1")})
 	if err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestTaskListFilterByTag(t *testing.T) {
 	_, _ = repo.Create(model.CreateTaskInput{Title: "Tagged", TagIDs: []string{"tag1"}})
 	_, _ = repo.Create(model.CreateTaskInput{Title: "Untagged"})
 
-	tasks, err := repo.List(model.TaskFilters{TagIDs: []string{"tag1"}})
+	tasks, _, err := repo.List(model.TaskFilters{TagIDs: []string{"tag1"}})
 	if err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestTaskListFilterByWhenDate(t *testing.T) {
 	_, _ = repo.Create(model.CreateTaskInput{Title: "Tomorrow", WhenDate: strPtr("2026-02-16")})
 	_, _ = repo.Create(model.CreateTaskInput{Title: "No date"})
 
-	tasks, err := repo.List(model.TaskFilters{WhenDate: strPtr("2026-02-15")})
+	tasks, _, err := repo.List(model.TaskFilters{WhenDate: strPtr("2026-02-15")})
 	if err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestTaskReorder(t *testing.T) {
 	}
 
 	// After reorder, Task 2 should come first (lower sort_order).
-	tasks, _ := repo.List(model.TaskFilters{})
+	tasks, _, _ := repo.List(model.TaskFilters{})
 	if len(tasks) != 2 {
 		t.Fatalf("expected 2 tasks, got %d", len(tasks))
 	}
@@ -480,7 +480,7 @@ func TestTaskListItemMetadata(t *testing.T) {
 	_, _ = db.Exec("INSERT INTO checklist_items (id, task_id, title, sort_order) VALUES ('c1', ?, 'Item', 1)", created.ID)
 	_, _ = db.Exec("INSERT INTO attachments (id, task_id, type, url, sort_order) VALUES ('a1', ?, 'link', 'https://example.com', 1)", created.ID)
 
-	tasks, err := repo.List(model.TaskFilters{})
+	tasks, _, err := repo.List(model.TaskFilters{})
 	if err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}

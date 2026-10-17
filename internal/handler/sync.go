@@ -187,7 +187,7 @@ type FullSyncResponse struct {
 // Full returns all current entities along with the latest change_log cursor.
 // GET /api/sync/full
 func (h *SyncHandler) Full(w http.ResponseWriter, r *http.Request) {
-	tasks, err := h.tasks.List(model.TaskFilters{})
+	tasks, _, err := h.tasks.List(model.TaskFilters{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load tasks: "+err.Error(), "INTERNAL")
 		return
