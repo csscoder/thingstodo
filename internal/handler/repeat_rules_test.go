@@ -18,12 +18,11 @@ func setupRepeatRouter(t *testing.T) *testutil.TestClient {
 	broker := sse.NewBroker()
 	changeLog := repository.NewChangeLogRepository(db)
 	taskRepo := repository.NewTaskRepository(db, changeLog)
-	scheduleRepo := repository.NewScheduleRepository(db, changeLog)
 	reminderRepo := repository.NewReminderRepository(db, changeLog)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 	repeatRepo := repository.NewRepeatRuleRepository(db, changeLog)
 
-	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, nil)
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 	repeatH := handler.NewRepeatRuleHandler(repeatRepo, taskRepo, recurrence.NewEngine(), broker)
 
 	r := chi.NewRouter()

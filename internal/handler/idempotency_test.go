@@ -36,7 +36,7 @@ func setupIdempotencyRouter(t *testing.T) (*testutil.TestClient, *sql.DB) {
 
 	areaH := handler.NewAreaHandler(areaRepo, broker)
 	projectH := handler.NewProjectHandler(projectRepo, broker)
-	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, nil)
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 	tagH := handler.NewTagHandler(tagRepo, broker)
 	headingH := handler.NewHeadingHandler(headingRepo, broker)
 	checklistH := handler.NewChecklistHandler(checklistRepo, broker)

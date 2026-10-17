@@ -91,3 +91,25 @@ func TestBulkAction_SetPriority(t *testing.T) {
 	testutil.AssertStatus(t, resp1, http.StatusOK)
 	testutil.AssertJSONField(t, resp1, "high_priority", true)
 }
+
+// TestBulkComplete_AffectedCountsChangedOnly pins the bulk finishing
+// semantics: only tasks that actually transitioned count as affected; an
+// already-completed task and an unknown id do not.
+func TestBulkComplete_AffectedCountsChangedOnly(t *testing.T) {
+	client, _ := setupTaskRouter(t)
+
+	openID := bulkCreateTask(t, client, "Bulk open")
+	doneID := bulkCreateTask(t, client, "Bulk done")
+	resp := client.Patch("/api/tasks/"+doneID+"/complete", nil)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+
+	resp = client.Post("/api/tasks/bulk", map[string]interface{}{
+		"task_ids": []string{openID, doneID, "zzzz9999"},
+		"action":   "complete",
+	})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	testutil.AssertJSONField(t, resp, "affected", float64(1))
+
+	resp1 := client.Get("/api/tasks/" + openID)
+	testutil.AssertJSONField(t, resp1, "status", "completed")
+}

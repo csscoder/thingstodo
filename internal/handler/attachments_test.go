@@ -29,7 +29,6 @@ func setupAttachmentsRouter(t *testing.T) (*testutil.TestClient, *repository.Att
 
 	changeLogRepo := repository.NewChangeLogRepository(db)
 	taskRepo := repository.NewTaskRepository(db, changeLogRepo)
-	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo)
 	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 	attachmentRepo := repository.NewAttachmentRepository(db, changeLogRepo)
@@ -41,7 +40,7 @@ func setupAttachmentsRouter(t *testing.T) (*testutil.TestClient, *repository.Att
 
 	broker := sse.NewBroker()
 	attachmentH := handler.NewAttachmentHandler(attachmentRepo, broker, attachmentsPath, 25<<20)
-	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, nil)
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 
 	r := chi.NewRouter()
 	r.Post("/api/tasks", taskH.Create)

@@ -192,15 +192,28 @@ func TestTaskComplete(t *testing.T) {
 
 	created, _ := repo.Create(model.CreateTaskInput{Title: "To complete"})
 
-	task, err := repo.Complete(created.ID)
+	changed, err := repo.SetDoneStatus(created.ID, "completed")
 	if err != nil {
 		t.Fatalf("failed to complete task: %v", err)
 	}
-	if task.Status != "completed" {
-		t.Errorf("expected status 'completed', got %q", task.Status)
+	if !changed {
+		t.Error("expected changed=true on the first complete")
+	}
+	task, _ := repo.GetByID(created.ID)
+	if task == nil || task.Status != "completed" {
+		t.Fatalf("expected status 'completed', got %+v", task)
 	}
 	if task.CompletedAt == nil {
 		t.Error("expected completed_at to be set")
+	}
+
+	// The guard: finishing an already-finished task changes nothing.
+	again, err := repo.SetDoneStatus(created.ID, "completed")
+	if err != nil {
+		t.Fatalf("second complete: %v", err)
+	}
+	if again {
+		t.Error("expected changed=false on the second complete")
 	}
 }
 
@@ -210,12 +223,16 @@ func TestTaskCancel(t *testing.T) {
 
 	created, _ := repo.Create(model.CreateTaskInput{Title: "To cancel"})
 
-	task, err := repo.Cancel(created.ID)
+	changed, err := repo.SetDoneStatus(created.ID, "canceled")
 	if err != nil {
 		t.Fatalf("failed to cancel task: %v", err)
 	}
-	if task.Status != "canceled" {
-		t.Errorf("expected status 'canceled', got %q", task.Status)
+	if !changed {
+		t.Error("expected changed=true on the first cancel")
+	}
+	task, _ := repo.GetByID(created.ID)
+	if task == nil || task.Status != "canceled" {
+		t.Fatalf("expected status 'canceled', got %+v", task)
 	}
 	if task.CanceledAt == nil {
 		t.Error("expected canceled_at to be set")
@@ -228,12 +245,16 @@ func TestTaskWontDo(t *testing.T) {
 
 	created, _ := repo.Create(model.CreateTaskInput{Title: "Won't do"})
 
-	task, err := repo.WontDo(created.ID)
+	changed, err := repo.SetDoneStatus(created.ID, "wont_do")
 	if err != nil {
 		t.Fatalf("failed to wont_do task: %v", err)
 	}
-	if task.Status != "wont_do" {
-		t.Errorf("expected status 'wont_do', got %q", task.Status)
+	if !changed {
+		t.Error("expected changed=true on the first wont_do")
+	}
+	task, _ := repo.GetByID(created.ID)
+	if task == nil || task.Status != "wont_do" {
+		t.Fatalf("expected status 'wont_do', got %+v", task)
 	}
 }
 
@@ -242,7 +263,7 @@ func TestTaskReopen(t *testing.T) {
 	repo := repository.NewTaskRepository(db, nil)
 
 	created, _ := repo.Create(model.CreateTaskInput{Title: "Reopen me"})
-	_, _ = repo.Complete(created.ID)
+	_, _ = repo.SetDoneStatus(created.ID, "completed")
 
 	task, err := repo.Reopen(created.ID)
 	if err != nil {
@@ -292,7 +313,7 @@ func TestTaskListFilterByStatus(t *testing.T) {
 
 	t1, _ := repo.Create(model.CreateTaskInput{Title: "Open task"})
 	t2, _ := repo.Create(model.CreateTaskInput{Title: "Completed task"})
-	_, _ = repo.Complete(t2.ID)
+	_, _ = repo.SetDoneStatus(t2.ID, "completed")
 	_ = t1
 
 	tasks, err := repo.List(model.TaskFilters{Status: strPtr("completed")})

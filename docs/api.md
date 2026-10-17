@@ -319,15 +319,15 @@ Permanently deletes the task.
 Response (204): No content
 
 ### PATCH /api/tasks/:id/complete
-Automatically cleans up schedule entries: completes past and today's uncompleted entries, deletes future (after today) and someday uncompleted entries.
+Finishes an open task in one guarded, transactional step: sets status=completed with completed_at, completes past and today's uncompleted schedule entries, deletes future (after today) and someday uncompleted entries, and — when a repeat rule exists — creates the next instance and moves the rule to it. Only a task with status=open transitions; a repeated call is an idempotent success (200 with the current task, nothing spawned).
 Response (200): Updated task with status=completed, completed_at set
 
 ### PATCH /api/tasks/:id/cancel
-Automatically cleans up schedule entries (same as complete).
+Same guarded finishing path as complete (status=canceled, canceled_at set, schedule cleanup and repeat-instance creation are atomic with the status change).
 Response (200): Updated task with status=canceled, canceled_at set
 
 ### PATCH /api/tasks/:id/wontdo
-Automatically cleans up schedule entries (same as complete).
+Same guarded finishing path as complete (status=wont_do, schedule cleanup and repeat-instance creation are atomic with the status change).
 Response (200): Updated task with status=wont_do
 
 ### PATCH /api/tasks/:id/reopen
@@ -401,6 +401,8 @@ Response (200):
 ```json
 { "ok": true, "affected": 3 }
 ```
+
+The status actions `complete`, `cancel` and `wontdo` run the one guarded finishing path per task (same as the single-task endpoints). `affected` counts only tasks that actually transitioned from open; already-finished and unknown ids do not count.
 
 SSE: Broadcasts `bulk_change` event with `{ type, entity: "task", ids }`.
 
@@ -1400,7 +1402,7 @@ Response (200):
 ```
 
 ### POST /api/sync/push
-Applies changes from a client device to the server. Uses last-write-wins (LWW) conflict resolution per entity based on `updated_at` timestamps.
+Applies changes from a client device to the server. Uses last-write-wins (LWW) conflict resolution per entity based on `updated_at` timestamps. A task update pushing `status` to `completed`, `canceled` or `wont_do` runs the same guarded finishing path as the single-task endpoints: idempotent on re-push, one repeat instance per task.
 
 Request:
 ```json

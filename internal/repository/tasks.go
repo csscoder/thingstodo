@@ -424,43 +424,42 @@ func (r *TaskRepository) PermanentDelete(id string) error {
 	return err
 }
 
-func (r *TaskRepository) Complete(id string) (*model.TaskDetail, error) {
-	_, err := r.db.Exec(
-		"UPDATE tasks SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", id)
-	if err != nil {
-		return nil, err
+// SetDoneStatus finishes an open task in one guarded UPDATE: it only fires
+// while status = 'open', so completing an already-finished (or unknown) task
+// is a no-op. status must be one of completed, canceled, wont_do. changed
+// reports whether the row was updated; the change is logged when it was.
+func (r *TaskRepository) SetDoneStatus(id, status string) (changed bool, err error) {
+	var sets string
+	fields := []string{"status"}
+	switch status {
+	case "completed":
+		sets = "status = 'completed', completed_at = datetime('now')"
+		fields = append(fields, "completed_at")
+	case "canceled":
+		sets = "status = 'canceled', canceled_at = datetime('now')"
+		fields = append(fields, "canceled_at")
+	case "wont_do":
+		sets = "status = 'wont_do'"
+	default:
+		return false, fmt.Errorf("set done status: invalid status %q", status)
 	}
-	task, err := r.GetByID(id)
-	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "update", []string{"status", "completed_at"}, task, "", "")
-	}
-	return task, err
-}
 
-func (r *TaskRepository) Cancel(id string) (*model.TaskDetail, error) {
-	_, err := r.db.Exec(
-		"UPDATE tasks SET status = 'canceled', canceled_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", id)
+	res, err := r.db.Exec(
+		"UPDATE tasks SET "+sets+", updated_at = datetime('now') WHERE id = ? AND status = 'open'", id)
 	if err != nil {
-		return nil, err
+		return false, fmt.Errorf("set done status: %w", err)
 	}
-	task, err := r.GetByID(id)
-	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "update", []string{"status", "canceled_at"}, task, "", "")
-	}
-	return task, err
-}
-
-func (r *TaskRepository) WontDo(id string) (*model.TaskDetail, error) {
-	_, err := r.db.Exec(
-		"UPDATE tasks SET status = 'wont_do', updated_at = datetime('now') WHERE id = ?", id)
+	n, err := res.RowsAffected()
 	if err != nil {
-		return nil, err
+		return false, fmt.Errorf("set done status: rows affected: %w", err)
 	}
-	task, err := r.GetByID(id)
-	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "update", []string{"status"}, task, "", "")
+	if n == 0 {
+		return false, nil
 	}
-	return task, err
+	if task, err := r.GetByID(id); err == nil && task != nil {
+		return true, logChange(r.changeLog, "task", id, "update", fields, task, "", "")
+	}
+	return true, nil
 }
 
 func (r *TaskRepository) Reopen(id string) (*model.TaskDetail, error) {

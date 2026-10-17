@@ -3,10 +3,8 @@ package handler
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	mw "github.com/collinjanssen/thingstodo/internal/middleware"
 	"github.com/collinjanssen/thingstodo/internal/model"
@@ -18,15 +16,14 @@ import (
 
 type TaskHandler struct {
 	repo         *repository.TaskRepository
-	scheduleRepo *repository.ScheduleRepository
 	reminderRepo *repository.ReminderRepository
 	settingsRepo *repository.UserSettingsRepository
 	broker       *sse.Broker
 	scheduler    *scheduler.Scheduler
 }
 
-func NewTaskHandler(repo *repository.TaskRepository, scheduleRepo *repository.ScheduleRepository, reminderRepo *repository.ReminderRepository, settingsRepo *repository.UserSettingsRepository, broker *sse.Broker, sched *scheduler.Scheduler) *TaskHandler {
-	return &TaskHandler{repo: repo, scheduleRepo: scheduleRepo, reminderRepo: reminderRepo, settingsRepo: settingsRepo, broker: broker, scheduler: sched}
+func NewTaskHandler(repo *repository.TaskRepository, reminderRepo *repository.ReminderRepository, settingsRepo *repository.UserSettingsRepository, broker *sse.Broker, sched *scheduler.Scheduler) *TaskHandler {
+	return &TaskHandler{repo: repo, reminderRepo: reminderRepo, settingsRepo: settingsRepo, broker: broker, scheduler: sched}
 }
 
 func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -301,47 +298,26 @@ func (h *TaskHandler) Purge(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TaskHandler) Complete(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	h.cleanupSchedules(id)
-	task, err := h.repo.Complete(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
-		return
-	}
-	if task == nil {
-		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
-		return
-	}
-	if h.scheduler != nil {
-		h.scheduler.HandleTaskDone(id)
-	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
-	writeJSON(w, http.StatusOK, task)
+	h.finishTask(w, chi.URLParam(r, "id"), "completed")
 }
 
 func (h *TaskHandler) Cancel(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	h.cleanupSchedules(id)
-	task, err := h.repo.Cancel(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
-		return
-	}
-	if task == nil {
-		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
-		return
-	}
-	if h.scheduler != nil {
-		h.scheduler.HandleTaskDone(id)
-	}
-	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
-	writeJSON(w, http.StatusOK, task)
+	h.finishTask(w, chi.URLParam(r, "id"), "canceled")
 }
 
 func (h *TaskHandler) WontDo(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	h.cleanupSchedules(id)
-	task, err := h.repo.WontDo(id)
+	h.finishTask(w, chi.URLParam(r, "id"), "wont_do")
+}
+
+// finishTask routes every finishing action through the scheduler's guarded,
+// transactional FinishTask. A repeated call returns 200 with the task and
+// spawns nothing; an unknown task maps to 404 as before.
+func (h *TaskHandler) finishTask(w http.ResponseWriter, id, status string) {
+	if h.scheduler == nil {
+		writeError(w, http.StatusInternalServerError, "scheduler not available", "INTERNAL")
+		return
+	}
+	task, _, err := h.scheduler.FinishTask(id, status)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
@@ -349,9 +325,6 @@ func (h *TaskHandler) WontDo(w http.ResponseWriter, r *http.Request) {
 	if task == nil {
 		writeError(w, http.StatusNotFound, "task not found", "NOT_FOUND")
 		return
-	}
-	if h.scheduler != nil {
-		h.scheduler.HandleTaskDone(id)
 	}
 	h.broker.BroadcastJSON("task_updated", map[string]interface{}{"id": task.ID, "task": task})
 	writeJSON(w, http.StatusOK, task)
@@ -509,22 +482,30 @@ func (h *TaskHandler) BulkAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if input.Action == "complete" || input.Action == "cancel" || input.Action == "wontdo" {
-		for _, id := range input.TaskIDs {
-			h.cleanupSchedules(id)
+	// Status actions run the one guarded finishing path per task; every other
+	// action is a set-oriented bulk write.
+	if status, isStatus := bulkStatusActions[input.Action]; isStatus {
+		affected, err := h.bulkFinish(input.TaskIDs, status)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+			return
 		}
+		h.broker.BroadcastJSON("bulk_change", map[string]interface{}{
+			"type":   input.Action,
+			"entity": "task",
+			"ids":    input.TaskIDs,
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":       true,
+			"affected": affected,
+		})
+		return
 	}
 
 	affected, err := h.repo.BulkAction(input)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
-	}
-
-	if h.scheduler != nil && (input.Action == "complete" || input.Action == "cancel" || input.Action == "wontdo") {
-		for _, id := range input.TaskIDs {
-			h.scheduler.HandleTaskDone(id)
-		}
 	}
 
 	h.broker.BroadcastJSON("bulk_change", map[string]interface{}{
@@ -539,13 +520,31 @@ func (h *TaskHandler) BulkAction(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// cleanupSchedules completes past uncompleted schedule entries and deletes
-// today + future entries when a task is completed/canceled/wontdo.
-func (h *TaskHandler) cleanupSchedules(taskID string) {
-	today := time.Now().Format("2006-01-02")
-	if err := h.scheduleRepo.CleanupOnTaskDone(taskID, today); err != nil {
-		log.Printf("schedule cleanup for task %s: %v", taskID, err)
+// bulkStatusActions maps the bulk action names to task statuses.
+var bulkStatusActions = map[string]string{
+	"complete": "completed",
+	"cancel":   "canceled",
+	"wontdo":   "wont_do",
+}
+
+// bulkFinish runs the guarded finishing path per task id. Only tasks that
+// actually transitioned count as affected; already-finished and unknown ids
+// do not.
+func (h *TaskHandler) bulkFinish(taskIDs []string, status string) (int, error) {
+	if h.scheduler == nil {
+		return 0, fmt.Errorf("scheduler not available")
 	}
+	affected := 0
+	for _, id := range taskIDs {
+		task, changed, err := h.scheduler.FinishTask(id, status)
+		if err != nil {
+			return affected, err
+		}
+		if task != nil && changed {
+			affected++
+		}
+	}
+	return affected, nil
 }
 
 // needsDateCrossCheck returns true when only one of when_date/deadline is

@@ -16,6 +16,7 @@ import (
 
 type Scheduler struct {
 	cron          *cron.Cron
+	now           func() time.Time
 	taskRepo      *repository.TaskRepository
 	ruleRepo      *repository.RepeatRuleRepository
 	checklistRepo *repository.ChecklistRepository
@@ -30,11 +31,16 @@ type Scheduler struct {
 	db            *sql.DB
 	engine        *recurrence.Engine
 	loc           *time.Location
+
+	// testHookAfterInstance runs inside the finishing transaction after the
+	// next repeat instance is created. Tests use it to force a rollback.
+	testHookAfterInstance func() error
 }
 
 func New(db *sql.DB, taskRepo *repository.TaskRepository, ruleRepo *repository.RepeatRuleRepository, checklistRepo *repository.ChecklistRepository, attachRepo *repository.AttachmentRepository, scheduleRepo *repository.ScheduleRepository, reminderRepo *repository.ReminderRepository, settingsRepo *repository.UserSettingsRepository, userRepo *repository.UserRepository, changeLogRepo *repository.ChangeLogRepository, pushSender push.Notifier, broker *sse.Broker, loc *time.Location) *Scheduler {
 	return &Scheduler{
 		cron:          cron.New(),
+		now:           time.Now,
 		taskRepo:      taskRepo,
 		ruleRepo:      ruleRepo,
 		checklistRepo: checklistRepo,
@@ -81,23 +87,73 @@ func (s *Scheduler) Stop() {
 	s.cron.Stop()
 }
 
-// HandleAfterCompletion is called when a task with mode=after_completion is completed.
-func (s *Scheduler) HandleAfterCompletion(taskID string) {
-	rule, err := s.ruleRepo.GetByTask(taskID)
-	if err != nil || rule == nil || rule.Pattern.Mode != model.RecurrenceModeAfterCompletion {
-		return
+// SetClock overrides the scheduler's clock (default time.Now). "Today" for
+// schedule cleanup and recurrence base dates is resolved as
+// s.now().In(s.loc).
+func (s *Scheduler) SetClock(now func() time.Time) {
+	if now != nil {
+		s.now = now
 	}
-	s.createNextInstance(taskID, rule)
 }
 
-// HandleTaskDone is called when a recurring task is finished (completed, canceled, or won't do).
-// It creates the next instance regardless of mode.
-func (s *Scheduler) HandleTaskDone(taskID string) {
-	rule, err := s.ruleRepo.GetByTask(taskID)
-	if err != nil || rule == nil {
-		return
+// FinishTask is the one finishing path for a task. In a single transaction it
+// guards the status change (only an open task can be finished), cleans up
+// schedule entries, and, when a repeat rule exists, creates the next instance
+// and moves the rule to it. A repeated or concurrent finish can therefore
+// never spawn a second instance.
+//
+// It returns (nil, false, nil) when the task does not exist, and
+// (task, false, nil) when the task was already finished — callers map the
+// former to 404 and treat the latter as an idempotent success.
+func (s *Scheduler) FinishTask(taskID, status string) (task *model.TaskDetail, changed bool, err error) {
+	// Read the reminder-copy setting before opening the transaction:
+	// UserSettingsRepository.GetOrCreate may write on its own connection and
+	// contend with the transaction below.
+	copyReminders := s.reminderCopyEnabled()
+
+	txErr := repository.InTx(s.db, func(tx *sql.Tx) error {
+		txTaskRepo := s.taskRepo.WithTx(tx)
+		c, err := txTaskRepo.SetDoneStatus(taskID, status)
+		if err != nil {
+			return err
+		}
+		changed = c
+
+		existing, err := txTaskRepo.GetByID(taskID)
+		if err != nil {
+			return err
+		}
+		if existing == nil {
+			return nil // unknown task: (nil, false, nil)
+		}
+		task = existing
+		if !changed {
+			return nil // already finished: idempotent success, spawn nothing
+		}
+
+		today := s.now().In(s.loc).Format("2006-01-02")
+		if err := s.scheduleRepo.WithTx(tx).CleanupOnTaskDone(taskID, today); err != nil {
+			return fmt.Errorf("cleanup schedules for task %s: %w", taskID, err)
+		}
+
+		rule, err := s.ruleRepo.WithTx(tx).GetByTask(taskID)
+		if err != nil {
+			return fmt.Errorf("load repeat rule for task %s: %w", taskID, err)
+		}
+		if rule != nil {
+			if err := s.createNextInstance(tx, taskID, rule.Pattern, today, copyReminders); err != nil {
+				return err
+			}
+		}
+
+		// Re-read so the response reflects everything the transaction did.
+		task, err = txTaskRepo.GetByID(taskID)
+		return err
+	})
+	if txErr != nil {
+		return nil, false, txErr
 	}
-	s.createNextInstance(taskID, rule)
+	return task, changed, nil
 }
 
 func (s *Scheduler) processFixedRules() {
@@ -107,7 +163,8 @@ func (s *Scheduler) processFixedRules() {
 		return
 	}
 
-	today := time.Now().Format("2006-01-02")
+	today := s.now().In(s.loc).Format("2006-01-02")
+	copyReminders := s.reminderCopyEnabled()
 
 	for _, rule := range rules {
 		if rule.Pattern.Mode != model.RecurrenceModeFixed {
@@ -122,22 +179,76 @@ func (s *Scheduler) processFixedRules() {
 			continue
 		}
 
-		nextDate := s.calculateNextDate(task.WhenDate, rule.Pattern)
+		nextDate, err := s.nextInstanceDate(task, rule.Pattern, today)
+		if err != nil {
+			log.Printf("scheduler: next date for task %s: %v", rule.TaskID, err)
+			continue
+		}
 		if nextDate == "" || nextDate > today {
 			continue
 		}
 
-		s.createNextInstance(rule.TaskID, &rule)
+		err = repository.InTx(s.db, func(tx *sql.Tx) error {
+			return s.createNextInstance(tx, rule.TaskID, rule.Pattern, today, copyReminders)
+		})
+		if err != nil {
+			log.Printf("scheduler: create next instance for task %s: %v", rule.TaskID, err)
+		}
 	}
 }
 
-func (s *Scheduler) createNextInstance(originalTaskID string, rule *model.RepeatRule) {
-	original, err := s.taskRepo.GetByID(originalTaskID)
-	if err != nil || original == nil {
-		return
+// nextInstanceDate computes the when_date for the next instance:
+//   - after_completion: the next occurrence after the local completion date;
+//   - fixed: the next occurrence after the task's when_date, rolled forward
+//     while it lands before the local today, so a fixed schedule never
+//     spawns a past instance. Without a usable when_date, today is the base.
+func (s *Scheduler) nextInstanceDate(original *model.TaskDetail, pattern model.RecurrencePattern, today string) (string, error) {
+	if pattern.Mode != model.RecurrenceModeFixed {
+		next, err := s.engine.Next(today, pattern)
+		if err != nil {
+			return "", fmt.Errorf("next occurrence from %s: %w", today, err)
+		}
+		return next, nil
 	}
 
-	nextDate := s.calculateNextDate(original.WhenDate, rule.Pattern)
+	from := today
+	if original.WhenDate != nil && *original.WhenDate != "" && *original.WhenDate != "someday" {
+		from = *original.WhenDate
+	}
+	next, err := s.engine.Next(from, pattern)
+	if err != nil {
+		return "", fmt.Errorf("next occurrence from %s: %w", from, err)
+	}
+	for next < today {
+		step, err := s.engine.Next(next, pattern)
+		if err != nil {
+			return "", fmt.Errorf("roll forward from %s: %w", next, err)
+		}
+		if step <= next {
+			return "", fmt.Errorf("recurrence pattern %s does not advance from %s", pattern.Type, next)
+		}
+		next = step
+	}
+	return next, nil
+}
+
+// createNextInstance creates the next repeat instance of the task and moves
+// the repeat rule to it, using tx-bound repositories so every write joins the
+// caller's transaction. Every error is returned — the caller rolls back.
+func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, pattern model.RecurrencePattern, today string, copyReminders bool) error {
+	txTaskRepo := s.taskRepo.WithTx(tx)
+	original, err := txTaskRepo.GetByID(originalTaskID)
+	if err != nil {
+		return fmt.Errorf("load original task %s: %w", originalTaskID, err)
+	}
+	if original == nil {
+		return nil
+	}
+
+	nextDate, err := s.nextInstanceDate(original, pattern, today)
+	if err != nil {
+		return err
+	}
 
 	// Collect tag IDs from original
 	tagIDs := make([]string, len(original.Tags))
@@ -156,50 +267,62 @@ func (s *Scheduler) createNextInstance(originalTaskID string, rule *model.Repeat
 		TagIDs:    tagIDs,
 	}
 
-	newTask, err := s.taskRepo.Create(input)
+	newTask, err := txTaskRepo.Create(input)
 	if err != nil {
-		log.Printf("scheduler: create task instance: %v", err)
-		return
+		return fmt.Errorf("create task instance: %w", err)
 	}
 
 	// Note: first schedule entry is created by taskRepo.Create via syncFirstScheduleDate
 
 	// Copy checklist items (unchecked)
+	txChecklistRepo := s.checklistRepo.WithTx(tx)
 	for _, item := range original.Checklist {
-		if _, err := s.checklistRepo.Create(newTask.ID, model.CreateChecklistInput{
+		if _, err := txChecklistRepo.Create(newTask.ID, model.CreateChecklistInput{
 			Title: item.Title,
 		}); err != nil {
-			log.Printf("scheduler: copy checklist item for task %s: %v", newTask.ID, err)
+			return fmt.Errorf("copy checklist item for task %s: %w", newTask.ID, err)
 		}
 	}
 
 	// Copy attachments (links and files — files share the same stored file on disk)
+	txAttachRepo := s.attachRepo.WithTx(tx)
 	for _, att := range original.Attachments {
-		if _, err := s.attachRepo.Create(newTask.ID, model.CreateAttachmentInput{
+		if _, err := txAttachRepo.Create(newTask.ID, model.CreateAttachmentInput{
 			Type:     att.Type,
 			Title:    att.Title,
 			URL:      att.URL,
 			MimeType: att.MimeType,
 			FileSize: att.FileSize,
 		}); err != nil {
-			log.Printf("scheduler: copy attachment for task %s: %v", newTask.ID, err)
+			return fmt.Errorf("copy attachment for task %s: %w", newTask.ID, err)
 		}
 	}
 
 	// Copy reminders if setting is enabled
-	s.copyRemindersToNewInstance(originalTaskID, newTask.ID)
+	txReminderRepo := s.reminderRepo.WithTx(tx)
+	if err := s.copyRemindersToNewInstance(txReminderRepo, copyReminders, originalTaskID, newTask.ID); err != nil {
+		return fmt.Errorf("copy reminders for task %s: %w", newTask.ID, err)
+	}
 
 	// Move repeat rule to new task (pass through the pattern)
-	if err := s.ruleRepo.DeleteByTask(originalTaskID); err != nil {
-		log.Printf("scheduler: delete rule for task %s: %v", originalTaskID, err)
+	txRuleRepo := s.ruleRepo.WithTx(tx)
+	if err := txRuleRepo.DeleteByTask(originalTaskID); err != nil {
+		return fmt.Errorf("delete rule for task %s: %w", originalTaskID, err)
 	}
-	if _, err := s.ruleRepo.Upsert(newTask.ID, model.CreateRepeatRuleInput{
-		Pattern: &rule.Pattern,
+	if _, err := txRuleRepo.Upsert(newTask.ID, model.CreateRepeatRuleInput{
+		Pattern: &pattern,
 	}); err != nil {
-		log.Printf("scheduler: upsert rule for task %s: %v", newTask.ID, err)
+		return fmt.Errorf("upsert rule for task %s: %w", newTask.ID, err)
+	}
+
+	if s.testHookAfterInstance != nil {
+		if err := s.testHookAfterInstance(); err != nil {
+			return fmt.Errorf("test hook after instance: %w", err)
+		}
 	}
 
 	log.Printf("scheduler: created repeat instance %s from %s (next: %s)", newTask.ID, originalTaskID, nextDate)
+	return nil
 }
 
 func (s *Scheduler) processReminders() {
@@ -371,9 +494,9 @@ func (s *Scheduler) fireReminder(p model.PendingReminder, fireAt time.Time) {
 
 	// SSE broadcast for in-app toast
 	s.broker.BroadcastJSON("reminder_fired", map[string]interface{}{
-		"task_id":       p.TaskID,
-		"task_title":    p.TaskTitle,
-		"reminder_type": string(p.Reminder.Type),
+		"task_id":        p.TaskID,
+		"task_title":     p.TaskTitle,
+		"reminder_type":  string(p.Reminder.Type),
 		"reminder_value": p.Reminder.Value,
 	})
 }
@@ -402,17 +525,29 @@ func describeReminder(r model.Reminder) string {
 	return "Reminder"
 }
 
-func (s *Scheduler) copyRemindersToNewInstance(originalTaskID, newTaskID string) {
-	// Check user setting
+// reminderCopyEnabled reads the user setting outside any transaction, so
+// GetOrCreate never writes on a second connection while a transaction holds
+// the write lock.
+func (s *Scheduler) reminderCopyEnabled() bool {
 	if user, err := s.userRepo.GetFirst(); err == nil && user != nil {
 		if settings, err := s.settingsRepo.GetOrCreate(user.ID); err == nil && !settings.CopyRemindersToRecurring {
-			return
+			return false
 		}
 	}
+	return true
+}
 
-	reminders, err := s.reminderRepo.ListByTask(originalTaskID)
-	if err != nil || len(reminders) == 0 {
-		return
+// copyRemindersToNewInstance copies relative reminders to the new instance
+// when the user enabled it, using the tx-bound reminderRepo so the copies
+// join the caller's transaction.
+func (s *Scheduler) copyRemindersToNewInstance(reminderRepo *repository.ReminderRepository, copyEnabled bool, originalTaskID, newTaskID string) error {
+	if !copyEnabled {
+		return nil
+	}
+
+	reminders, err := reminderRepo.ListByTask(originalTaskID)
+	if err != nil {
+		return fmt.Errorf("list reminders of task %s: %w", originalTaskID, err)
 	}
 
 	for _, r := range reminders {
@@ -420,30 +555,12 @@ func (s *Scheduler) copyRemindersToNewInstance(originalTaskID, newTaskID string)
 			// Skip exact reminders — they are tied to specific dates
 			continue
 		}
-		if _, err := s.reminderRepo.Create(newTaskID, model.CreateReminderInput{
+		if _, err := reminderRepo.Create(newTaskID, model.CreateReminderInput{
 			Type:  r.Type,
 			Value: r.Value,
 		}); err != nil {
-			log.Printf("scheduler: copy reminder for task %s: %v", newTaskID, err)
+			return fmt.Errorf("copy reminder for task %s: %w", newTaskID, err)
 		}
 	}
-}
-
-func (s *Scheduler) calculateNextDate(currentDate *string, pattern model.RecurrencePattern) string {
-	fromDate := ""
-	if currentDate != nil {
-		fromDate = *currentDate
-	}
-
-	result, err := s.engine.Next(fromDate, pattern)
-	if err != nil {
-		log.Printf("scheduler: calculate next date: %v", err)
-		// Fallback to simple daily
-		if currentDate != nil {
-			t, _ := time.Parse("2006-01-02", *currentDate)
-			return t.AddDate(0, 0, 1).Format("2006-01-02")
-		}
-		return time.Now().AddDate(0, 0, 1).Format("2006-01-02")
-	}
-	return result
+	return nil
 }

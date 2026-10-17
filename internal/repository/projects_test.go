@@ -282,7 +282,7 @@ func TestProjectTaskProgress(t *testing.T) {
 	created, _ := projRepo.Create(model.CreateProjectInput{Title: "Progress", AreaID: &areaID})
 	t1, _ := taskRepo.Create(model.CreateTaskInput{Title: "Task 1", ProjectID: &created.ID})
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Task 2", ProjectID: &created.ID})
-	_, _ = taskRepo.Complete(t1.ID)
+	_, _ = taskRepo.SetDoneStatus(t1.ID, "completed")
 
 	projects, _ := projRepo.List(nil, nil)
 	if len(projects) != 1 {

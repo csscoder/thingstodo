@@ -38,7 +38,7 @@ func setupReminderRouter(t *testing.T) *testutil.TestClient {
 	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLog)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 
-	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, nil)
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 	reminderH := handler.NewReminderHandler(reminderRepo, broker, msk)
 	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, msk)
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
 	mw "github.com/collinjanssen/thingstodo/internal/middleware"
+	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/push"
 	"github.com/collinjanssen/thingstodo/internal/repository"
 	"github.com/collinjanssen/thingstodo/internal/scheduler"
@@ -33,7 +34,7 @@ func setupTaskRouter(t *testing.T) (*testutil.TestClient, *sql.DB) {
 	pushSubRepo := repository.NewPushSubscriptionRepository(db)
 	pushSender := push.NewSender(pushSubRepo, "", "", "")
 	sched := scheduler.New(db, taskRepo, ruleRepo, checklistRepo, attachRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, nil, pushSender, broker, time.UTC)
-	taskHandler := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, sched)
+	taskHandler := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, sched)
 
 	r := chi.NewRouter()
 	r.Route("/api/tasks", func(r chi.Router) {
@@ -287,7 +288,7 @@ func setupTaskRouterWithUser(t *testing.T) (*testutil.TestClient, *sql.DB) {
 	pushSubRepo := repository.NewPushSubscriptionRepository(db)
 	pushSender := push.NewSender(pushSubRepo, "", "", "")
 	sched := scheduler.New(db, taskRepo, ruleRepo, checklistRepo, attachRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, nil, pushSender, broker, time.UTC)
-	taskHandler := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, sched)
+	taskHandler := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, sched)
 
 	if _, err := db.Exec("INSERT INTO users (id, username, password_hash) VALUES ('u1', 'alice', 'x')"); err != nil {
 		t.Fatalf("insert test user: %v", err)
@@ -444,7 +445,7 @@ func setupValidationRouter(t *testing.T) *testutil.TestClient {
 	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLog)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 
-	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, nil)
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 	projectH := handler.NewProjectHandler(projectRepo, broker)
 	areaH := handler.NewAreaHandler(areaRepo, broker)
 	tagH := handler.NewTagHandler(tagRepo, broker)
@@ -667,5 +668,39 @@ func TestCreate_RejectsBadClientID(t *testing.T) {
 	}
 	if result.Results[1].Status != "applied" {
 		t.Errorf("batch must continue after a per-change error, got %q (error: %s)", result.Results[1].Status, result.Results[1].Error)
+	}
+}
+
+// TestComplete_RepeatedRESTCallIs200NoSpawn pins the finishing contract:
+// a second PATCH /complete returns 200 with the task and never spawns a
+// second repeat instance.
+func TestComplete_RepeatedRESTCallIs200NoSpawn(t *testing.T) {
+	client, db := setupTaskRouter(t)
+
+	createResp := client.Post("/api/tasks", map[string]string{"title": "Recurring REST"})
+	var created map[string]interface{}
+	createResp.JSON(t, &created)
+	id := created["id"].(string)
+
+	ruleRepo := repository.NewRepeatRuleRepository(db, nil)
+	pattern := model.RecurrencePattern{Type: model.PatternWeekly, Every: 1, Mode: model.RecurrenceModeAfterCompletion}
+	if _, err := ruleRepo.Upsert(id, model.CreateRepeatRuleInput{Pattern: &pattern}); err != nil {
+		t.Fatalf("upsert rule: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		resp := client.Patch("/api/tasks/"+id+"/complete", nil)
+		testutil.AssertStatus(t, resp, http.StatusOK)
+		testutil.AssertJSONField(t, resp, "status", "completed")
+	}
+
+	var instances int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM tasks WHERE title = 'Recurring REST' AND deleted_at IS NULL",
+	).Scan(&instances); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	if instances != 2 { // original + exactly one spawned instance
+		t.Errorf("expected original + one instance after repeated complete, got %d tasks", instances)
 	}
 }

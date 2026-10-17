@@ -525,27 +525,18 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			case "status":
 				if s, ok := val.(string); ok {
 					switch s {
-					case "completed":
-						h.cleanupSchedules(change.EntityID)
-						if _, cErr := h.tasks.Complete(change.EntityID); cErr != nil {
+					case "completed", "canceled", "wont_do":
+						// One finishing path: the guarded, transactional
+						// FinishTask (idempotent on re-push, spawns once).
+						if h.scheduler == nil {
+							result.Status = "error"
+							result.Error = "scheduler not available"
+							return result
+						}
+						if _, _, cErr := h.scheduler.FinishTask(change.EntityID, s); cErr != nil {
 							result.Status = "error"
 							result.Error = syncErrorMessage(cErr)
 							return result
-						}
-						if h.scheduler != nil {
-							h.scheduler.HandleTaskDone(change.EntityID)
-						}
-						result.Status = status
-						return result
-					case "canceled":
-						h.cleanupSchedules(change.EntityID)
-						if _, cErr := h.tasks.Cancel(change.EntityID); cErr != nil {
-							result.Status = "error"
-							result.Error = syncErrorMessage(cErr)
-							return result
-						}
-						if h.scheduler != nil {
-							h.scheduler.HandleTaskDone(change.EntityID)
 						}
 						result.Status = status
 						return result
@@ -554,18 +545,6 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 							result.Status = "error"
 							result.Error = syncErrorMessage(cErr)
 							return result
-						}
-						result.Status = status
-						return result
-					case "wont_do":
-						h.cleanupSchedules(change.EntityID)
-						if _, cErr := h.tasks.WontDo(change.EntityID); cErr != nil {
-							result.Status = "error"
-							result.Error = syncErrorMessage(cErr)
-							return result
-						}
-						if h.scheduler != nil {
-							h.scheduler.HandleTaskDone(change.EntityID)
 						}
 						result.Status = status
 						return result
@@ -1601,13 +1580,4 @@ func parseTimes(clientUpdatedAt, serverUpdatedAt string) (time.Time, time.Time) 
 		serverTime, _ = time.Parse(time.RFC3339, serverUpdatedAt)
 	}
 	return clientTime, serverTime
-}
-
-// cleanupSchedules completes past uncompleted schedule entries and deletes
-// today + future entries when a task is completed/canceled/wontdo.
-func (h *SyncHandler) cleanupSchedules(taskID string) {
-	today := time.Now().Format("2006-01-02")
-	if err := h.schedules.CleanupOnTaskDone(taskID, today); err != nil {
-		log.Printf("schedule cleanup for task %s: %v", taskID, err)
-	}
 }

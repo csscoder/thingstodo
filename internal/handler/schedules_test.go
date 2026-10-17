@@ -21,7 +21,7 @@ func setupScheduleRouter(t *testing.T) *testutil.TestClient {
 	scheduleRepo := repository.NewScheduleRepository(db, changeLog)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 
-	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, repository.NewReminderRepository(db, changeLog), settingsRepo, broker, nil)
+	taskH := handler.NewTaskHandler(taskRepo, repository.NewReminderRepository(db, changeLog), settingsRepo, broker, nil)
 	checklistH := handler.NewChecklistHandler(checklistRepo, broker)
 	scheduleH := handler.NewScheduleHandler(scheduleRepo, taskRepo, broker)
 

@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
+	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
+	"github.com/collinjanssen/thingstodo/internal/scheduler"
 	"github.com/collinjanssen/thingstodo/internal/sse"
 	"github.com/collinjanssen/thingstodo/internal/testutil"
 	"github.com/go-chi/chi/v5"
@@ -47,7 +49,7 @@ func setupSyncRouterWithDB(t *testing.T) (*testutil.TestClient, *repository.Chan
 
 	// Also mount task endpoints so we can create test data
 	broker := sse.NewBroker()
-	taskH := handler.NewTaskHandler(taskRepo, scheduleRepo, reminderRepo, settingsRepo, broker, nil)
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 
 	r.Route("/api/tasks", func(r chi.Router) {
 		r.Post("/", taskH.Create)
@@ -896,5 +898,92 @@ func TestSyncPush_BadWhenDateIsChangeError(t *testing.T) {
 	}
 	if result.Results[1].Status != "applied" {
 		t.Errorf("batch must continue after a per-change error, got %q (error: %s)", result.Results[1].Status, result.Results[1].Error)
+	}
+}
+
+// setupSyncRouterWithScheduler is setupSyncRouterWithDB plus a real
+// scheduler, so sync status pushes run the full finishing path.
+func setupSyncRouterWithScheduler(t *testing.T) (*testutil.TestClient, *repository.TaskRepository, *sql.DB) {
+	t.Helper()
+	db := testutil.SetupTestDB(t)
+
+	changeLogRepo := repository.NewChangeLogRepository(db)
+	taskRepo := repository.NewTaskRepository(db, changeLogRepo)
+	projectRepo := repository.NewProjectRepository(db, changeLogRepo)
+	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
+	tagRepo := repository.NewTagRepository(db, changeLogRepo)
+	checklistRepo := repository.NewChecklistRepository(db, changeLogRepo)
+	headingRepo := repository.NewHeadingRepository(db, changeLogRepo)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo)
+	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
+	attachmentRepo := repository.NewAttachmentRepository(db, changeLogRepo)
+	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
+	settingsRepo := repository.NewUserSettingsRepository(db)
+	userRepo := repository.NewUserRepository(db)
+
+	broker := sse.NewBroker()
+	sched := scheduler.New(db, taskRepo, repeatRuleRepo, checklistRepo, attachmentRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, changeLogRepo, nil, broker, time.UTC)
+
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC)
+
+	r := chi.NewRouter()
+	r.Post("/api/sync/push", syncH.Push)
+
+	client := testutil.NewTestClient(t, r)
+	return client, taskRepo, db
+}
+
+// TestSyncPush_CompleteRecurringSpawnsOnce (Review Focus 1): pushing
+// status=completed for a recurring task in two batches succeeds both times
+// and creates exactly one instance.
+func TestSyncPush_CompleteRecurringSpawnsOnce(t *testing.T) {
+	client, taskRepo, db := setupSyncRouterWithScheduler(t)
+
+	created, err := taskRepo.Create(model.CreateTaskInput{Title: "Sync recurring"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	ruleRepo := repository.NewRepeatRuleRepository(db, nil)
+	pattern := model.RecurrencePattern{Type: model.PatternWeekly, Every: 1, Mode: model.RecurrenceModeAfterCompletion}
+	if _, err := ruleRepo.Upsert(created.ID, model.CreateRepeatRuleInput{Pattern: &pattern}); err != nil {
+		t.Fatalf("upsert rule: %v", err)
+	}
+
+	pushOnce := func() {
+		t.Helper()
+		resp := client.Post("/api/sync/push", map[string]interface{}{
+			"device_id": "dev1",
+			"changes": []map[string]interface{}{{
+				"entity":            "task",
+				"entity_id":         created.ID,
+				"action":            "update",
+				"fields":            []string{"status"},
+				"data":              map[string]interface{}{"status": "completed"},
+				"client_updated_at": time.Now().Format(time.RFC3339),
+			}},
+		})
+		testutil.AssertStatus(t, resp, http.StatusOK)
+
+		var result handler.SyncPushResponse
+		resp.JSON(t, &result)
+		if len(result.Results) != 1 {
+			t.Fatalf("expected 1 result, got %d (body: %s)", len(result.Results), string(resp.Body))
+		}
+		if result.Results[0].Status == "error" {
+			t.Fatalf("push result errored: %s", result.Results[0].Error)
+		}
+	}
+
+	pushOnce()
+	pushOnce()
+
+	var instances int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM tasks WHERE title = 'Sync recurring' AND deleted_at IS NULL",
+	).Scan(&instances); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	if instances != 2 { // original + exactly one spawned instance
+		t.Errorf("expected original + one instance after two push batches, got %d tasks", instances)
 	}
 }

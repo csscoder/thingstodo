@@ -46,7 +46,7 @@ func TestViewInboxExcludesCompletedTasks(t *testing.T) {
 	viewRepo := repository.NewViewRepository(db)
 
 	task, _ := taskRepo.Create(model.CreateTaskInput{Title: "Done"})
-	_, _ = taskRepo.Complete(task.ID)
+	_, _ = taskRepo.SetDoneStatus(task.ID, "completed")
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Open"})
 
 	view, _ := viewRepo.Inbox(nil, true)
@@ -108,9 +108,9 @@ func TestViewLogbook(t *testing.T) {
 	viewRepo := repository.NewViewRepository(db)
 
 	t1, _ := taskRepo.Create(model.CreateTaskInput{Title: "Completed"})
-	_, _ = taskRepo.Complete(t1.ID)
+	_, _ = taskRepo.SetDoneStatus(t1.ID, "completed")
 	t2, _ := taskRepo.Create(model.CreateTaskInput{Title: "Canceled"})
-	_, _ = taskRepo.Cancel(t2.ID)
+	_, _ = taskRepo.SetDoneStatus(t2.ID, "canceled")
 	_, _ = taskRepo.Create(model.CreateTaskInput{Title: "Still open"})
 
 	view, err := viewRepo.Logbook(50, 0)
