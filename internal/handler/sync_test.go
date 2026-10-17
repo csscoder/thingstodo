@@ -40,7 +40,7 @@ func setupSyncRouterWithDB(t *testing.T) (*testutil.TestClient, *repository.Chan
 	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC)
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC, t.TempDir())
 
 	r := chi.NewRouter()
 	r.Get("/api/sync/pull", syncH.Pull)
@@ -924,7 +924,7 @@ func setupSyncRouterWithScheduler(t *testing.T) (*testutil.TestClient, *reposito
 	broker := sse.NewBroker()
 	sched := scheduler.New(db, taskRepo, repeatRuleRepo, checklistRepo, attachmentRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, changeLogRepo, nil, broker, time.UTC)
 
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC)
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC, t.TempDir())
 
 	r := chi.NewRouter()
 	r.Post("/api/sync/push", syncH.Push)

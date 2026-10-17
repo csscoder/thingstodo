@@ -482,7 +482,10 @@ Request:
 Response (200): Updated attachment
 
 ### DELETE /api/attachments/:id
+Deletes exactly the attachment row with the given id. Recurring instances copy file attachments as rows sharing one stored file; the stored file is removed only when no other attachment row still references it.
+
 Response (204): No content
+Response (404): Unknown attachment id (`NOT_FOUND`)
 
 ### GET /api/attachments/:id/file
 Response: Binary file stream with appropriate Content-Type

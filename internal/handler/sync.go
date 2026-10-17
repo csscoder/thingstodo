@@ -22,19 +22,20 @@ const (
 
 // SyncHandler handles sync pull and push endpoints.
 type SyncHandler struct {
-	changeLog   *repository.ChangeLogRepository
-	tasks       *repository.TaskRepository
-	projects    *repository.ProjectRepository
-	areas       *repository.AreaRepository
-	tags        *repository.TagRepository
-	checklist   *repository.ChecklistRepository
-	headings    *repository.HeadingRepository
-	attachments *repository.AttachmentRepository
-	schedules   *repository.ScheduleRepository
-	reminders   *repository.ReminderRepository
-	repeatRules *repository.RepeatRuleRepository
-	scheduler   *scheduler.Scheduler
-	loc         *time.Location
+	changeLog       *repository.ChangeLogRepository
+	tasks           *repository.TaskRepository
+	projects        *repository.ProjectRepository
+	areas           *repository.AreaRepository
+	tags            *repository.TagRepository
+	checklist       *repository.ChecklistRepository
+	headings        *repository.HeadingRepository
+	attachments     *repository.AttachmentRepository
+	attachmentsPath string
+	schedules       *repository.ScheduleRepository
+	reminders       *repository.ReminderRepository
+	repeatRules     *repository.RepeatRuleRepository
+	scheduler       *scheduler.Scheduler
+	loc             *time.Location
 }
 
 // NewSyncHandler creates a new SyncHandler.
@@ -52,24 +53,28 @@ func NewSyncHandler(
 	repeatRules *repository.RepeatRuleRepository,
 	sched *scheduler.Scheduler,
 	loc *time.Location,
+	// attachmentsPath is the files root the attachment delete path uses to
+	// remove a stored file once its last row is gone.
+	attachmentsPath string,
 ) *SyncHandler {
 	if loc == nil {
 		loc = time.UTC
 	}
 	return &SyncHandler{
-		changeLog:   changeLog,
-		tasks:       tasks,
-		projects:    projects,
-		areas:       areas,
-		tags:        tags,
-		checklist:   checklist,
-		headings:    headings,
-		attachments: attachments,
-		schedules:   schedules,
-		reminders:   reminders,
-		repeatRules: repeatRules,
-		scheduler:   sched,
-		loc:         loc,
+		changeLog:       changeLog,
+		tasks:           tasks,
+		projects:        projects,
+		areas:           areas,
+		tags:            tags,
+		checklist:       checklist,
+		headings:        headings,
+		attachments:     attachments,
+		attachmentsPath: attachmentsPath,
+		schedules:       schedules,
+		reminders:       reminders,
+		repeatRules:     repeatRules,
+		scheduler:       sched,
+		loc:             loc,
 	}
 }
 
@@ -1331,11 +1336,22 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 		result.Status = "applied"
 
 	case "delete":
-		err := h.attachments.Delete(change.EntityID)
+		// DeleteOne removes exactly this row and reports the stored file
+		// only when no other row still references it.
+		orphanedFile, err := h.attachments.DeleteOne(change.EntityID)
 		if err != nil {
+			if errors.Is(err, repository.ErrAttachmentNotFound) {
+				// A re-pushed delete of an already-deleted attachment is an
+				// idempotent success, like the other sync entity deletes.
+				result.Status = "applied"
+				return result
+			}
 			result.Status = "error"
 			result.Error = syncErrorMessage(err)
 			return result
+		}
+		if orphanedFile != "" {
+			removeStoredFile(h.attachmentsPath, orphanedFile)
 		}
 		result.Status = "applied"
 

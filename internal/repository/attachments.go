@@ -39,11 +39,11 @@ func (r *AttachmentRepository) WithTx(tx *sql.Tx) *AttachmentRepository {
 
 // inTx runs fn inside a single transaction: the bound one when the repository
 // is a WithTx copy, otherwise a new transaction owned by this call.
-func (r *AttachmentRepository) inTx(fn func(db DBTX) error) error {
+func (r *AttachmentRepository) inTx(fn func(tx *sql.Tx) error) error {
 	if r.tx != nil {
 		return fn(r.tx)
 	}
-	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
+	return InTx(r.conn, fn)
 }
 
 func (r *AttachmentRepository) ListByTask(taskID string) ([]model.Attachment, error) {
@@ -153,24 +153,54 @@ func (r *AttachmentRepository) Delete(id string) error {
 	return err
 }
 
-// DeleteByURL removes all attachment rows that reference the given stored file URL.
-func (r *AttachmentRepository) DeleteByURL(url string) error {
-	// Collect attachment IDs before deleting so we can log each deletion
-	var id string
-	err := r.db.QueryRow("SELECT id FROM attachments WHERE type = 'file' AND url = ?", url).Scan(&id)
-	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("lookup attachment by url: %w", err)
-	}
+// ErrAttachmentNotFound is returned by DeleteOne when no attachment row
+// carries the given id. Handlers map it to 404.
+var ErrAttachmentNotFound = fmt.Errorf("attachment not found")
 
-	_, execErr := r.db.Exec("DELETE FROM attachments WHERE type = 'file' AND url = ?", url)
-	if execErr != nil {
-		return execErr
-	}
+// DeleteOne deletes exactly the attachment row with the given id, in one
+// transaction together with its change-log entry. Recurring instances copy
+// file attachments as rows sharing one stored file, so for a file row it
+// then counts the remaining rows referencing the same URL (inside the same
+// transaction, i.e. excluding the row just deleted) and returns that stored
+// file name only when none remain — the caller removes it from disk after
+// the transaction committed. Every other case returns "".
+func (r *AttachmentRepository) DeleteOne(id string) (orphanedFile string, err error) {
+	err = r.inTx(func(tx *sql.Tx) error {
+		var attType, url string
+		if err := tx.QueryRow("SELECT type, url FROM attachments WHERE id = ?", id).Scan(&attType, &url); err != nil {
+			if err == sql.ErrNoRows {
+				return ErrAttachmentNotFound
+			}
+			return fmt.Errorf("lookup attachment %s: %w", id, err)
+		}
 
-	if err == nil {
-		logChange(r.changeLog, "attachment", id, "delete", nil, map[string]string{"id": id}, "", "")
+		if _, err := tx.Exec("DELETE FROM attachments WHERE id = ?", id); err != nil {
+			return fmt.Errorf("delete attachment %s: %w", id, err)
+		}
+
+		// The change log joins the same transaction (WithTx is nil-safe for
+		// a missing change log; logChange propagates its error so the whole
+		// delete rolls back).
+		if err := logChange(r.WithTx(tx).changeLog, "attachment", id, "delete", nil, map[string]string{"id": id}, "", ""); err != nil {
+			return fmt.Errorf("log attachment delete: %w", err)
+		}
+
+		if attType != "file" || url == "" {
+			return nil // link rows (and file rows without a usable name) orphan nothing
+		}
+		count, err := r.WithTx(tx).CountByURL(url)
+		if err != nil {
+			return fmt.Errorf("count attachments by url: %w", err)
+		}
+		if count == 0 {
+			orphanedFile = url
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
-	return nil
+	return orphanedFile, nil
 }
 
 // CountByURL returns how many file attachments reference the given stored file URL.

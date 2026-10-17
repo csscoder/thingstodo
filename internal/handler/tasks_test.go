@@ -454,7 +454,7 @@ func setupValidationRouter(t *testing.T) *testutil.TestClient {
 	scheduleH := handler.NewScheduleHandler(scheduleRepo, taskRepo, broker)
 	reminderH := handler.NewReminderHandler(reminderRepo, broker, time.UTC)
 	attachmentH := handler.NewAttachmentHandler(attachmentRepo, broker, "", 1<<20)
-	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC)
+	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC, t.TempDir())
 
 	r := chi.NewRouter()
 	r.Post("/api/tasks", taskH.Create)

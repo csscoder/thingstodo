@@ -40,7 +40,7 @@ func setupReminderRouter(t *testing.T) *testutil.TestClient {
 
 	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
 	reminderH := handler.NewReminderHandler(reminderRepo, broker, msk)
-	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, msk)
+	syncH := handler.NewSyncHandler(changeLog, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, msk, t.TempDir())
 
 	r := chi.NewRouter()
 	r.Post("/api/tasks", taskH.Create)

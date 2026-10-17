@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -198,33 +200,40 @@ func (h *AttachmentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, att)
 }
 
+// removeStoredFile deletes a stored attachment file through os.Root, so the
+// removal is confined to the attachments dir (a legacy row pointing outside
+// it just fails). It runs after the deleting transaction committed; the DB
+// rows are gone and remain the source of truth, so a removal failure is
+// logged, never surfaced or rolled back.
+func removeStoredFile(attachmentsPath, name string) {
+	root, err := os.OpenRoot(attachmentsPath)
+	if err != nil {
+		log.Printf("attachments: open root %s: %v", attachmentsPath, err)
+		return
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("attachments: remove stored file %s: %v", name, err)
+	}
+}
+
 func (h *AttachmentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	// Get attachment to find file path before deleting
-	att, err := h.repo.GetByID(id)
+	// DeleteOne removes exactly this row in one transaction; it reports the
+	// stored file name only when no other row still references it.
+	orphanedFile, err := h.repo.DeleteOne(id)
 	if err != nil {
+		if errors.Is(err, repository.ErrAttachmentNotFound) {
+			writeError(w, http.StatusNotFound, "attachment not found", "NOT_FOUND")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
 
-	if att != nil && att.Type == "file" {
-		// Delete all attachment rows sharing this file, then remove the file from disk
-		if err := h.repo.DeleteByURL(att.URL); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
-			return
-		}
-		// os.Root confines removal to the attachments dir; a removal error
-		// (e.g. a legacy row pointing outside it) is ignored, as before.
-		if root, err := os.OpenRoot(h.attachmentsPath); err == nil {
-			_ = root.Remove(att.URL)
-			_ = root.Close()
-		}
-	} else {
-		if err := h.repo.Delete(id); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
-			return
-		}
+	if orphanedFile != "" {
+		removeStoredFile(h.attachmentsPath, orphanedFile)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

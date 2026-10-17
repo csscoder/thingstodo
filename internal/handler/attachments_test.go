@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"bytes"
+	"database/sql"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -9,10 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
 	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
+	"github.com/collinjanssen/thingstodo/internal/scheduler"
 	"github.com/collinjanssen/thingstodo/internal/sse"
 	"github.com/collinjanssen/thingstodo/internal/testutil"
 	"github.com/go-chi/chi/v5"
@@ -245,5 +248,173 @@ func TestFileAttachment_UploadDownloadDelete(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(attachmentsPath, att.URL)); !os.IsNotExist(err) {
 		t.Errorf("stored file still exists after delete (stat err: %v)", err)
+	}
+}
+
+// setupSharedAttachmentRouter mirrors setupSyncRouterWithScheduler: it wires
+// the real scheduler into the task finishing path and the sync handler, and
+// mounts the attachment routes over a shared attachments dir.
+func setupSharedAttachmentRouter(t *testing.T) (*testutil.TestClient, *repository.AttachmentRepository, *sql.DB, string) {
+	t.Helper()
+	db := testutil.SetupTestDB(t)
+
+	changeLogRepo := repository.NewChangeLogRepository(db)
+	taskRepo := repository.NewTaskRepository(db, changeLogRepo)
+	projectRepo := repository.NewProjectRepository(db, changeLogRepo)
+	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
+	tagRepo := repository.NewTagRepository(db, changeLogRepo)
+	checklistRepo := repository.NewChecklistRepository(db, changeLogRepo)
+	headingRepo := repository.NewHeadingRepository(db, changeLogRepo)
+	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo)
+	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
+	attachmentRepo := repository.NewAttachmentRepository(db, changeLogRepo)
+	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
+	settingsRepo := repository.NewUserSettingsRepository(db)
+	userRepo := repository.NewUserRepository(db)
+
+	broker := sse.NewBroker()
+	sched := scheduler.New(db, taskRepo, repeatRuleRepo, checklistRepo, attachmentRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, changeLogRepo, nil, broker, time.UTC)
+
+	attachmentsPath := filepath.Join(t.TempDir(), "attachments")
+	if err := os.MkdirAll(attachmentsPath, 0o755); err != nil {
+		t.Fatalf("failed to create attachments dir: %v", err)
+	}
+
+	attachmentH := handler.NewAttachmentHandler(attachmentRepo, broker, attachmentsPath, 25<<20)
+	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, sched)
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, time.UTC, attachmentsPath)
+
+	r := chi.NewRouter()
+	r.Post("/api/tasks", taskH.Create)
+	r.Patch("/api/tasks/{id}/complete", taskH.Complete)
+	r.Post("/api/tasks/{id}/attachments", attachmentH.Create)
+	r.Delete("/api/attachments/{id}", attachmentH.Delete)
+	r.Get("/api/attachments/{id}/file", attachmentH.Download)
+	r.Post("/api/sync/push", syncH.Push)
+
+	client := testutil.NewTestClient(t, r)
+	return client, attachmentRepo, db, attachmentsPath
+}
+
+// spawnSharedFileCopies runs the data-loss scenario setup: a weekly
+// recurring task with an uploaded file is completed through the finishing
+// path (Task 8), so the spawned instance carries a copy row pointing at the
+// same stored file. It returns the original's and the copy's attachment rows.
+func spawnSharedFileCopies(t *testing.T, client *testutil.TestClient, attachmentRepo *repository.AttachmentRepository, db *sql.DB) (model.Attachment, model.Attachment) {
+	t.Helper()
+
+	resp := client.Post("/api/tasks", map[string]string{"title": "Recurring with file"})
+	testutil.AssertStatus(t, resp, http.StatusCreated)
+	var created map[string]interface{}
+	resp.JSON(t, &created)
+	taskID := created["id"].(string)
+
+	ruleRepo := repository.NewRepeatRuleRepository(db, nil)
+	pattern := model.RecurrencePattern{Type: model.PatternWeekly, Every: 1, Mode: model.RecurrenceModeAfterCompletion}
+	if _, err := ruleRepo.Upsert(taskID, model.CreateRepeatRuleInput{Pattern: &pattern}); err != nil {
+		t.Fatalf("upsert repeat rule: %v", err)
+	}
+
+	up := postMultipart(t, client, "/api/tasks/"+taskID+"/attachments", "notes.txt", "shared file bytes")
+	testutil.AssertStatus(t, up, http.StatusCreated)
+	var original model.Attachment
+	up.JSON(t, &original)
+
+	done := client.Patch("/api/tasks/"+taskID+"/complete", nil)
+	testutil.AssertStatus(t, done, http.StatusOK)
+
+	// The spawned instance is the remaining open task with the same title.
+	var nextID string
+	if err := db.QueryRow(
+		"SELECT id FROM tasks WHERE title = ? AND status = 'open' AND deleted_at IS NULL AND id != ?",
+		"Recurring with file", taskID,
+	).Scan(&nextID); err != nil {
+		t.Fatalf("find spawned instance: %v", err)
+	}
+
+	copies, err := attachmentRepo.ListByTask(nextID)
+	if err != nil {
+		t.Fatalf("list spawned instance attachments: %v", err)
+	}
+	if len(copies) != 1 {
+		t.Fatalf("expected 1 copied attachment, got %d", len(copies))
+	}
+	if copies[0].ID == original.ID {
+		t.Fatal("expected the copy to be a new row with its own id")
+	}
+	if copies[0].URL != original.URL {
+		t.Fatalf("expected the copy to share the stored file: original %q, copy %q", original.URL, copies[0].URL)
+	}
+	return original, copies[0]
+}
+
+func TestDeleteAttachment_KeepsSharedFile(t *testing.T) {
+	client, attachmentRepo, db, attachmentsPath := setupSharedAttachmentRouter(t)
+	originalAtt, copyAtt := spawnSharedFileCopies(t, client, attachmentRepo, db)
+
+	storedPath := filepath.Join(attachmentsPath, copyAtt.URL)
+
+	// Deleting the original's copy must leave the shared file and the new
+	// instance's row usable.
+	del := client.Delete("/api/attachments/" + originalAtt.ID)
+	testutil.AssertStatus(t, del, http.StatusNoContent)
+
+	dl := client.Get("/api/attachments/" + copyAtt.ID + "/file")
+	testutil.AssertStatus(t, dl, http.StatusOK)
+	if string(dl.Body) != "shared file bytes" {
+		t.Errorf("downloaded bytes differ: got %q", dl.Body)
+	}
+	if _, err := os.Stat(storedPath); err != nil {
+		t.Errorf("shared stored file must survive deleting one copy: %v", err)
+	}
+
+	// Deleting the last remaining copy removes the stored file.
+	last := client.Delete("/api/attachments/" + copyAtt.ID)
+	testutil.AssertStatus(t, last, http.StatusNoContent)
+	if _, err := os.Stat(storedPath); !os.IsNotExist(err) {
+		t.Errorf("stored file must be removed with the last copy (stat err: %v)", err)
+	}
+}
+
+func TestSyncDeleteAttachment_KeepsSharedFile(t *testing.T) {
+	client, attachmentRepo, db, attachmentsPath := setupSharedAttachmentRouter(t)
+	originalAtt, copyAtt := spawnSharedFileCopies(t, client, attachmentRepo, db)
+
+	storedPath := filepath.Join(attachmentsPath, copyAtt.URL)
+
+	pushDelete := func(id string) {
+		t.Helper()
+		resp := client.Post("/api/sync/push", map[string]interface{}{
+			"device_id": "dev1",
+			"changes": []map[string]interface{}{{
+				"entity":            "attachment",
+				"entity_id":         id,
+				"action":            "delete",
+				"data":              map[string]interface{}{},
+				"client_updated_at": time.Now().Format(time.RFC3339),
+			}},
+		})
+		testutil.AssertStatus(t, resp, http.StatusOK)
+		var result handler.SyncPushResponse
+		resp.JSON(t, &result)
+		if len(result.Results) != 1 {
+			t.Fatalf("expected 1 result, got %d (body: %s)", len(result.Results), string(resp.Body))
+		}
+		if result.Results[0].Status != "applied" {
+			t.Fatalf("sync delete not applied: %s", result.Results[0].Error)
+		}
+	}
+
+	pushDelete(originalAtt.ID)
+
+	dl := client.Get("/api/attachments/" + copyAtt.ID + "/file")
+	testutil.AssertStatus(t, dl, http.StatusOK)
+	if _, err := os.Stat(storedPath); err != nil {
+		t.Errorf("shared stored file must survive deleting one copy: %v", err)
+	}
+
+	pushDelete(copyAtt.ID)
+	if _, err := os.Stat(storedPath); !os.IsNotExist(err) {
+		t.Errorf("stored file must be removed with the last copy (stat err: %v)", err)
 	}
 }
