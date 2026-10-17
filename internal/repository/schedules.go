@@ -8,12 +8,36 @@ import (
 )
 
 type ScheduleRepository struct {
-	db        *sql.DB
+	db        DBTX
+	conn      *sql.DB
+	tx        *sql.Tx
 	changeLog *ChangeLogRepository
 }
 
 func NewScheduleRepository(db *sql.DB, changeLog *ChangeLogRepository) *ScheduleRepository {
-	return &ScheduleRepository{db: db, changeLog: changeLog}
+	return &ScheduleRepository{db: db, conn: db, changeLog: changeLog}
+}
+
+// WithTx returns a shallow copy of the repository bound to tx: its statements
+// and nested inTx calls reuse tx instead of opening new transactions. It is
+// nil-safe for the change log.
+func (r *ScheduleRepository) WithTx(tx *sql.Tx) *ScheduleRepository {
+	cp := *r
+	cp.db = tx
+	cp.tx = tx
+	if cp.changeLog != nil {
+		cp.changeLog = cp.changeLog.WithTx(tx)
+	}
+	return &cp
+}
+
+// inTx runs fn inside a single transaction: the bound one when the repository
+// is a WithTx copy, otherwise a new transaction owned by this call.
+func (r *ScheduleRepository) inTx(fn func(db DBTX) error) error {
+	if r.tx != nil {
+		return fn(r.tx)
+	}
+	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
 }
 
 func (r *ScheduleRepository) ListByTask(taskID string) ([]model.TaskSchedule, error) {
@@ -135,19 +159,15 @@ func (r *ScheduleRepository) Delete(id string) error {
 }
 
 func (r *ScheduleRepository) Reorder(items []model.SimpleReorderItem) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, item := range items {
-		_, err := tx.Exec("UPDATE task_schedules SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
-		if err != nil {
-			return err
+	if err := r.inTx(func(db DBTX) error {
+		for _, item := range items {
+			_, err := db.Exec("UPDATE task_schedules SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
+			if err != nil {
+				return err
+			}
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -253,48 +273,43 @@ func (r *ScheduleRepository) CreateFirstEntry(taskID, date string) error {
 // and deletes future + someday uncompleted entries for a task. Called when a
 // task is completed, canceled, or marked won't do.
 func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Mark past and today's uncompleted entries as completed
-	if _, err = tx.Exec(
-		"UPDATE task_schedules SET completed = 1 WHERE task_id = ? AND when_date <= ? AND when_date != 'someday' AND completed = 0",
-		taskID, today,
-	); err != nil {
-		return fmt.Errorf("complete past/today schedules: %w", err)
-	}
-
-	// Collect IDs of future/someday entries before deleting them (for change log)
-	rows, err := tx.Query(
-		"SELECT id FROM task_schedules WHERE task_id = ? AND (when_date > ? OR when_date = 'someday') AND completed = 0",
-		taskID, today,
-	)
-	if err != nil {
-		return fmt.Errorf("query future schedule ids: %w", err)
-	}
 	var deletedIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan future schedule id: %w", err)
+	if err := r.inTx(func(db DBTX) error {
+		// Mark past and today's uncompleted entries as completed
+		if _, err := db.Exec(
+			"UPDATE task_schedules SET completed = 1 WHERE task_id = ? AND when_date <= ? AND when_date != 'someday' AND completed = 0",
+			taskID, today,
+		); err != nil {
+			return fmt.Errorf("complete past/today schedules: %w", err)
 		}
-		deletedIDs = append(deletedIDs, id)
-	}
-	_ = rows.Close()
 
-	// Delete future (after today) and someday uncompleted entries
-	if _, err = tx.Exec(
-		"DELETE FROM task_schedules WHERE task_id = ? AND (when_date > ? OR when_date = 'someday') AND completed = 0",
-		taskID, today,
-	); err != nil {
-		return fmt.Errorf("delete future schedules: %w", err)
-	}
+		// Collect IDs of future/someday entries before deleting them (for change log)
+		rows, err := db.Query(
+			"SELECT id FROM task_schedules WHERE task_id = ? AND (when_date > ? OR when_date = 'someday') AND completed = 0",
+			taskID, today,
+		)
+		if err != nil {
+			return fmt.Errorf("query future schedule ids: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan future schedule id: %w", err)
+			}
+			deletedIDs = append(deletedIDs, id)
+		}
+		_ = rows.Close()
 
-	if err := tx.Commit(); err != nil {
+		// Delete future (after today) and someday uncompleted entries
+		if _, err := db.Exec(
+			"DELETE FROM task_schedules WHERE task_id = ? AND (when_date > ? OR when_date = 'someday') AND completed = 0",
+			taskID, today,
+		); err != nil {
+			return fmt.Errorf("delete future schedules: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 

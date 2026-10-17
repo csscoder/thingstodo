@@ -19,12 +19,32 @@ type ChangeLogEntry struct {
 
 // ChangeLogRepository provides access to the change_log table.
 type ChangeLogRepository struct {
-	db *sql.DB
+	db   DBTX
+	conn *sql.DB
+	tx   *sql.Tx
 }
 
 // NewChangeLogRepository creates a new ChangeLogRepository.
 func NewChangeLogRepository(db *sql.DB) *ChangeLogRepository {
-	return &ChangeLogRepository{db: db}
+	return &ChangeLogRepository{db: db, conn: db}
+}
+
+// WithTx returns a shallow copy of the repository bound to tx: its statements
+// reuse tx instead of the connection pool.
+func (r *ChangeLogRepository) WithTx(tx *sql.Tx) *ChangeLogRepository {
+	cp := *r
+	cp.db = tx
+	cp.tx = tx
+	return &cp
+}
+
+// inTx runs fn inside a single transaction: the bound one when the repository
+// is a WithTx copy, otherwise a new transaction owned by this call.
+func (r *ChangeLogRepository) inTx(fn func(db DBTX) error) error {
+	if r.tx != nil {
+		return fn(r.tx)
+	}
+	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
 }
 
 // AppendChange inserts a new entry into the change log and returns its seq.

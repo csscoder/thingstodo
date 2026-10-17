@@ -10,12 +10,36 @@ import (
 )
 
 type AreaRepository struct {
-	db        *sql.DB
+	db        DBTX
+	conn      *sql.DB
+	tx        *sql.Tx
 	changeLog *ChangeLogRepository
 }
 
 func NewAreaRepository(db *sql.DB, changeLog *ChangeLogRepository) *AreaRepository {
-	return &AreaRepository{db: db, changeLog: changeLog}
+	return &AreaRepository{db: db, conn: db, changeLog: changeLog}
+}
+
+// WithTx returns a shallow copy of the repository bound to tx: its statements
+// and nested inTx calls reuse tx instead of opening new transactions. It is
+// nil-safe for the change log.
+func (r *AreaRepository) WithTx(tx *sql.Tx) *AreaRepository {
+	cp := *r
+	cp.db = tx
+	cp.tx = tx
+	if cp.changeLog != nil {
+		cp.changeLog = cp.changeLog.WithTx(tx)
+	}
+	return &cp
+}
+
+// inTx runs fn inside a single transaction: the bound one when the repository
+// is a WithTx copy, otherwise a new transaction owned by this call.
+func (r *AreaRepository) inTx(fn func(db DBTX) error) error {
+	if r.tx != nil {
+		return fn(r.tx)
+	}
+	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
 }
 
 func (r *AreaRepository) List() ([]model.Area, error) {
@@ -204,19 +228,15 @@ func (r *AreaRepository) Delete(id string) error {
 }
 
 func (r *AreaRepository) Reorder(items []model.SimpleReorderItem) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, item := range items {
-		_, err := tx.Exec("UPDATE areas SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
-		if err != nil {
-			return err
+	if err := r.inTx(func(db DBTX) error {
+		for _, item := range items {
+			_, err := db.Exec("UPDATE areas SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
+			if err != nil {
+				return err
+			}
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -253,19 +273,15 @@ func (r *AreaRepository) DeleteWithTasks(id string) error {
 	}
 	_ = rows.Close()
 
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec("DELETE FROM tasks WHERE area_id = ? AND project_id IS NULL", id); err != nil {
-		return fmt.Errorf("delete area tasks: %w", err)
-	}
-	if _, err := tx.Exec("DELETE FROM areas WHERE id = ?", id); err != nil {
-		return fmt.Errorf("delete area: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
+	if err := r.inTx(func(db DBTX) error {
+		if _, err := db.Exec("DELETE FROM tasks WHERE area_id = ? AND project_id IS NULL", id); err != nil {
+			return fmt.Errorf("delete area tasks: %w", err)
+		}
+		if _, err := db.Exec("DELETE FROM areas WHERE id = ?", id); err != nil {
+			return fmt.Errorf("delete area: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 

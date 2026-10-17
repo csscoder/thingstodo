@@ -13,12 +13,36 @@ func isUniqueConstraintError(err error) bool {
 }
 
 type ProjectRepository struct {
-	db        *sql.DB
+	db        DBTX
+	conn      *sql.DB
+	tx        *sql.Tx
 	changeLog *ChangeLogRepository
 }
 
 func NewProjectRepository(db *sql.DB, changeLog *ChangeLogRepository) *ProjectRepository {
-	return &ProjectRepository{db: db, changeLog: changeLog}
+	return &ProjectRepository{db: db, conn: db, changeLog: changeLog}
+}
+
+// WithTx returns a shallow copy of the repository bound to tx: its statements
+// and nested inTx calls reuse tx instead of opening new transactions. It is
+// nil-safe for the change log.
+func (r *ProjectRepository) WithTx(tx *sql.Tx) *ProjectRepository {
+	cp := *r
+	cp.db = tx
+	cp.tx = tx
+	if cp.changeLog != nil {
+		cp.changeLog = cp.changeLog.WithTx(tx)
+	}
+	return &cp
+}
+
+// inTx runs fn inside a single transaction: the bound one when the repository
+// is a WithTx copy, otherwise a new transaction owned by this call.
+func (r *ProjectRepository) inTx(fn func(db DBTX) error) error {
+	if r.tx != nil {
+		return fn(r.tx)
+	}
+	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
 }
 
 func (r *ProjectRepository) List(areaID, status *string) ([]model.ProjectListItem, error) {
@@ -172,7 +196,7 @@ func (r *ProjectRepository) Create(input model.CreateProjectInput) (*model.Proje
 		return nil, fmt.Errorf("create project: %w", err)
 	}
 	if len(input.TagIDs) > 0 {
-		if err := setProjectTags(r.db, id, input.TagIDs); err != nil {
+		if err := r.setTags(id, input.TagIDs); err != nil {
 			return nil, fmt.Errorf("set project tags: %w", err)
 		}
 	}
@@ -224,7 +248,7 @@ func (r *ProjectRepository) Update(id string, input model.UpdateProjectInput) (*
 		}
 	}
 	if input.TagIDs != nil {
-		if err := setProjectTags(r.db, id, input.TagIDs); err != nil {
+		if err := r.setTags(id, input.TagIDs); err != nil {
 			return nil, fmt.Errorf("set project tags: %w", err)
 		}
 	}
@@ -264,19 +288,15 @@ func (r *ProjectRepository) DeleteWithTasks(id string) error {
 	}
 	_ = rows.Close()
 
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec("DELETE FROM tasks WHERE project_id = ?", id); err != nil {
-		return fmt.Errorf("delete project tasks: %w", err)
-	}
-	if _, err := tx.Exec("DELETE FROM projects WHERE id = ?", id); err != nil {
-		return fmt.Errorf("delete project: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
+	if err := r.inTx(func(db DBTX) error {
+		if _, err := db.Exec("DELETE FROM tasks WHERE project_id = ?", id); err != nil {
+			return fmt.Errorf("delete project tasks: %w", err)
+		}
+		if _, err := db.Exec("DELETE FROM projects WHERE id = ?", id); err != nil {
+			return fmt.Errorf("delete project: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -301,19 +321,15 @@ func (r *ProjectRepository) Complete(id string) (*model.ProjectDetail, error) {
 }
 
 func (r *ProjectRepository) Reorder(items []model.SimpleReorderItem) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, item := range items {
-		_, err := tx.Exec("UPDATE projects SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
-		if err != nil {
-			return err
+	if err := r.inTx(func(db DBTX) error {
+		for _, item := range items {
+			_, err := db.Exec("UPDATE projects SET sort_order = ? WHERE id = ?", item.SortOrder, item.ID)
+			if err != nil {
+				return err
+			}
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -330,7 +346,7 @@ func (r *ProjectRepository) Reorder(items []model.SimpleReorderItem) error {
 
 var validRefTables = map[string]bool{"projects": true, "areas": true, "headings": true}
 
-func getRef(db *sql.DB, table, id string) *model.Ref {
+func getRef(db DBTX, table, id string) *model.Ref {
 	if !validRefTables[table] {
 		return nil
 	}
@@ -342,7 +358,7 @@ func getRef(db *sql.DB, table, id string) *model.Ref {
 	return &ref
 }
 
-func getProjectTags(db *sql.DB, projectID string) []model.TagRef {
+func getProjectTags(db DBTX, projectID string) []model.TagRef {
 	rows, err := db.Query(
 		"SELECT t.id, t.title, t.color FROM tags t JOIN project_tags pt ON t.id = pt.tag_id WHERE pt.project_id = ? ORDER BY t.sort_order", projectID)
 	if err != nil {
@@ -361,27 +377,31 @@ func getProjectTags(db *sql.DB, projectID string) []model.TagRef {
 	return tags
 }
 
-func setProjectTags(db *sql.DB, projectID string, tagIDs []string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec("DELETE FROM project_tags WHERE project_id = ?", projectID); err != nil {
+// setProjectTags replaces the project's tag set using the given DBTX, which
+// may be the connection pool or an open transaction.
+func setProjectTags(db DBTX, projectID string, tagIDs []string) error {
+	if _, err := db.Exec("DELETE FROM project_tags WHERE project_id = ?", projectID); err != nil {
 		return fmt.Errorf("delete project tags: %w", err)
 	}
 	for _, tagID := range tagIDs {
-		if _, err := tx.Exec("INSERT OR IGNORE INTO project_tags (project_id, tag_id) VALUES (?, ?)", projectID, tagID); err != nil {
+		if _, err := db.Exec("INSERT OR IGNORE INTO project_tags (project_id, tag_id) VALUES (?, ?)", projectID, tagID); err != nil {
 			return fmt.Errorf("insert project tag: %w", err)
 		}
 	}
-	return tx.Commit()
+	return nil
+}
+
+// setTags runs setProjectTags inside a transaction: the bound one when the
+// repository is a WithTx copy, otherwise a new one.
+func (r *ProjectRepository) setTags(projectID string, tagIDs []string) error {
+	return r.inTx(func(db DBTX) error {
+		return setProjectTags(db, projectID, tagIDs)
+	})
 }
 
 var validFilterCols = map[string]bool{"heading_id": true, "project_id": true, "area_id": true}
 
-func getTaskListItems(db *sql.DB, filterCol, filterVal string) []model.TaskListItem {
+func getTaskListItems(db DBTX, filterCol, filterVal string) []model.TaskListItem {
 	if !validFilterCols[filterCol] {
 		return []model.TaskListItem{}
 	}
@@ -413,7 +433,7 @@ func getTaskListItems(db *sql.DB, filterCol, filterVal string) []model.TaskListI
 	return tasks
 }
 
-func getTaskListItemsNoHeading(db *sql.DB, projectID string) []model.TaskListItem {
+func getTaskListItemsNoHeading(db DBTX, projectID string) []model.TaskListItem {
 	rows, err := db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -442,7 +462,7 @@ func getTaskListItemsNoHeading(db *sql.DB, projectID string) []model.TaskListIte
 	return tasks
 }
 
-func scanTaskListItems(db *sql.DB, rows *sql.Rows) []model.TaskListItem {
+func scanTaskListItems(db DBTX, rows *sql.Rows) []model.TaskListItem {
 	var tasks []model.TaskListItem
 	for rows.Next() {
 		var t model.TaskListItem

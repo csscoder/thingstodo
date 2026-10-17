@@ -8,12 +8,36 @@ import (
 )
 
 type ReminderRepository struct {
-	db        *sql.DB
+	db        DBTX
+	conn      *sql.DB
+	tx        *sql.Tx
 	changeLog *ChangeLogRepository
 }
 
 func NewReminderRepository(db *sql.DB, changeLog *ChangeLogRepository) *ReminderRepository {
-	return &ReminderRepository{db: db, changeLog: changeLog}
+	return &ReminderRepository{db: db, conn: db, changeLog: changeLog}
+}
+
+// WithTx returns a shallow copy of the repository bound to tx: its statements
+// and nested inTx calls reuse tx instead of opening new transactions. It is
+// nil-safe for the change log.
+func (r *ReminderRepository) WithTx(tx *sql.Tx) *ReminderRepository {
+	cp := *r
+	cp.db = tx
+	cp.tx = tx
+	if cp.changeLog != nil {
+		cp.changeLog = cp.changeLog.WithTx(tx)
+	}
+	return &cp
+}
+
+// inTx runs fn inside a single transaction: the bound one when the repository
+// is a WithTx copy, otherwise a new transaction owned by this call.
+func (r *ReminderRepository) inTx(fn func(db DBTX) error) error {
+	if r.tx != nil {
+		return fn(r.tx)
+	}
+	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
 }
 
 func (r *ReminderRepository) ListByTask(taskID string) ([]model.Reminder, error) {

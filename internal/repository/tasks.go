@@ -10,12 +10,43 @@ import (
 )
 
 type TaskRepository struct {
-	db        *sql.DB
+	db        DBTX
+	conn      *sql.DB
+	tx        *sql.Tx
 	changeLog *ChangeLogRepository
 }
 
 func NewTaskRepository(db *sql.DB, changeLog *ChangeLogRepository) *TaskRepository {
-	return &TaskRepository{db: db, changeLog: changeLog}
+	return &TaskRepository{db: db, conn: db, changeLog: changeLog}
+}
+
+// Conn returns the underlying connection pool. Handlers that own a
+// transaction spanning several repositories start it with InTx(repo.Conn(), …).
+func (r *TaskRepository) Conn() *sql.DB {
+	return r.conn
+}
+
+// WithTx returns a shallow copy of the repository bound to tx: its statements
+// and nested inTx calls reuse tx instead of opening new transactions. It is
+// nil-safe for the change log.
+func (r *TaskRepository) WithTx(tx *sql.Tx) *TaskRepository {
+	cp := *r
+	cp.db = tx
+	cp.tx = tx
+	if cp.changeLog != nil {
+		cp.changeLog = cp.changeLog.WithTx(tx)
+	}
+	return &cp
+}
+
+// inTx runs fn inside a single transaction: the bound one when the repository
+// is a WithTx copy, otherwise a new transaction owned by this call. Nested
+// calls therefore never open a second transaction.
+func (r *TaskRepository) inTx(fn func(db DBTX) error) error {
+	if r.tx != nil {
+		return fn(r.tx)
+	}
+	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
 }
 
 func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error) {
@@ -186,37 +217,54 @@ func (r *TaskRepository) Create(input model.CreateTaskInput) (*model.TaskDetail,
 		id = model.NewID()
 	}
 
-	var maxSort float64
-	_ = r.db.QueryRow("SELECT COALESCE(MAX(sort_order_today), 0) FROM tasks").Scan(&maxSort)
+	var task *model.TaskDetail
+	err := r.inTx(func(db DBTX) error {
+		// inTx always passes the open *sql.Tx; br is this repository bound to
+		// it, so nested helper methods and change-log writes join the
+		// transaction instead of escaping to the pool.
+		br := r.WithTx(db.(*sql.Tx))
 
-	_, err := r.db.Exec(`
-		INSERT INTO tasks (id, title, notes, when_date, high_priority, deadline,
-			project_id, area_id, heading_id, sort_order_today, sort_order_project, sort_order_heading)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, input.Title, input.Notes, input.WhenDate,
-		boolToInt(input.HighPriority), input.Deadline, input.ProjectID, input.AreaID, input.HeadingID,
-		maxSort+1024, maxSort+1024, maxSort+1024,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create task: %w", err)
-	}
+		var maxSort float64
+		_ = db.QueryRow("SELECT COALESCE(MAX(sort_order_today), 0) FROM tasks").Scan(&maxSort)
 
-	if len(input.TagIDs) > 0 {
-		if err := r.setTaskTags(id, input.TagIDs); err != nil {
-			return nil, fmt.Errorf("set task tags: %w", err)
+		if _, err := db.Exec(`
+			INSERT INTO tasks (id, title, notes, when_date, high_priority, deadline,
+				project_id, area_id, heading_id, sort_order_today, sort_order_project, sort_order_heading)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, input.Title, input.Notes, input.WhenDate,
+			boolToInt(input.HighPriority), input.Deadline, input.ProjectID, input.AreaID, input.HeadingID,
+			maxSort+1024, maxSort+1024, maxSort+1024,
+		); err != nil {
+			return fmt.Errorf("create task: %w", err)
 		}
-	}
 
-	// Create first schedule entry if when_date is set
-	if input.WhenDate != nil {
-		_ = r.syncFirstScheduleDate(id, input.WhenDate)
-	}
+		if len(input.TagIDs) > 0 {
+			if err := br.setTaskTags(id, input.TagIDs); err != nil {
+				return fmt.Errorf("set task tags: %w", err)
+			}
+		}
 
-	task, err := r.GetByID(id)
-	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "create", nil, task, "", "")
+		// Create first schedule entry if when_date is set
+		if input.WhenDate != nil {
+			if err := br.syncFirstScheduleDate(id, input.WhenDate); err != nil {
+				return fmt.Errorf("sync first schedule date: %w", err)
+			}
+		}
+
+		t, err := br.GetByID(id)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			return fmt.Errorf("task %s not found after create", id)
+		}
+		task = t
+		return logChange(br.changeLog, "task", id, "create", nil, t, "", "")
+	})
+	if err != nil {
+		return nil, err
 	}
-	return task, err
+	return task, nil
 }
 
 func (r *TaskRepository) Update(id string, input model.UpdateTaskInput) (*model.TaskDetail, error) {
@@ -256,34 +304,45 @@ func (r *TaskRepository) Update(id string, input model.UpdateTaskInput) (*model.
 		args = append(args, input.HeadingID)
 	}
 
-	// Always bump updated_at when there are field changes,
-	// or when updated_at is explicitly requested (e.g. review task)
-	_, hasUpdatedAt := input.Raw["updated_at"]
-	if len(sets) > 0 || hasUpdatedAt {
-		sets = append(sets, "updated_at = datetime('now')")
-		args = append(args, id)
-		_, err := r.db.Exec(
-			"UPDATE tasks SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...)
+	var task *model.TaskDetail
+	err := r.inTx(func(db DBTX) error {
+		// inTx always passes the open *sql.Tx; br is this repository bound to
+		// it, so nested helper methods and change-log writes join the
+		// transaction instead of escaping to the pool.
+		br := r.WithTx(db.(*sql.Tx))
+
+		// Always bump updated_at when there are field changes,
+		// or when updated_at is explicitly requested (e.g. review task)
+		_, hasUpdatedAt := input.Raw["updated_at"]
+		if len(sets) > 0 || hasUpdatedAt {
+			sets = append(sets, "updated_at = datetime('now')")
+			args = append(args, id)
+			if _, err := db.Exec(
+				"UPDATE tasks SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...); err != nil {
+				return fmt.Errorf("update task: %w", err)
+			}
+		}
+
+		if input.TagIDs != nil {
+			if err := br.setTaskTags(id, input.TagIDs); err != nil {
+				return fmt.Errorf("set task tags: %w", err)
+			}
+		}
+
+		// Sync first schedule entry when when_date changes
+		if _, ok := input.Raw["when_date"]; ok {
+			if err := br.syncFirstScheduleDate(id, input.WhenDate); err != nil {
+				return err
+			}
+		}
+
+		t, err := br.GetByID(id)
 		if err != nil {
-			return nil, fmt.Errorf("update task: %w", err)
+			return err
 		}
-	}
-
-	if input.TagIDs != nil {
-		if err := r.setTaskTags(id, input.TagIDs); err != nil {
-			return nil, fmt.Errorf("set task tags: %w", err)
+		if t == nil {
+			return nil
 		}
-	}
-
-	// Sync first schedule entry when when_date changes
-	if _, ok := input.Raw["when_date"]; ok {
-		if err := r.syncFirstScheduleDate(id, input.WhenDate); err != nil {
-			return nil, err
-		}
-	}
-
-	task, err := r.GetByID(id)
-	if err == nil && task != nil {
 		var changedFields []string
 		for k := range input.Raw {
 			changedFields = append(changedFields, k)
@@ -291,9 +350,13 @@ func (r *TaskRepository) Update(id string, input model.UpdateTaskInput) (*model.
 		if input.TagIDs != nil {
 			changedFields = append(changedFields, "tag_ids")
 		}
-		logChange(r.changeLog, "task", id, "update", changedFields, task, "", "")
+		task = t
+		return logChange(br.changeLog, "task", id, "update", changedFields, t, "", "")
+	})
+	if err != nil {
+		return nil, err
 	}
-	return task, err
+	return task, nil
 }
 
 func (r *TaskRepository) Move(id string, input model.MoveTaskInput) (*model.TaskDetail, error) {
@@ -426,23 +489,19 @@ func (r *TaskRepository) MarkReviewed(id string) (*model.TaskDetail, error) {
 }
 
 func (r *TaskRepository) Reorder(items []model.ReorderItem) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, item := range items {
-		field := item.SortField
-		if field != "sort_order_today" && field != "sort_order_project" && field != "sort_order_heading" {
-			return fmt.Errorf("invalid sort field: %s", field)
+	if err := r.inTx(func(db DBTX) error {
+		for _, item := range items {
+			field := item.SortField
+			if field != "sort_order_today" && field != "sort_order_project" && field != "sort_order_heading" {
+				return fmt.Errorf("invalid sort field: %s", field)
+			}
+			_, err := db.Exec("UPDATE tasks SET "+field+" = ? WHERE id = ?", item.SortOrder, item.ID)
+			if err != nil {
+				return err
+			}
 		}
-		_, err := tx.Exec("UPDATE tasks SET "+field+" = ? WHERE id = ?", item.SortOrder, item.ID)
-		if err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -457,114 +516,110 @@ func (r *TaskRepository) Reorder(items []model.ReorderItem) error {
 }
 
 func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	affected := 0
-	now := "datetime('now')"
+	err := r.inTx(func(db DBTX) error {
+		now := "datetime('now')"
 
-	for _, id := range input.TaskIDs {
-		var execErr error
-		switch input.Action {
-		case "complete":
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET status = 'completed', completed_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
-		case "cancel":
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET status = 'canceled', canceled_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
-		case "wontdo":
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET status = 'wont_do', updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
-		case "delete":
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET deleted_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
-		case "set_when":
-			whenDate, _ := input.Params["when_date"].(string)
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET when_date = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
-				bulkNilIfEmpty(whenDate), id)
-		case "set_deadline":
-			deadline, _ := input.Params["deadline"].(string)
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET deadline = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
-				bulkNilIfEmpty(deadline), id)
-		case "set_priority":
-			priority, _ := input.Params["priority"].(float64)
-			p := int(priority)
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET high_priority = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", p, id)
-		case "toggle_priority":
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET high_priority = CASE WHEN high_priority = 1 THEN 0 ELSE 1 END, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
-		case "move_project":
-			projectID, _ := input.Params["project_id"].(string)
-			areaID, _ := input.Params["area_id"].(string)
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET project_id = ?, area_id = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
-				bulkNilIfEmpty(projectID), bulkNilIfEmpty(areaID), id)
-		case "add_tags":
-			tagIDs, ok := input.Params["tag_ids"].([]interface{})
-			if ok {
-				for _, rawTagID := range tagIDs {
-					tagID, _ := rawTagID.(string)
-					if tagID != "" {
-						_, execErr = tx.Exec(
-							"INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
-						if execErr != nil {
-							break
+		for _, id := range input.TaskIDs {
+			var execErr error
+			switch input.Action {
+			case "complete":
+				_, execErr = db.Exec(
+					"UPDATE tasks SET status = 'completed', completed_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
+			case "cancel":
+				_, execErr = db.Exec(
+					"UPDATE tasks SET status = 'canceled', canceled_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
+			case "wontdo":
+				_, execErr = db.Exec(
+					"UPDATE tasks SET status = 'wont_do', updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
+			case "delete":
+				_, execErr = db.Exec(
+					"UPDATE tasks SET deleted_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
+			case "set_when":
+				whenDate, _ := input.Params["when_date"].(string)
+				_, execErr = db.Exec(
+					"UPDATE tasks SET when_date = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
+					bulkNilIfEmpty(whenDate), id)
+			case "set_deadline":
+				deadline, _ := input.Params["deadline"].(string)
+				_, execErr = db.Exec(
+					"UPDATE tasks SET deadline = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
+					bulkNilIfEmpty(deadline), id)
+			case "set_priority":
+				priority, _ := input.Params["priority"].(float64)
+				p := int(priority)
+				_, execErr = db.Exec(
+					"UPDATE tasks SET high_priority = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", p, id)
+			case "toggle_priority":
+				_, execErr = db.Exec(
+					"UPDATE tasks SET high_priority = CASE WHEN high_priority = 1 THEN 0 ELSE 1 END, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
+			case "move_project":
+				projectID, _ := input.Params["project_id"].(string)
+				areaID, _ := input.Params["area_id"].(string)
+				_, execErr = db.Exec(
+					"UPDATE tasks SET project_id = ?, area_id = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
+					bulkNilIfEmpty(projectID), bulkNilIfEmpty(areaID), id)
+			case "add_tags":
+				tagIDs, ok := input.Params["tag_ids"].([]interface{})
+				if ok {
+					for _, rawTagID := range tagIDs {
+						tagID, _ := rawTagID.(string)
+						if tagID != "" {
+							_, execErr = db.Exec(
+								"INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
+							if execErr != nil {
+								break
+							}
 						}
 					}
 				}
-			}
-		case "remove_tags":
-			tagIDs, ok := input.Params["tag_ids"].([]interface{})
-			if ok {
-				for _, rawTagID := range tagIDs {
-					tagID, _ := rawTagID.(string)
-					if tagID != "" {
-						_, execErr = tx.Exec(
-							"DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
-						if execErr != nil {
-							break
+			case "remove_tags":
+				tagIDs, ok := input.Params["tag_ids"].([]interface{})
+				if ok {
+					for _, rawTagID := range tagIDs {
+						tagID, _ := rawTagID.(string)
+						if tagID != "" {
+							_, execErr = db.Exec(
+								"DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
+							if execErr != nil {
+								break
+							}
 						}
 					}
 				}
-			}
-		case "toggle_tags":
-			tagIDs, ok := input.Params["tag_ids"].([]interface{})
-			if ok {
-				for _, rawTagID := range tagIDs {
-					tagID, _ := rawTagID.(string)
-					if tagID != "" {
-						var exists int
-						_ = tx.QueryRow("SELECT COUNT(*) FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID).Scan(&exists)
-						if exists > 0 {
-							_, execErr = tx.Exec("DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
-						} else {
-							_, execErr = tx.Exec("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
-						}
-						if execErr != nil {
-							break
+			case "toggle_tags":
+				tagIDs, ok := input.Params["tag_ids"].([]interface{})
+				if ok {
+					for _, rawTagID := range tagIDs {
+						tagID, _ := rawTagID.(string)
+						if tagID != "" {
+							var exists int
+							_ = db.QueryRow("SELECT COUNT(*) FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID).Scan(&exists)
+							if exists > 0 {
+								_, execErr = db.Exec("DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
+							} else {
+								_, execErr = db.Exec("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
+							}
+							if execErr != nil {
+								break
+							}
 						}
 					}
 				}
+			case "mark_reviewed":
+				_, execErr = db.Exec(
+					"UPDATE tasks SET updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL AND status = 'open'", id)
+			default:
+				return fmt.Errorf("unknown bulk action: %s", input.Action)
 			}
-		case "mark_reviewed":
-			_, execErr = tx.Exec(
-				"UPDATE tasks SET updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL AND status = 'open'", id)
-		default:
-			return 0, fmt.Errorf("unknown bulk action: %s", input.Action)
+			if execErr != nil {
+				return execErr
+			}
+			affected++
 		}
-		if execErr != nil {
-			return 0, execErr
-		}
-		affected++
-	}
-
-	if err := tx.Commit(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return 0, err
 	}
 
@@ -617,21 +672,17 @@ func (r *TaskRepository) getTaskTags(taskID string) ([]model.TagRef, error) {
 }
 
 func (r *TaskRepository) setTaskTags(taskID string, tagIDs []string) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec("DELETE FROM task_tags WHERE task_id = ?", taskID); err != nil {
-		return fmt.Errorf("delete task tags: %w", err)
-	}
-	for _, tagID := range tagIDs {
-		if _, err := tx.Exec("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", taskID, tagID); err != nil {
-			return fmt.Errorf("insert task tag: %w", err)
+	return r.inTx(func(db DBTX) error {
+		if _, err := db.Exec("DELETE FROM task_tags WHERE task_id = ?", taskID); err != nil {
+			return fmt.Errorf("delete task tags: %w", err)
 		}
-	}
-	return tx.Commit()
+		for _, tagID := range tagIDs {
+			if _, err := db.Exec("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", taskID, tagID); err != nil {
+				return fmt.Errorf("insert task tag: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func (r *TaskRepository) getChecklist(taskID string) ([]model.ChecklistItem, error) {

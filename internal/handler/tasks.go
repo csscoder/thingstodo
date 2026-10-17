@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -99,25 +101,43 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "deadline cannot be before the when date", "VALIDATION")
 		return
 	}
-	task, err := h.repo.Create(input)
+	// Read the settings before opening the transaction: GetOrCreate may write
+	// on its own connection, which would contend with the transaction below.
+	userID, _ := r.Context().Value(mw.UserIDKey).(string)
+	settings, settingsErr := h.settingsRepo.GetOrCreate(userID)
+	var defaultReminder *model.CreateReminderInput
+	if settingsErr == nil && settings != nil && settings.DefaultReminderType != nil {
+		defaultReminder = &model.CreateReminderInput{
+			Type:  model.ReminderType(*settings.DefaultReminderType),
+			Value: settings.DefaultReminderValue,
+		}
+	}
+
+	// The handler owns the transaction so the task and its default reminder
+	// commit or roll back together. The WithTx-bound repositories reuse tx
+	// through inTx; a reminder error rolls the task back and surfaces as 500.
+	var task *model.TaskDetail
+	err := repository.InTx(h.repo.Conn(), func(tx *sql.Tx) error {
+		var err error
+		task, err = h.repo.WithTx(tx).Create(input)
+		if err != nil {
+			return err
+		}
+		if defaultReminder != nil {
+			if _, err := h.reminderRepo.WithTx(tx).Create(task.ID, *defaultReminder); err != nil {
+				return fmt.Errorf("create default reminder: %w", err)
+			}
+			// Re-fetch to include the new reminder in the response
+			task, err = h.repo.WithTx(tx).GetByID(task.ID)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
-	}
-
-	// Auto-apply default reminder if configured
-	userID, _ := r.Context().Value(mw.UserIDKey).(string)
-	if settings, err := h.settingsRepo.GetOrCreate(userID); err == nil && settings.DefaultReminderType != nil {
-		_, err := h.reminderRepo.Create(task.ID, model.CreateReminderInput{
-			Type:  model.ReminderType(*settings.DefaultReminderType),
-			Value: settings.DefaultReminderValue,
-		})
-		if err != nil {
-			log.Printf("warning: failed to create default reminder for task %s: %v", task.ID, err)
-		} else {
-			// Re-fetch to include the new reminder in the response
-			task, _ = h.repo.GetByID(task.ID)
-		}
 	}
 
 	h.broker.BroadcastJSON("task_created", map[string]interface{}{"id": task.ID, "task": task})

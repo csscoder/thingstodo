@@ -919,7 +919,7 @@ func ParseIntDefault(s string, def int) int {
 // entries (will be auto-completed) or future/someday entries (will be deleted).
 // If the only uncompleted entries are for today, no flag is set because
 // completing today's entry is the normal expected behavior.
-func populateActionableScheduleFlags(db *sql.DB, tasks []model.TaskListItem) {
+func populateActionableScheduleFlags(db DBTX, tasks []model.TaskListItem) {
 	if len(tasks) == 0 {
 		return
 	}
@@ -940,7 +940,7 @@ func populateActionableScheduleFlags(db *sql.DB, tasks []model.TaskListItem) {
 
 // populateAllSchedulesCompleted sets AllTodaySchedulesCompleted on each
 // task that has schedule entries and ALL of them are completed.
-func populateAllSchedulesCompleted(db *sql.DB, tasks []model.TaskListItem) {
+func populateAllSchedulesCompleted(db DBTX, tasks []model.TaskListItem) {
 	if len(tasks) == 0 {
 		return
 	}
@@ -959,7 +959,7 @@ func populateAllSchedulesCompleted(db *sql.DB, tasks []model.TaskListItem) {
 // populateFirstScheduleCompleted sets FirstScheduleCompleted on each task
 // whose displayed schedule entry is completed. Uses ScheduleEntryID if present
 // (Today view), otherwise checks the first schedule by sort_order.
-func populateFirstScheduleCompleted(db *sql.DB, tasks []model.TaskListItem) {
+func populateFirstScheduleCompleted(db DBTX, tasks []model.TaskListItem) {
 	if len(tasks) == 0 {
 		return
 	}
