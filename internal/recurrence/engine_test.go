@@ -2,6 +2,7 @@ package recurrence
 
 import (
 	"testing"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
 )
@@ -201,10 +202,10 @@ func TestEngine(t *testing.T) {
 			expected: "2027-06-01",
 		},
 		{
-			name:     "yearly Feb 29 on non-leap year → next leap year",
+			name:     "yearly Feb 29 on non-leap year → clamped to Feb 28",
 			from:     "2024-02-29",
 			pattern:  model.RecurrencePattern{Type: model.PatternYearlyDate, Every: 1, Mode: "fixed", Month: 2, Day: intPtr(29)},
-			expected: "2028-02-29", // 2025, 2026, 2027 are not leap years
+			expected: "2025-02-28", // 2025 is not a leap year; Feb 29 clamps to Feb 28
 		},
 
 		// --- Yearly DOW ---
@@ -268,5 +269,159 @@ func TestNthWeekdayClamp(t *testing.T) {
 	result := nthWeekdayInMonth(2025, 2, "fourth", 1) // 1 = Monday
 	if result.Day() != 24 {
 		t.Errorf("4th Monday of Feb 2025: got day %d, want 24", result.Day())
+	}
+}
+
+func TestMonthlyDOM_FromJan31(t *testing.T) {
+	// from.AddDate(0, every, 0) from Jan 31 lands in March, skipping February.
+	engine := NewEngine()
+
+	tests := []struct {
+		name     string
+		from     string
+		expected string
+	}{
+		{"day 31 from Jan 31 → Feb 28", "2026-01-31", "2026-02-28"},
+		{"day 31 from Jan 31 leap year → Feb 29", "2028-01-31", "2028-02-29"},
+		{"day 31 from Feb 28 → Mar 31", "2026-02-28", "2026-03-31"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := engine.Next(tt.from, model.RecurrencePattern{
+				Type:  model.PatternMonthlyDOM,
+				Every: 1,
+				Mode:  "fixed",
+				Day:   intPtr(31),
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("got %s, want %s", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMonthlyDOW_FromJan31(t *testing.T) {
+	// from.AddDate(0, every, 0) from Jan 31 lands in March, skipping February.
+	engine := NewEngine()
+
+	result, err := engine.Next("2026-01-31", model.RecurrencePattern{
+		Type:    model.PatternMonthlyDOW,
+		Every:   1,
+		Mode:    "fixed",
+		Ordinal: "first",
+		Weekday: "monday",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, err := time.Parse("2006-01-02", result)
+	if err != nil {
+		t.Fatalf("unparseable result %q: %v", result, err)
+	}
+	if got.Year() != 2026 || got.Month() != time.February {
+		t.Errorf("got %s, want a date in February 2026", result)
+	}
+}
+
+func TestMonthlyWorkday_FromJan31(t *testing.T) {
+	// from.AddDate(0, every, 0) from Jan 31 lands in March, skipping February.
+	engine := NewEngine()
+
+	result, err := engine.Next("2026-01-31", model.RecurrencePattern{
+		Type:            model.PatternMonthlyWorkday,
+		Every:           1,
+		Mode:            "fixed",
+		WorkdayPosition: "first",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, err := time.Parse("2006-01-02", result)
+	if err != nil {
+		t.Fatalf("unparseable result %q: %v", result, err)
+	}
+	if got.Year() != 2026 || got.Month() != time.February {
+		t.Errorf("got %s, want a date in February 2026", result)
+	}
+}
+
+func TestYearlyFeb29_EveryOne(t *testing.T) {
+	engine := NewEngine()
+
+	result, err := engine.Next("2027-03-01", model.RecurrencePattern{
+		Type:  model.PatternYearlyDate,
+		Every: 1,
+		Mode:  "fixed",
+		Month: 2,
+		Day:   intPtr(29),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "2028-02-29" {
+		t.Errorf("got %s, want 2028-02-29", result)
+	}
+}
+
+func TestFirstOnOrAfter_Feb29NonLeap(t *testing.T) {
+	// In a non-leap year, Feb 29 clamps to Feb 28 of the current year, but only
+	// when the input is on or before Feb 28; a later input moves to the next
+	// occurrence. FirstOnOrAfter never returns a date before its input.
+	engine := NewEngine()
+
+	tests := []struct {
+		name     string
+		from     string
+		expected string
+	}{
+		{"before Feb 28 → clamped Feb 28 this year", "2026-02-10", "2026-02-28"},
+		{"on Feb 28 → Feb 28 this year", "2026-02-28", "2026-02-28"},
+		{"after Feb 28 → Feb 28 next year", "2026-03-01", "2027-02-28"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := engine.FirstOnOrAfter(tt.from, model.RecurrencePattern{
+				Type:  model.PatternYearlyDate,
+				Every: 1,
+				Mode:  "fixed",
+				Month: 2,
+				Day:   intPtr(29),
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("got %s, want %s", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestYearlyFeb29_EveryFour(t *testing.T) {
+	// With every=4 from 2030, the old leap-seeking loop never reaches a leap
+	// year (2034, 2038, ... are all ≡ 2 mod 4) and Next never returns.
+	// Guard: fail the test if it does not return within 1 s.
+	engine := NewEngine()
+
+	timer := time.AfterFunc(time.Second, func() {
+		panic("TestYearlyFeb29_EveryFour: Next did not return within 1s (infinite loop)")
+	})
+	defer timer.Stop()
+
+	result, err := engine.Next("2030-02-28", model.RecurrencePattern{
+		Type:  model.PatternYearlyDate,
+		Every: 4,
+		Mode:  "fixed",
+		Month: 2,
+		Day:   intPtr(29),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "2034-02-28" {
+		t.Errorf("got %s, want 2034-02-28", result)
 	}
 }

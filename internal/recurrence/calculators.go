@@ -22,10 +22,6 @@ func daysInMonth(year int, month time.Month) int {
 	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
 
-func isLeapYear(year int) bool {
-	return year%4 == 0 && (year%100 != 0 || year%400 == 0)
-}
-
 var weekdayMap = map[string]time.Weekday{
 	"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
 	"wednesday": time.Wednesday, "thursday": time.Thursday, "friday": time.Friday,
@@ -255,7 +251,9 @@ func (MonthlyDOMCalculator) Next(from time.Time, p model.RecurrencePattern) (tim
 		every = 1
 	}
 
-	targetMonth := from.AddDate(0, every, 0)
+	// Normalize to the first day of the target month: AddDate from a month-end
+	// date overflows into the month after the target (Jan 31 + 1 month = Mar 3).
+	targetMonth := time.Date(from.Year(), from.Month()+time.Month(every), 1, 0, 0, 0, 0, time.UTC)
 	year, month := targetMonth.Year(), targetMonth.Month()
 
 	if p.Day == nil {
@@ -319,7 +317,9 @@ func (MonthlyDOWCalculator) Next(from time.Time, p model.RecurrencePattern) (tim
 		ordinal = "first"
 	}
 
-	targetMonth := from.AddDate(0, every, 0)
+	// Normalize to the first day of the target month: AddDate from a month-end
+	// date overflows into the month after the target (Jan 31 + 1 month = Mar 3).
+	targetMonth := time.Date(from.Year(), from.Month()+time.Month(every), 1, 0, 0, 0, 0, time.UTC)
 	year, month := targetMonth.Year(), targetMonth.Month()
 	return nthWeekdayInMonth(year, month, ordinal, wd), nil
 }
@@ -345,7 +345,9 @@ func (MonthlyWorkdayCalculator) Next(from time.Time, p model.RecurrencePattern) 
 		every = 1
 	}
 
-	targetMonth := from.AddDate(0, every, 0)
+	// Normalize to the first day of the target month: AddDate from a month-end
+	// date overflows into the month after the target (Jan 31 + 1 month = Mar 3).
+	targetMonth := time.Date(from.Year(), from.Month()+time.Month(every), 1, 0, 0, 0, 0, time.UTC)
 	year, month := targetMonth.Year(), targetMonth.Month()
 
 	switch p.WorkdayPosition {
@@ -407,14 +409,9 @@ func (YearlyDateCalculator) Next(from time.Time, p model.RecurrencePattern) (tim
 		day = *p.Day
 	}
 
-	// Handle Feb 29: if target year is not a leap year, clamp
-	if month == time.February && day == 29 && !isLeapYear(year) {
-		// Find next leap year
-		for !isLeapYear(year) {
-			year += every
-		}
-	}
-
+	// clampToLastDay handles Feb 29 in non-leap years (→ Feb 28). Seeking the
+	// next leap year instead never terminates when `every` cannot reach one
+	// (e.g. every 4 from 2030).
 	return clampToLastDay(year, month, day), nil
 }
 
@@ -428,9 +425,7 @@ func (YearlyDateCalculator) CurrentPeriod(from time.Time, p model.RecurrencePatt
 	if p.Day != nil && *p.Day > 0 {
 		day = *p.Day
 	}
-	if month == time.February && day == 29 && !isLeapYear(year) {
-		return time.Time{}, fmt.Errorf("no Feb 29 this year")
-	}
+	// clampToLastDay handles Feb 29 in non-leap years (→ Feb 28).
 	return clampToLastDay(year, month, day), nil
 }
 
