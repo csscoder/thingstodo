@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
+	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
 	"github.com/collinjanssen/thingstodo/internal/sse"
 	"github.com/collinjanssen/thingstodo/internal/testutil"
@@ -179,4 +180,160 @@ func TestProjectUpdate_RejectsUnknownStatus(t *testing.T) {
 	testutil.AssertStatus(t, resp, http.StatusBadRequest)
 	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
 	testutil.AssertJSONField(t, resp, "field", "status")
+}
+
+// setupProjectTrashRouter wires areas, projects, task create/restore and the
+// trash view to one database and change log, for the delete-to-trash tests.
+func setupProjectTrashRouter(t *testing.T) (*testutil.TestClient, *sql.DB, *repository.TaskRepository) {
+	t.Helper()
+	db := testutil.SetupTestDB(t)
+	broker := sse.NewBroker()
+	changeLogRepo := repository.NewChangeLogRepository(db)
+	projRepo := repository.NewProjectRepository(db, changeLogRepo)
+	projHandler := handler.NewProjectHandler(projRepo, broker)
+	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
+	areaHandler := handler.NewAreaHandler(areaRepo, broker)
+	taskRepo := repository.NewTaskRepository(db, changeLogRepo)
+	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
+	settingsRepo := repository.NewUserSettingsRepository(db)
+	taskHandler := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
+	viewHandler := handler.NewViewHandler(repository.NewViewRepository(db), settingsRepo)
+
+	r := chi.NewRouter()
+	r.Route("/api/areas", func(r chi.Router) {
+		r.Post("/", areaHandler.Create)
+	})
+	r.Route("/api/projects", func(r chi.Router) {
+		r.Post("/", projHandler.Create)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Get("/", projHandler.Get)
+			r.Delete("/", projHandler.Delete)
+		})
+	})
+	r.Route("/api/tasks", func(r chi.Router) {
+		r.Post("/", taskHandler.Create)
+		r.Patch("/{id}/restore", taskHandler.Restore)
+	})
+	r.Get("/api/views/trash", viewHandler.Trash)
+
+	return testutil.NewTestClient(t, r), db, taskRepo
+}
+
+// countChangeLogEntries counts change_log rows for one entity/action.
+func countChangeLogEntries(t *testing.T, db *sql.DB, entity, entityID, action string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM change_log WHERE entity = ? AND entity_id = ? AND action = ?",
+		entity, entityID, action,
+	).Scan(&n); err != nil {
+		t.Fatalf("count change_log entries: %v", err)
+	}
+	return n
+}
+
+// trashViewTasks reads GET /api/views/trash and maps each listed task id to
+// its JSON object.
+func trashViewTasks(t *testing.T, client *testutil.TestClient) map[string]map[string]interface{} {
+	t.Helper()
+	resp := client.Get("/api/views/trash")
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var view struct {
+		Groups []struct {
+			Tasks []map[string]interface{} `json:"tasks"`
+		} `json:"groups"`
+	}
+	resp.JSON(t, &view)
+	tasks := make(map[string]map[string]interface{})
+	for _, g := range view.Groups {
+		for _, task := range g.Tasks {
+			id, _ := task["id"].(string)
+			tasks[id] = task
+		}
+	}
+	return tasks
+}
+
+func TestDeleteProject_TasksGoToTrash(t *testing.T) {
+	client, db, taskRepo := setupProjectTrashRouter(t)
+	areaID := createTestArea(t, client)
+
+	createResp := client.Post("/api/projects", map[string]string{"title": "Doomed", "area_id": areaID})
+	var created map[string]interface{}
+	createResp.JSON(t, &created)
+	projectID := created["id"].(string)
+
+	taskA, err := taskRepo.Create(model.CreateTaskInput{Title: "Child A", ProjectID: &projectID})
+	if err != nil {
+		t.Fatalf("create child task A: %v", err)
+	}
+	taskB, err := taskRepo.Create(model.CreateTaskInput{Title: "Child B", ProjectID: &projectID, AreaID: &areaID})
+	if err != nil {
+		t.Fatalf("create child task B: %v", err)
+	}
+
+	resp := client.Delete("/api/projects/" + projectID)
+	testutil.AssertStatus(t, resp, http.StatusNoContent)
+
+	trashed := trashViewTasks(t, client)
+	for _, task := range []*model.TaskDetail{taskA, taskB} {
+		row, ok := trashed[task.ID]
+		if !ok {
+			t.Errorf("task %s (%q) not listed in trash view", task.ID, task.Title)
+			continue
+		}
+		if pid, present := row["project_id"]; present && pid != nil {
+			t.Errorf("trashed task %s still has project_id %v", task.ID, pid)
+		}
+		if aid, present := row["area_id"]; present && aid != nil {
+			t.Errorf("trashed task %s still has area_id %v", task.ID, aid)
+		}
+		if n := countChangeLogEntries(t, db, "task", task.ID, "delete"); n != 1 {
+			t.Errorf("expected 1 task delete change for %s, got %d", task.ID, n)
+		}
+	}
+	if n := countChangeLogEntries(t, db, "project", projectID, "delete"); n != 1 {
+		t.Errorf("expected 1 project delete change, got %d", n)
+	}
+}
+
+func TestRestoreTrashedProjectTask_IsLoose(t *testing.T) {
+	client, db, taskRepo := setupProjectTrashRouter(t)
+	areaID := createTestArea(t, client)
+
+	createResp := client.Post("/api/projects", map[string]string{"title": "Vanishing", "area_id": areaID})
+	var created map[string]interface{}
+	createResp.JSON(t, &created)
+	projectID := created["id"].(string)
+
+	task, err := taskRepo.Create(model.CreateTaskInput{Title: "Loose after restore", ProjectID: &projectID, AreaID: &areaID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	delResp := client.Delete("/api/projects/" + projectID)
+	testutil.AssertStatus(t, delResp, http.StatusNoContent)
+
+	restoreResp := client.Patch("/api/tasks/"+task.ID+"/restore", nil)
+	testutil.AssertStatus(t, restoreResp, http.StatusOK)
+
+	var restored map[string]interface{}
+	restoreResp.JSON(t, &restored)
+	if restored["status"] != "open" {
+		t.Errorf("expected restored task status open, got %v", restored["status"])
+	}
+	if pid, ok := restored["project_id"]; !ok || pid != nil {
+		t.Errorf("expected restored task without project, got %v", pid)
+	}
+	if aid, ok := restored["area_id"]; !ok || aid != nil {
+		t.Errorf("expected restored task without area, got %v", aid)
+	}
+
+	var deletedAt sql.NullString
+	if err := db.QueryRow("SELECT deleted_at FROM tasks WHERE id = ?", task.ID).Scan(&deletedAt); err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	if deletedAt.Valid {
+		t.Errorf("restored task still has deleted_at %q", deletedAt.String)
+	}
 }

@@ -219,8 +219,6 @@ func (r *AreaRepository) Update(id string, input model.UpdateAreaInput) (*model.
 	return &a, err
 }
 
-var ErrAreaHasProjects = fmt.Errorf("area still has projects")
-
 func (r *AreaRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM areas WHERE id = ?", id)
 	if err == nil {
@@ -253,43 +251,81 @@ func (r *AreaRepository) Reorder(items []model.SimpleReorderItem) error {
 	return nil
 }
 
-func (r *AreaRepository) DeleteWithTasks(id string) error {
-	var count int
-	if err := r.db.QueryRow("SELECT COUNT(*) FROM projects WHERE area_id = ?", id).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return ErrAreaHasProjects
-	}
+// DeleteToTrash deletes the area once it holds no projects, and sends its
+// standalone tasks (no project) to the Trash instead of destroying them:
+// each gets deleted_at set and area_id cleared, status untouched, so
+// restoring one yields a loose task. Standalone tasks already in the trash
+// only have area_id cleared. The guard and the writes run in one
+// transaction, with a task change logged per trashed task and an area
+// change for the deletion itself.
+func (r *AreaRepository) DeleteToTrash(id string) error {
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	run := func(tx *sql.Tx) error {
+		cl := r.WithTx(tx).changeLog // change log bound to the transaction
 
-	// Collect task IDs before deleting so we can log each deletion
-	rows, err := r.db.Query("SELECT id FROM tasks WHERE area_id = ? AND project_id IS NULL", id)
-	if err != nil {
-		return fmt.Errorf("collect task IDs: %w", err)
-	}
-	var taskIDs []string
-	for rows.Next() {
-		var tid string
-		_ = rows.Scan(&tid)
-		taskIDs = append(taskIDs, tid)
-	}
-	_ = rows.Close()
-
-	if err := r.inTx(func(db DBTX) error {
-		if _, err := db.Exec("DELETE FROM tasks WHERE area_id = ? AND project_id IS NULL", id); err != nil {
-			return fmt.Errorf("delete area tasks: %w", err)
+		var count int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM projects WHERE area_id = ?", id).Scan(&count); err != nil {
+			return fmt.Errorf("count area projects: %w", err)
 		}
-		if _, err := db.Exec("DELETE FROM areas WHERE id = ?", id); err != nil {
+		if count > 0 {
+			return ErrHasProjects
+		}
+
+		rows, err := tx.Query(
+			"SELECT id, title, status FROM tasks WHERE area_id = ? AND project_id IS NULL AND deleted_at IS NULL", id)
+		if err != nil {
+			return fmt.Errorf("collect area tasks: %w", err)
+		}
+		type childTask struct {
+			id, title, status string
+		}
+		var children []childTask
+		for rows.Next() {
+			var c childTask
+			if err := rows.Scan(&c.id, &c.title, &c.status); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan area task: %w", err)
+			}
+			children = append(children, c)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		for _, c := range children {
+			if _, err := tx.Exec(
+				"UPDATE tasks SET deleted_at = ?, updated_at = ?, area_id = NULL WHERE id = ?",
+				now, now, c.id,
+			); err != nil {
+				return fmt.Errorf("trash area task %s: %w", c.id, err)
+			}
+			snapshot := map[string]interface{}{
+				"id": c.id, "title": c.title, "status": c.status, "deleted_at": now,
+				"area_id": nil,
+			}
+			if err := logChange(cl, "task", c.id, "delete", nil, snapshot, "", ""); err != nil {
+				return fmt.Errorf("log trashed task %s: %w", c.id, err)
+			}
+		}
+
+		// Standalone tasks already in the trash keep their trash date; only
+		// clear the area reference that is about to dangle.
+		if _, err := tx.Exec(
+			"UPDATE tasks SET area_id = NULL WHERE area_id = ? AND project_id IS NULL", id,
+		); err != nil {
+			return fmt.Errorf("detach trashed area tasks: %w", err)
+		}
+
+		if _, err := tx.Exec("DELETE FROM areas WHERE id = ?", id); err != nil {
 			return fmt.Errorf("delete area: %w", err)
 		}
-		return nil
-	}); err != nil {
-		return err
+		return logChange(cl, "area", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
-
-	for _, tid := range taskIDs {
-		logChange(r.changeLog, "task", tid, "delete", nil, map[string]string{"id": tid}, "", "")
+	if r.tx != nil {
+		return run(r.tx)
 	}
-	logChange(r.changeLog, "area", id, "delete", nil, map[string]string{"id": id}, "", "")
-	return nil
+	return InTx(r.conn, run)
 }

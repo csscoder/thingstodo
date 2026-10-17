@@ -987,3 +987,131 @@ func TestSyncPush_CompleteRecurringSpawnsOnce(t *testing.T) {
 		t.Errorf("expected original + one instance after two push batches, got %d tasks", instances)
 	}
 }
+
+func TestSyncDeleteProject_TasksGoToTrash(t *testing.T) {
+	client, changeLogRepo, taskRepo, db := setupSyncRouterWithDB(t)
+
+	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
+	projRepo := repository.NewProjectRepository(db, changeLogRepo)
+	area, err := areaRepo.Create(model.CreateAreaInput{Title: "Sync area"})
+	if err != nil {
+		t.Fatalf("create area: %v", err)
+	}
+	project, err := projRepo.Create(model.CreateProjectInput{Title: "Sync project", AreaID: &area.ID})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	taskA, err := taskRepo.Create(model.CreateTaskInput{Title: "Sync child A", ProjectID: &project.ID})
+	if err != nil {
+		t.Fatalf("create child task A: %v", err)
+	}
+	taskB, err := taskRepo.Create(model.CreateTaskInput{Title: "Sync child B", ProjectID: &project.ID, AreaID: &area.ID})
+	if err != nil {
+		t.Fatalf("create child task B: %v", err)
+	}
+
+	resp := client.Post("/api/sync/push", map[string]interface{}{
+		"device_id": "test-device",
+		"changes": []map[string]interface{}{{
+			"entity": "project", "entity_id": project.ID, "action": "delete",
+		}},
+	})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	if len(result.Results) != 1 || result.Results[0].Status != "applied" {
+		t.Fatalf("expected one applied change, got %+v", result.Results)
+	}
+
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM projects WHERE id = ?", project.ID).Scan(&n); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("project row survived the sync delete")
+	}
+
+	for _, task := range []*model.TaskDetail{taskA, taskB} {
+		var deletedAt, projectID, headingID, areaID sql.NullString
+		if err := db.QueryRow(
+			"SELECT deleted_at, project_id, heading_id, area_id FROM tasks WHERE id = ?", task.ID,
+		).Scan(&deletedAt, &projectID, &headingID, &areaID); err != nil {
+			t.Fatalf("load task %s: %v", task.ID, err)
+		}
+		if !deletedAt.Valid {
+			t.Errorf("task %s was not sent to trash (deleted_at is NULL)", task.ID)
+		}
+		if projectID.Valid {
+			t.Errorf("trashed task %s still has project_id %q", task.ID, projectID.String)
+		}
+		if headingID.Valid {
+			t.Errorf("trashed task %s still has heading_id %q", task.ID, headingID.String)
+		}
+		if areaID.Valid {
+			t.Errorf("trashed task %s still has area_id %q", task.ID, areaID.String)
+		}
+		if entries := countChangeLogEntries(t, db, "task", task.ID, "delete"); entries != 1 {
+			t.Errorf("expected 1 task delete change for %s, got %d", task.ID, entries)
+		}
+	}
+
+	// The trashed tasks are visible in the trash view.
+	viewRepo := repository.NewViewRepository(db)
+	view, err := viewRepo.Trash(50, 0)
+	if err != nil {
+		t.Fatalf("load trash view: %v", err)
+	}
+	listed := make(map[string]bool)
+	for _, g := range view.Groups {
+		for _, task := range g.Tasks {
+			listed[task.ID] = true
+		}
+	}
+	for _, task := range []*model.TaskDetail{taskA, taskB} {
+		if !listed[task.ID] {
+			t.Errorf("task %s not listed in trash view", task.ID)
+		}
+	}
+}
+
+func TestSyncDeleteArea_WithProjectsIsChangeError(t *testing.T) {
+	client, changeLogRepo, _, db := setupSyncRouterWithDB(t)
+
+	areaRepo := repository.NewAreaRepository(db, changeLogRepo)
+	projRepo := repository.NewProjectRepository(db, changeLogRepo)
+	area, err := areaRepo.Create(model.CreateAreaInput{Title: "Sync busy area"})
+	if err != nil {
+		t.Fatalf("create area: %v", err)
+	}
+	project, err := projRepo.Create(model.CreateProjectInput{Title: "Blocking project", AreaID: &area.ID})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	resp := client.Post("/api/sync/push", map[string]interface{}{
+		"device_id": "test-device",
+		"changes": []map[string]interface{}{{
+			"entity": "area", "entity_id": area.ID, "action": "delete",
+		}},
+	})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	if len(result.Results) != 1 {
+		t.Fatalf("expected one result, got %d", len(result.Results))
+	}
+	if result.Results[0].Status != "error" {
+		t.Errorf("expected error status, got %q", result.Results[0].Status)
+	}
+	if !strings.Contains(result.Results[0].Error, "HAS_PROJECTS") {
+		t.Errorf("expected change error containing HAS_PROJECTS, got %q", result.Results[0].Error)
+	}
+
+	// Nothing is deleted.
+	var areaCount, projectCount int
+	_ = db.QueryRow("SELECT COUNT(*) FROM areas WHERE id = ?", area.ID).Scan(&areaCount)
+	_ = db.QueryRow("SELECT COUNT(*) FROM projects WHERE id = ?", project.ID).Scan(&projectCount)
+	if areaCount != 1 || projectCount != 1 {
+		t.Errorf("expected area and project to survive, got area=%d project=%d", areaCount, projectCount)
+	}
+}

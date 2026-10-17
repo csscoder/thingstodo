@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
 )
@@ -280,37 +281,104 @@ func (r *ProjectRepository) Delete(id string) error {
 	return err
 }
 
-func (r *ProjectRepository) DeleteWithTasks(id string) error {
-	// Collect task IDs before deleting so we can log each deletion
-	rows, err := r.db.Query("SELECT id FROM tasks WHERE project_id = ?", id)
-	if err != nil {
-		return fmt.Errorf("collect task IDs: %w", err)
-	}
-	var taskIDs []string
-	for rows.Next() {
-		var tid string
-		_ = rows.Scan(&tid)
-		taskIDs = append(taskIDs, tid)
-	}
-	_ = rows.Close()
+// DeleteToTrash deletes the project and sends its child tasks to the Trash
+// instead of destroying them: every task gets deleted_at set and its
+// containers (project, heading, area) cleared, so restoring it yields a
+// loose task; status is left untouched. Children already in the trash only
+// have their containers cleared. Headings go as plain rows, each logged the
+// way HeadingRepository.Delete logs one. The whole operation runs in one
+// transaction, with a task change logged per trashed child and a project
+// change for the deletion itself.
+func (r *ProjectRepository) DeleteToTrash(id string) error {
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	run := func(tx *sql.Tx) error {
+		cl := r.WithTx(tx).changeLog // change log bound to the transaction
 
-	if err := r.inTx(func(db DBTX) error {
-		if _, err := db.Exec("DELETE FROM tasks WHERE project_id = ?", id); err != nil {
-			return fmt.Errorf("delete project tasks: %w", err)
+		rows, err := tx.Query(
+			"SELECT id, title, status FROM tasks WHERE project_id = ? AND deleted_at IS NULL", id)
+		if err != nil {
+			return fmt.Errorf("collect project tasks: %w", err)
 		}
-		if _, err := db.Exec("DELETE FROM projects WHERE id = ?", id); err != nil {
+		type childTask struct {
+			id, title, status string
+		}
+		var children []childTask
+		for rows.Next() {
+			var c childTask
+			if err := rows.Scan(&c.id, &c.title, &c.status); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan project task: %w", err)
+			}
+			children = append(children, c)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		for _, c := range children {
+			if _, err := tx.Exec(`UPDATE tasks
+				SET deleted_at = ?, updated_at = ?, project_id = NULL, heading_id = NULL, area_id = NULL
+				WHERE id = ?`, now, now, c.id); err != nil {
+				return fmt.Errorf("trash project task %s: %w", c.id, err)
+			}
+			snapshot := map[string]interface{}{
+				"id": c.id, "title": c.title, "status": c.status, "deleted_at": now,
+				"project_id": nil, "heading_id": nil, "area_id": nil,
+			}
+			if err := logChange(cl, "task", c.id, "delete", nil, snapshot, "", ""); err != nil {
+				return fmt.Errorf("log trashed task %s: %w", c.id, err)
+			}
+		}
+
+		// Children already in the trash keep their trash date; only clear
+		// the containers that are about to dangle.
+		if _, err := tx.Exec(
+			"UPDATE tasks SET project_id = NULL, heading_id = NULL, area_id = NULL WHERE project_id = ?", id,
+		); err != nil {
+			return fmt.Errorf("detach trashed project tasks: %w", err)
+		}
+
+		headingRows, err := tx.Query("SELECT id FROM headings WHERE project_id = ?", id)
+		if err != nil {
+			return fmt.Errorf("collect project headings: %w", err)
+		}
+		var headingIDs []string
+		for headingRows.Next() {
+			var hid string
+			if err := headingRows.Scan(&hid); err != nil {
+				_ = headingRows.Close()
+				return fmt.Errorf("scan project heading: %w", err)
+			}
+			headingIDs = append(headingIDs, hid)
+		}
+		if err := headingRows.Close(); err != nil {
+			return err
+		}
+		if err := headingRows.Err(); err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec("DELETE FROM headings WHERE project_id = ?", id); err != nil {
+			return fmt.Errorf("delete project headings: %w", err)
+		}
+		for _, hid := range headingIDs {
+			if err := logChange(cl, "heading", hid, "delete", nil, map[string]string{"id": hid}, "", ""); err != nil {
+				return fmt.Errorf("log deleted heading %s: %w", hid, err)
+			}
+		}
+
+		if _, err := tx.Exec("DELETE FROM projects WHERE id = ?", id); err != nil {
 			return fmt.Errorf("delete project: %w", err)
 		}
-		return nil
-	}); err != nil {
-		return err
+		return logChange(cl, "project", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
-
-	for _, tid := range taskIDs {
-		logChange(r.changeLog, "task", tid, "delete", nil, map[string]string{"id": tid}, "", "")
+	if r.tx != nil {
+		return run(r.tx)
 	}
-	logChange(r.changeLog, "project", id, "delete", nil, map[string]string{"id": id}, "", "")
-	return nil
+	return InTx(r.conn, run)
 }
 
 func (r *ProjectRepository) Complete(id string) (*model.ProjectDetail, error) {

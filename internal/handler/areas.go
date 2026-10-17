@@ -134,8 +134,8 @@ func (h *AreaHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 
 func (h *AreaHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.repo.DeleteWithTasks(id); err != nil {
-		if errors.Is(err, repository.ErrAreaHasProjects) {
+	if err := h.repo.DeleteToTrash(id); err != nil {
+		if errors.Is(err, repository.ErrHasProjects) {
 			writeError(w, http.StatusConflict, "area still has projects", "HAS_PROJECTS")
 			return
 		}

@@ -662,6 +662,9 @@ Response (200): Updated project
 Errors (400 `VALIDATION` with `field`): `status` outside `open|completed|canceled` (date, id and title rules are shared with other endpoints).
 
 ### DELETE /api/projects/:id
+
+Deletes the project in one transaction and sends its child tasks to Trash instead of destroying them: each task gets `deleted_at` set (status unchanged) and `project_id`, `heading_id`, `area_id` cleared, so restoring it yields a loose open task. A task change-log entry is written per trashed child (plus one per heading and one for the project) so sync clients see the soft-deletes. Unknown ids are an idempotent success.
+
 Response (204): No content
 
 ### PATCH /api/projects/:id/complete
@@ -800,6 +803,9 @@ Response (200):
 ```
 
 ### DELETE /api/areas/:id
+
+Deletes the area in one transaction, but only while it holds no projects; its standalone tasks (no project) are sent to Trash instead of being destroyed: each gets `deleted_at` set (status unchanged) and `area_id` cleared, so restoring it yields a loose open task. A task change-log entry is written per trashed task (plus one for the area). Unknown ids are an idempotent success.
+
 Response (204): No content
 
 Response (409): Area still has projects
@@ -1406,6 +1412,8 @@ Response (200):
 
 ### POST /api/sync/push
 Applies changes from a client device to the server. Uses last-write-wins (LWW) conflict resolution per entity based on `updated_at` timestamps. A task update pushing `status` to `completed`, `canceled` or `wont_do` runs the same guarded finishing path as the single-task endpoints: idempotent on re-push, one repeat instance per task.
+
+Project and area `delete` changes run the same delete-to-Trash semantics as `DELETE /api/projects/:id` and `DELETE /api/areas/:id`: child/standalone tasks are trashed with a change-log entry each. An area delete that still has projects produces a per-change result with `status: "error"` and an error containing `HAS_PROJECTS`, and nothing is deleted.
 
 Request:
 ```json

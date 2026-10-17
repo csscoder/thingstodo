@@ -859,7 +859,7 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 		result.Status = status
 
 	case "delete":
-		err := h.projects.Delete(change.EntityID)
+		err := h.projects.DeleteToTrash(change.EntityID)
 		if err != nil {
 			result.Status = "error"
 			result.Error = syncErrorMessage(err)
@@ -946,7 +946,7 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 		result.Status = status
 
 	case "delete":
-		err := h.areas.Delete(change.EntityID)
+		err := h.areas.DeleteToTrash(change.EntityID)
 		if err != nil {
 			result.Status = "error"
 			result.Error = syncErrorMessage(err)
@@ -1506,6 +1506,9 @@ func syncErrorMessage(err error) string {
 		errors.Is(err, repository.ErrDuplicateAreaName) ||
 		errors.Is(err, repository.ErrDuplicateTagName) {
 		return err.Error()
+	}
+	if errors.Is(err, repository.ErrHasProjects) {
+		return "HAS_PROJECTS: area still has projects"
 	}
 	log.Printf("sync change error: %v", err)
 	return "internal error"
