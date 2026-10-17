@@ -694,30 +694,66 @@ func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
 	affected := 0
 	err := r.inTx(func(db DBTX) error {
 		now := "datetime('now')"
+		br := r.WithTx(db.(*sql.Tx))
+
+		// exec runs one statement of a task's action and reports whether
+		// it changed a row, so affected counts real transitions only.
+		exec := func(query string, args ...interface{}) (bool, error) {
+			res, err := db.Exec(query, args...)
+			if err != nil {
+				return false, err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return false, err
+			}
+			return n > 0, nil
+		}
 
 		for _, id := range input.TaskIDs {
 			var execErr error
+			changed := false
 			switch input.Action {
 			case "delete":
-				_, execErr = db.Exec(
+				changed, execErr = exec(
 					"UPDATE tasks SET deleted_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
 			case "set_when":
 				whenDate, _ := input.Params["when_date"].(string)
-				_, execErr = db.Exec(
+				var wd *string
+				if whenDate != "" {
+					wd = &whenDate
+				}
+				changed, execErr = exec(
 					"UPDATE tasks SET when_date = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
-					bulkNilIfEmpty(whenDate), id)
+					wd, id)
+				if changed {
+					// The first schedule entry follows the new date — and
+					// all entries vanish on a clear — inside the same
+					// transaction: a duplicate timeless date aborts the
+					// whole bulk action and rolls everything back.
+					if err := br.syncFirstScheduleDate(id, wd); err != nil {
+						execErr = err
+					}
+				}
 			case "set_deadline":
 				deadline, _ := input.Params["deadline"].(string)
-				_, execErr = db.Exec(
+				changed, execErr = exec(
 					"UPDATE tasks SET deadline = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
 					bulkNilIfEmpty(deadline), id)
 			case "set_priority":
-				priority, _ := input.Params["priority"].(float64)
-				p := int(priority)
-				_, execErr = db.Exec(
+				// high_priority (bool) is the current param; the legacy
+				// integer priority (1 = high) still works. When both are
+				// sent, high_priority wins.
+				p := 0
+				if hp, ok := input.Params["high_priority"].(bool); ok {
+					p = boolToInt(hp)
+				} else if legacy, ok := input.Params["priority"].(float64); ok {
+					p = int(legacy)
+				}
+				changed, execErr = exec(
 					"UPDATE tasks SET high_priority = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", p, id)
 			case "toggle_priority":
-				_, execErr = db.Exec(
+				changed, execErr = exec(
 					"UPDATE tasks SET high_priority = CASE WHEN high_priority = 1 THEN 0 ELSE 1 END, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
 			case "move_project":
 				// The params state the target containers (empty = none, as
@@ -745,60 +781,42 @@ func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
 					if nErr := normalizeParents(db, &projectID, &areaID, &headingID, projectChanged, false); nErr != nil {
 						execErr = nErr
 					} else {
-						_, execErr = db.Exec(
+						changed, execErr = exec(
 							"UPDATE tasks SET project_id = ?, area_id = ?, heading_id = ?, updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL",
 							projectID, areaID, headingID, id)
 					}
 				}
-			case "add_tags":
+			case "add_tags", "remove_tags", "toggle_tags":
 				tagIDs, ok := input.Params["tag_ids"].([]interface{})
 				if ok {
 					for _, rawTagID := range tagIDs {
 						tagID, _ := rawTagID.(string)
-						if tagID != "" {
-							_, execErr = db.Exec(
-								"INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
-							if execErr != nil {
-								break
-							}
+						if tagID == "" {
+							continue
 						}
-					}
-				}
-			case "remove_tags":
-				tagIDs, ok := input.Params["tag_ids"].([]interface{})
-				if ok {
-					for _, rawTagID := range tagIDs {
-						tagID, _ := rawTagID.(string)
-						if tagID != "" {
-							_, execErr = db.Exec(
-								"DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
-							if execErr != nil {
-								break
-							}
-						}
-					}
-				}
-			case "toggle_tags":
-				tagIDs, ok := input.Params["tag_ids"].([]interface{})
-				if ok {
-					for _, rawTagID := range tagIDs {
-						tagID, _ := rawTagID.(string)
-						if tagID != "" {
+						var c bool
+						switch input.Action {
+						case "add_tags":
+							c, execErr = exec("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
+						case "remove_tags":
+							c, execErr = exec("DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
+						default: // toggle_tags
 							var exists int
 							_ = db.QueryRow("SELECT COUNT(*) FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID).Scan(&exists)
 							if exists > 0 {
-								_, execErr = db.Exec("DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
+								c, execErr = exec("DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?", id, tagID)
 							} else {
-								_, execErr = db.Exec("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
+								c, execErr = exec("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)", id, tagID)
 							}
-							if execErr != nil {
-								break
-							}
+						}
+						changed = changed || c
+						if execErr != nil {
+							break
 						}
 					}
 				}
 			case "mark_reviewed":
-				_, execErr = db.Exec(
+				changed, execErr = exec(
 					"UPDATE tasks SET updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL AND status = 'open'", id)
 			default:
 				return fmt.Errorf("unknown bulk action: %s", input.Action)
@@ -806,21 +824,14 @@ func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
 			if execErr != nil {
 				return execErr
 			}
-			affected++
+			if changed {
+				affected++
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		return 0, err
-	}
-
-	// Sync schedule entries after commit for date changes
-	if input.Action == "set_when" {
-		whenDate, _ := input.Params["when_date"].(string)
-		for _, id := range input.TaskIDs {
-			wd := whenDate
-			_ = r.syncFirstScheduleDate(id, &wd)
-		}
 	}
 
 	// Log changes for each affected task

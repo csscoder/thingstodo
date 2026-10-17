@@ -160,11 +160,28 @@ func (r *UserSettingsRepository) Update(userID string, input model.UpdateUserSet
 	}
 
 	if len(setClauses) > 0 {
-		setClauses = append(setClauses, "updated_at = datetime('now')")
-		query := fmt.Sprintf("UPDATE user_settings SET %s WHERE user_id = ?", strings.Join(setClauses, ", "))
-		args = append(args, userID)
-		_, err := r.db.Exec(query, args...)
-		if err != nil {
+		// The settings row may not exist yet (a PATCH can be the first
+		// save), so a plain UPDATE would change nothing. Upsert instead:
+		// the patched columns ride on the INSERT, and the conflict path
+		// updates them in place. Every clause is exactly "name = ?", so
+		// the column list is derived from the clause text.
+		cols := make([]string, len(setClauses))
+		for i, clause := range setClauses {
+			cols[i] = strings.TrimSpace(strings.SplitN(clause, "=", 2)[0])
+		}
+		placeholders := make([]string, len(cols)+1)
+		for i := range placeholders {
+			placeholders[i] = "?"
+		}
+		conflictSets := make([]string, len(cols))
+		for i, col := range cols {
+			conflictSets[i] = col + " = excluded." + col
+		}
+		query := fmt.Sprintf(
+			"INSERT INTO user_settings (user_id, %s) VALUES (%s) ON CONFLICT(user_id) DO UPDATE SET %s, updated_at = datetime('now')",
+			strings.Join(cols, ", "), strings.Join(placeholders, ", "), strings.Join(conflictSets, ", "))
+		execArgs := append([]interface{}{userID}, args...)
+		if _, err := r.db.Exec(query, execArgs...); err != nil {
 			return nil, fmt.Errorf("update settings: %w", err)
 		}
 	}

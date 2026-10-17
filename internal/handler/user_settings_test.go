@@ -35,6 +35,20 @@ func setupSettingsRouter(t *testing.T) *testutil.TestClient {
 	return testutil.NewTestClient(t, r)
 }
 
+func TestSettingsFirstPatchSaved(t *testing.T) {
+	client := setupSettingsRouter(t)
+
+	// No GET first: the settings row does not exist yet, so the first
+	// PATCH must upsert it instead of silently updating zero rows.
+	resp := client.Patch("/api/user/settings", map[string]interface{}{"review_after_days": 3})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	testutil.AssertJSONField(t, resp, "review_after_days", float64(3))
+
+	getResp := client.Get("/api/user/settings")
+	testutil.AssertStatus(t, getResp, http.StatusOK)
+	testutil.AssertJSONField(t, getResp, "review_after_days", float64(3))
+}
+
 func TestSettingsPatch_Validates(t *testing.T) {
 	client := setupSettingsRouter(t)
 

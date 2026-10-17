@@ -394,9 +394,9 @@ Request:
 
 | Action | Params |
 |--------|--------|
-| set_when | `when_date` (string), `when_time` (string, optional) |
+| set_when | `when_date` (string, empty = clear) |
 | set_deadline | `deadline` (string) |
-| set_priority | `priority` (number, 0 or 1) |
+| set_priority | `high_priority` (boolean) or legacy `priority` (number, 1 = high); `high_priority` wins when both are sent |
 | move_project | `project_id` (string or null), `area_id` (string or null, empty = null); the area is derived from the target project and a heading not in it is cleared |
 | add_tags | `tag_ids` (string[]) |
 | remove_tags | `tag_ids` (string[]) |
@@ -409,7 +409,9 @@ Response (200):
 { "ok": true, "affected": 3 }
 ```
 
-The status actions `complete`, `cancel` and `wontdo` run the one guarded finishing path per task (same as the single-task endpoints). `affected` counts only tasks that actually transitioned from open; already-finished and unknown ids do not count.
+The status actions `complete`, `cancel` and `wontdo` run the one guarded finishing path per task (same as the single-task endpoints). `affected` counts only tasks that actually transitioned from open; already-finished and unknown ids do not count. For every other action, `affected` counts one per task a statement of the action actually changed; unknown ids contribute 0.
+
+`set_when` runs the same first-schedule sync as `PATCH /api/tasks/:id`: each task's first schedule entry moves to the new date, and an empty `when_date` nulls `tasks.when_date` and removes the task's schedule entries. The whole action is one transaction — when any task's move would create a duplicate timeless schedule, the request fails with 400 `VALIDATION` and nothing is applied.
 
 SSE: Broadcasts `bulk_change` event with `{ type, entity: "task", ids }`.
 
@@ -1029,6 +1031,8 @@ Request (array of items):
 
 Response (204): No content
 
+Every `id` must be a schedule entry of the task in the URL. A foreign or unknown id rejects the whole request with 400 `VALIDATION` (field `items`) before anything is applied.
+
 SSE: broadcasts `task_updated`
 
 ---
@@ -1092,6 +1096,8 @@ Request: Partial update (any subset of fields)
 ```
 
 Response (200): Updated settings object
+
+The settings row is upserted on first save: a PATCH sent before any GET still persists (missing fields take their defaults), and the response is the merged row.
 
 Errors (400 `VALIDATION` with `field`): a value outside the enums and ranges documented above for `sort_areas`, `sort_tags`, `evening_starts_at`, `time_format`, `font_size`, `default_reminder_type`, `default_reminder_value` or `notification_provider`. Omitted fields are not validated; `default_reminder_type: null` clears the value.
 

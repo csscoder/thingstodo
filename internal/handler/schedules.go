@@ -250,6 +250,17 @@ func (h *ScheduleHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
+	// The reorder is scoped to the task in the URL: every item must be
+	// one of its schedule entries. A foreign (or unknown) id rejects the
+	// whole request before anything is written, so no partial reorder
+	// is ever applied.
+	for _, item := range items {
+		ownerID, err := h.repo.GetTaskIDForSchedule(item.ID)
+		if err != nil || ownerID != taskID {
+			writeFieldError(w, http.StatusBadRequest, "items must all be schedule entries of this task", "VALIDATION", "items")
+			return
+		}
+	}
 	if err := h.repo.Reorder(items); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return

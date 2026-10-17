@@ -551,6 +551,12 @@ func (h *TaskHandler) BulkAction(w http.ResponseWriter, r *http.Request) {
 
 	affected, err := h.repo.BulkAction(input)
 	if err != nil {
+		// Same conflict shape as a single-task when_date update: the
+		// bulk action was rejected and rolled back, nothing was applied.
+		if strings.Contains(err.Error(), "duplicate timeless date") {
+			writeError(w, http.StatusBadRequest, "a schedule for this date already exists without a time", "VALIDATION")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
 		return
 	}
