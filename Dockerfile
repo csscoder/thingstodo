@@ -8,7 +8,7 @@ COPY frontend/ ./
 RUN COMMIT_SHA=${COMMIT_SHA} npm run build
 
 # Stage 2: Build backend
-FROM golang:1.24-alpine AS backend-build
+FROM golang:1.27-alpine AS backend-build
 ARG COMMIT_SHA=unknown
 RUN apk add --no-cache jq
 WORKDIR /app

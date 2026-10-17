@@ -22,7 +22,7 @@ func (r *ChecklistRepository) ListByTask(taskID string) ([]model.ChecklistItem, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.ChecklistItem
 	for rows.Next() {
@@ -47,7 +47,7 @@ func (r *ChecklistRepository) ListAll() ([]model.ChecklistItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.ChecklistItem
 	for rows.Next() {

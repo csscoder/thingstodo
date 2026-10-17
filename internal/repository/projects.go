@@ -48,7 +48,7 @@ func (r *ProjectRepository) List(areaID, status *string) ([]model.ProjectListIte
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var projects []model.ProjectListItem
 	for rows.Next() {
@@ -102,7 +102,7 @@ func (r *ProjectRepository) GetByID(id string) (*model.ProjectDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer headingRows.Close()
+	defer func() { _ = headingRows.Close() }()
 
 	var headings []model.HeadingWithTasks
 	for headingRows.Next() {
@@ -147,7 +147,7 @@ func (r *ProjectRepository) GetByID(id string) (*model.ProjectDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer completedRows.Close()
+	defer func() { _ = completedRows.Close() }()
 	p.CompletedTasks = scanTaskListItems(r.db, completedRows)
 
 	return &p, nil
@@ -262,7 +262,7 @@ func (r *ProjectRepository) DeleteWithTasks(id string) error {
 		_ = rows.Scan(&tid)
 		taskIDs = append(taskIDs, tid)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -348,7 +348,7 @@ func getProjectTags(db *sql.DB, projectID string) []model.TagRef {
 	if err != nil {
 		return []model.TagRef{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var tags []model.TagRef
 	for rows.Next() {
 		var t model.TagRef
@@ -407,7 +407,7 @@ func getTaskListItems(db *sql.DB, filterCol, filterVal string) []model.TaskListI
 	if err != nil {
 		return []model.TaskListItem{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(db, rows)
 	populateActionableScheduleFlags(db, tasks)
 	return tasks
@@ -436,7 +436,7 @@ func getTaskListItemsNoHeading(db *sql.DB, projectID string) []model.TaskListIte
 	if err != nil {
 		return []model.TaskListItem{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(db, rows)
 	populateActionableScheduleFlags(db, tasks)
 	return tasks
@@ -474,7 +474,7 @@ func scanTaskListItems(db *sql.DB, rows *sql.Rows) []model.TaskListItem {
 				_ = tagRows.Scan(&tag.ID, &tag.Title, &tag.Color)
 				tags = append(tags, tag)
 			}
-			tagRows.Close()
+			_ = tagRows.Close()
 			if tags == nil {
 				tags = []model.TagRef{}
 			}

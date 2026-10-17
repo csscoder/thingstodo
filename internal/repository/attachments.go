@@ -22,7 +22,7 @@ func (r *AttachmentRepository) ListByTask(taskID string) ([]model.Attachment, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.Attachment
 	for rows.Next() {
@@ -45,7 +45,7 @@ func (r *AttachmentRepository) ListAll() ([]model.Attachment, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.Attachment
 	for rows.Next() {

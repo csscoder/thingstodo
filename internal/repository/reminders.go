@@ -22,7 +22,7 @@ func (r *ReminderRepository) ListByTask(taskID string) ([]model.Reminder, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.Reminder
 	for rows.Next() {
@@ -45,7 +45,7 @@ func (r *ReminderRepository) ListAll() ([]model.Reminder, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.Reminder
 	for rows.Next() {
@@ -104,7 +104,7 @@ func (r *ReminderRepository) DeleteAllByTask(taskID string) error {
 		_ = rows.Scan(&id)
 		ids = append(ids, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	_, err = r.db.Exec("DELETE FROM reminders WHERE task_id = ?", taskID)
 	if err != nil {
@@ -162,7 +162,7 @@ func (r *ReminderRepository) GetPendingRelative() ([]model.PendingReminder, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.PendingReminder
 	for rows.Next() {
@@ -193,7 +193,7 @@ func (r *ReminderRepository) GetPendingExact() ([]model.PendingReminder, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.PendingReminder
 	for rows.Next() {

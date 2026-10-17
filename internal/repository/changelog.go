@@ -52,7 +52,7 @@ func (r *ChangeLogRepository) GetChangesSince(sinceSeq int64, limit int) ([]Chan
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var entries []ChangeLogEntry
 	for rows.Next() {

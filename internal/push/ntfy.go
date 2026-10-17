@@ -78,7 +78,7 @@ func (n *NtfySender) Send(userID string, payload Payload) error {
 	if err != nil {
 		return fmt.Errorf("ntfy: send: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		log.Printf("ntfy: server returned %d for topic %s", resp.StatusCode, settings.NtfyTopic)

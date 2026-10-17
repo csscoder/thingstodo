@@ -36,7 +36,7 @@ func (h *EventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	defer h.broker.Unsubscribe(clientID)
 
 	// Send initial connected event
-	fmt.Fprintf(w, "event: connected\ndata: {\"client_id\":\"%s\"}\n\n", clientID)
+	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"client_id\":\"%s\"}\n\n", clientID)
 	flusher.Flush()
 
 	for {

@@ -22,7 +22,7 @@ func (r *HeadingRepository) ListByProject(projectID string) ([]model.Heading, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var headings []model.Heading
 	for rows.Next() {
@@ -45,7 +45,7 @@ func (r *HeadingRepository) ListAll() ([]model.Heading, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var headings []model.Heading
 	for rows.Next() {

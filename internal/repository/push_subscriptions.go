@@ -21,7 +21,7 @@ func (r *PushSubscriptionRepository) ListByUser(userID string) ([]model.PushSubs
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.PushSubscription
 	for rows.Next() {
@@ -81,7 +81,7 @@ func (r *PushSubscriptionRepository) ListAll() ([]model.PushSubscription, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.PushSubscription
 	for rows.Next() {
@@ -103,7 +103,7 @@ func (r *PushSubscriptionRepository) GetAllUsers() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var users []string
 	for rows.Next() {

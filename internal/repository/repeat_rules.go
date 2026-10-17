@@ -85,7 +85,7 @@ func (r *RepeatRuleRepository) ListAll() ([]model.RepeatRule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var rules []model.RepeatRule
 	for rows.Next() {

@@ -102,7 +102,7 @@ func (r *TaskRepository) List(f model.TaskFilters) ([]model.TaskListItem, error)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tasks []model.TaskListItem
 	for rows.Next() {
@@ -603,7 +603,7 @@ func (r *TaskRepository) getTaskTags(taskID string) ([]model.TagRef, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var tags []model.TagRef
 	for rows.Next() {
 		var t model.TagRef
@@ -640,7 +640,7 @@ func (r *TaskRepository) getChecklist(taskID string) ([]model.ChecklistItem, err
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var items []model.ChecklistItem
 	for rows.Next() {
 		var c model.ChecklistItem
@@ -661,7 +661,7 @@ func (r *TaskRepository) getReminders(taskID string) ([]model.Reminder, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var items []model.Reminder
 	for rows.Next() {
 		var rm model.Reminder
@@ -680,7 +680,7 @@ func (r *TaskRepository) getAttachments(taskID string) ([]model.Attachment, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var items []model.Attachment
 	for rows.Next() {
 		var a model.Attachment
@@ -733,7 +733,7 @@ func (r *TaskRepository) syncFirstScheduleDate(taskID string, whenDate *string) 
 		// Log deletes for each schedule entry before removing them
 		rows, _ := r.db.Query("SELECT id FROM task_schedules WHERE task_id = ?", taskID)
 		if rows != nil {
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			for rows.Next() {
 				var sid string
 				_ = rows.Scan(&sid)
@@ -795,7 +795,7 @@ func (r *TaskRepository) getSchedules(taskID string) ([]model.TaskSchedule, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var items []model.TaskSchedule
 	for rows.Next() {
 		var s model.TaskSchedule

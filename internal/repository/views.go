@@ -41,7 +41,7 @@ func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*mo
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	inboxTasks := scanTaskListItems(r.db, rows)
 	populateActionableScheduleFlags(r.db, inboxTasks)
 
@@ -77,7 +77,7 @@ func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*mo
 		if err != nil {
 			return nil, err
 		}
-		defer reviewRows.Close()
+		defer func() { _ = reviewRows.Close() }()
 		allReview := scanTaskListItems(r.db, reviewRows)
 		populateActionableScheduleFlags(r.db, allReview)
 
@@ -139,7 +139,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	if err != nil {
 		return nil, err
 	}
-	defer todayRows.Close()
+	defer func() { _ = todayRows.Close() }()
 	todayTasks := scanTodayTaskListItems(r.db, todayRows)
 	populateActionableScheduleFlags(r.db, todayTasks)
 
@@ -177,7 +177,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	if err != nil {
 		return nil, err
 	}
-	defer eveningRows.Close()
+	defer func() { _ = eveningRows.Close() }()
 	eveningTasks := scanTodayTaskListItems(r.db, eveningRows)
 	populateActionableScheduleFlags(r.db, eveningTasks)
 
@@ -205,7 +205,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	if err != nil {
 		return nil, err
 	}
-	defer overdueRows.Close()
+	defer func() { _ = overdueRows.Close() }()
 	overdueTasks := scanTaskListItems(r.db, overdueRows)
 	populateActionableScheduleFlags(r.db, overdueTasks)
 
@@ -239,7 +239,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	if err != nil {
 		return nil, err
 	}
-	defer earlierRows.Close()
+	defer func() { _ = earlierRows.Close() }()
 	earlierTasks := scanTodayTaskListItems(r.db, earlierRows)
 	populatePastScheduleCounts(r.db, earlierTasks, today)
 	populateActionableScheduleFlags(r.db, earlierTasks)
@@ -270,7 +270,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	if err != nil {
 		return nil, err
 	}
-	defer completedRows.Close()
+	defer func() { _ = completedRows.Close() }()
 	completedTasks := scanTaskListItems(r.db, completedRows)
 
 	return &model.TodayView{
@@ -315,7 +315,7 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	tasks := scanUpcomingTaskListItems(r.db, rows)
 
@@ -364,7 +364,7 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer overdueRows.Close()
+	defer func() { _ = overdueRows.Close() }()
 	overdueTasks := scanTaskListItems(r.db, overdueRows)
 	populateActionableScheduleFlags(r.db, overdueTasks)
 
@@ -398,7 +398,7 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer earlierRows.Close()
+	defer func() { _ = earlierRows.Close() }()
 	earlierTasks := scanTodayTaskListItems(r.db, earlierRows)
 	populatePastScheduleCounts(r.db, earlierTasks, from)
 	populateActionableScheduleFlags(r.db, earlierTasks)
@@ -423,7 +423,7 @@ func (r *ViewRepository) buildAnytimeView(somedayOnly bool) (*model.AnytimeView,
 	if err != nil {
 		return nil, err
 	}
-	defer areaRows.Close()
+	defer func() { _ = areaRows.Close() }()
 
 	var view model.AnytimeView
 	for areaRows.Next() {
@@ -447,7 +447,7 @@ func (r *ViewRepository) buildAnytimeView(somedayOnly bool) (*model.AnytimeView,
 			}
 			aa.Projects = append(aa.Projects, model.AnytimeProject{Project: projRef, Tasks: tasks})
 		}
-		projRows.Close()
+		_ = projRows.Close()
 		if aa.Projects == nil {
 			aa.Projects = []model.AnytimeProject{}
 		}
@@ -477,7 +477,7 @@ func (r *ViewRepository) buildAnytimeView(somedayOnly bool) (*model.AnytimeView,
 			}
 			view.NoArea.Projects = append(view.NoArea.Projects, model.AnytimeProject{Project: projRef, Tasks: tasks})
 		}
-		noAreaProjRows.Close()
+		_ = noAreaProjRows.Close()
 	}
 	if view.NoArea.Projects == nil {
 		view.NoArea.Projects = []model.AnytimeProject{}
@@ -535,7 +535,7 @@ func (r *ViewRepository) getAnytimeTasks(projectID, areaID *string, byProject, s
 	if err != nil {
 		return []model.TaskListItem{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(r.db, rows)
 	populateActionableScheduleFlags(r.db, tasks)
 	return tasks
@@ -575,7 +575,7 @@ func (r *ViewRepository) getAnytimeStandaloneNoArea(somedayOnly bool) []model.Ta
 	if err != nil {
 		return []model.TaskListItem{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(r.db, rows)
 	populateActionableScheduleFlags(r.db, tasks)
 	return tasks
@@ -613,7 +613,7 @@ func (r *ViewRepository) Logbook(limit, offset int) (*model.LogbookView, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	tasks := scanTaskListItems(r.db, rows)
 
@@ -678,7 +678,7 @@ func (r *ViewRepository) Trash(limit, offset int) (*model.LogbookView, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	tasks := scanTaskListItems(r.db, rows)
 
@@ -747,7 +747,7 @@ func scanUpcomingTaskListItems(db *sql.DB, rows *sql.Rows) []upcomingItem {
 				_ = tagRows.Scan(&tag.ID, &tag.Title, &tag.Color)
 				tags = append(tags, tag)
 			}
-			tagRows.Close()
+			_ = tagRows.Close()
 			if tags == nil {
 				tags = []model.TagRef{}
 			}
@@ -809,7 +809,7 @@ func scanTodayTaskListItems(db *sql.DB, rows *sql.Rows) []model.TaskListItem {
 				_ = tagRows.Scan(&tag.ID, &tag.Title, &tag.Color)
 				tags = append(tags, tag)
 			}
-			tagRows.Close()
+			_ = tagRows.Close()
 			if tags == nil {
 				tags = []model.TagRef{}
 			}

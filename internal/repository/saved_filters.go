@@ -29,7 +29,7 @@ func (r *SavedFilterRepository) List(userID, view string) ([]model.SavedFilter, 
 	if err != nil {
 		return nil, fmt.Errorf("list saved filters: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	filters := []model.SavedFilter{}
 	for rows.Next() {

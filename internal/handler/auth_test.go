@@ -79,12 +79,12 @@ func TestLogin_EleventhFailureIs429(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: expected 401, got %d", i+1, resp.StatusCode)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	// The 11th attempt is rejected even with the correct password.
 	resp := postLogin(t, srv, "", password)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 on 11th attempt, got %d", resp.StatusCode)
 	}
@@ -109,11 +109,11 @@ func TestLogin_SuccessBeforeLimit(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: expected 401, got %d", i+1, resp.StatusCode)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	resp := postLogin(t, srv, "", password)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 on success before the limit, got %d", resp.StatusCode)
 	}
@@ -133,7 +133,7 @@ func TestLogin_SecureCookieBehindTLSProxy(t *testing.T) {
 	srv, password := newLoginServer(t)
 
 	resp := postLogin(t, srv, "https", password)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -143,7 +143,7 @@ func TestLogin_SecureCookieBehindTLSProxy(t *testing.T) {
 
 	// Plain-HTTP counterpart: local dev keeps a non-Secure cookie.
 	plain := postLogin(t, srv, "", password)
-	defer plain.Body.Close()
+	defer func() { _ = plain.Body.Close() }()
 	if plain.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", plain.StatusCode)
 	}

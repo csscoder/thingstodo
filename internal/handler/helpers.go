@@ -38,12 +38,12 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 }
 
 func decodeJSON(r *http.Request, v interface{}) error {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
 func decodeJSONWithRaw(r *http.Request, v interface{}) (map[string]json.RawMessage, error) {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&raw); err != nil {

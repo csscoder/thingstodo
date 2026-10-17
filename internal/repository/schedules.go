@@ -22,7 +22,7 @@ func (r *ScheduleRepository) ListByTask(taskID string) ([]model.TaskSchedule, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.TaskSchedule
 	for rows.Next() {
@@ -45,7 +45,7 @@ func (r *ScheduleRepository) ListAll() ([]model.TaskSchedule, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []model.TaskSchedule
 	for rows.Next() {
@@ -279,12 +279,12 @@ func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("scan future schedule id: %w", err)
 		}
 		deletedIDs = append(deletedIDs, id)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	// Delete future (after today) and someday uncompleted entries
 	if _, err = tx.Exec(
@@ -304,7 +304,7 @@ func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
 		taskID, today,
 	)
 	if err == nil {
-		defer completedRows.Close()
+		defer func() { _ = completedRows.Close() }()
 		for completedRows.Next() {
 			var s model.TaskSchedule
 			if err := completedRows.Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder); err != nil {

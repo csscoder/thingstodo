@@ -22,7 +22,7 @@ func SetupTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("failed to open test database: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
@@ -102,7 +102,7 @@ func (tc *TestClient) do(method, path string, body interface{}) *TestResponse {
 	if err != nil {
 		tc.t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

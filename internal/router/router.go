@@ -260,7 +260,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 		}
 
 		if f, err := staticFS.Open(path); err == nil {
-			f.Close()
+			_ = f.Close()
 			http.FileServer(http.FS(staticFS)).ServeHTTP(w, req)
 			return
 		}

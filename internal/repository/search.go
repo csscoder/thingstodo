@@ -63,7 +63,7 @@ func (r *SearchRepository) Search(query string, limit int) ([]model.SearchResult
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []model.SearchResult
 	for rows.Next() {

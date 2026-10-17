@@ -28,7 +28,7 @@ func (r *AreaRepository) List() ([]model.Area, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var areas []model.Area
 	for rows.Next() {
@@ -66,7 +66,7 @@ func (r *AreaRepository) GetByID(id string) (*model.AreaDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer projRows.Close()
+	defer func() { _ = projRows.Close() }()
 
 	var projects []model.ProjectListItem
 	for projRows.Next() {
@@ -106,7 +106,7 @@ func (r *AreaRepository) GetByID(id string) (*model.AreaDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer taskRows.Close()
+	defer func() { _ = taskRows.Close() }()
 	a.Tasks = scanTaskListItems(r.db, taskRows)
 	populateActionableScheduleFlags(r.db, a.Tasks)
 
@@ -138,7 +138,7 @@ func (r *AreaRepository) GetByID(id string) (*model.AreaDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer completedRows.Close()
+	defer func() { _ = completedRows.Close() }()
 	a.CompletedTasks = scanTaskListItems(r.db, completedRows)
 
 	return &a, nil
@@ -251,7 +251,7 @@ func (r *AreaRepository) DeleteWithTasks(id string) error {
 		_ = rows.Scan(&tid)
 		taskIDs = append(taskIDs, tid)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	tx, err := r.db.Begin()
 	if err != nil {

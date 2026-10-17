@@ -112,7 +112,7 @@ func (h *AttachmentHandler) createFile(w http.ResponseWriter, r *http.Request, t
 		writeError(w, http.StatusBadRequest, "file field required", "BAD_REQUEST")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Generate unique filename
 	fileID := model.NewID()
@@ -130,11 +130,15 @@ func (h *AttachmentHandler) createFile(w http.ResponseWriter, r *http.Request, t
 		writeError(w, http.StatusInternalServerError, "cannot save file", "INTERNAL")
 		return
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	written, err := io.Copy(dst, file)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "cannot write file", "INTERNAL")
+		return
+	}
+	if err := dst.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, "cannot save file", "INTERNAL")
 		return
 	}
 
@@ -194,7 +198,7 @@ func (h *AttachmentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		// (e.g. a legacy row pointing outside it) is ignored, as before.
 		if root, err := os.OpenRoot(h.attachmentsPath); err == nil {
 			_ = root.Remove(att.URL)
-			root.Close()
+			_ = root.Close()
 		}
 	} else {
 		if err := h.repo.Delete(id); err != nil {
@@ -229,14 +233,14 @@ func (h *AttachmentHandler) Download(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "file not found on disk", "NOT_FOUND")
 		return
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 
 	f, err := root.Open(att.URL)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "file not found on disk", "NOT_FOUND")
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if att.MimeType != "" {
 		w.Header().Set("Content-Type", att.MimeType)

@@ -68,8 +68,8 @@ func newFakeIdP(t *testing.T, idClaims, userinfo map[string]any) *httptest.Serve
 				"use": "sig",
 				"alg": "RS256",
 				"kid": "k1",
-				"n":   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
-				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+				"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
 			}},
 		})
 	})
@@ -201,7 +201,7 @@ func doOIDCLoginFull(t *testing.T, seedUsername string, idClaims, userinfo map[s
 	if err != nil {
 		t.Fatalf("login request: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	var stateCookie *http.Cookie
 	for _, c := range resp.Cookies() {
@@ -246,7 +246,7 @@ func TestOIDC_AllowedVerifiedEmailInIDToken(t *testing.T) {
 		"email":          oidcAllowedEmail,
 		"email_verified": true,
 	}, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("expected 302, got %d (body: %s)", resp.StatusCode, readBody(t, resp))
@@ -271,7 +271,7 @@ func TestOIDC_EmailOnlyInUserinfoWithMatchingSub(t *testing.T) {
 		"email":          oidcAllowedEmail,
 		"email_verified": true,
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("expected 302, got %d (body: %s)", resp.StatusCode, readBody(t, resp))
@@ -287,7 +287,7 @@ func TestOIDC_UserinfoSubMismatch(t *testing.T) {
 		"email":          oidcAllowedEmail,
 		"email_verified": true,
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assertForbidden(t, resp)
 }
@@ -297,7 +297,7 @@ func TestOIDC_DifferentEmail(t *testing.T) {
 		"email":          "attacker@evil.example",
 		"email_verified": true,
 	}, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assertForbidden(t, resp)
 
@@ -318,7 +318,7 @@ func TestOIDC_EmailVerifiedFalse(t *testing.T) {
 		"email":          oidcAllowedEmail,
 		"email_verified": false,
 	}, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assertForbidden(t, resp)
 }
@@ -327,7 +327,7 @@ func TestOIDC_EmailVerifiedMissing(t *testing.T) {
 	resp := doOIDCLogin(t, map[string]any{
 		"email": oidcAllowedEmail,
 	}, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assertForbidden(t, resp)
 }
@@ -362,7 +362,7 @@ func TestOIDC_StateTokenWithoutTypRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("callback request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", resp.StatusCode, readBody(t, resp))
