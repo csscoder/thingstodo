@@ -2,6 +2,7 @@ package repository_test
 
 import (
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -398,5 +399,742 @@ func TestInbox_ReviewCutoffLocal(t *testing.T) {
 	}
 	if tzHas(review, "Fresh") {
 		t.Errorf("task updated 2026-10-16 UTC must not be in Review with a local cutoff of 2026-10-16; got %v", review)
+	}
+}
+
+// --- Task 15: consistent views and shared list predicates (E3, C2) ---
+
+// The fixed clock pins today to 2026-10-17 (UTC), tomorrow 2026-10-18 and
+// yesterday 2026-10-16.
+var (
+	vpToday     = "2026-10-17"
+	vpTomorrow  = "2026-10-18"
+	vpYesterday = "2026-10-16"
+)
+
+func newFixedClockViewRepo(t *testing.T, db *sql.DB) *repository.ViewRepository {
+	t.Helper()
+	repo := repository.NewViewRepository(db, time.UTC)
+	repo.SetClock(func() time.Time {
+		return time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	})
+	return repo
+}
+
+// vpTaskIDs lists the ids of a task slice.
+func vpTaskIDs(tasks []model.TaskListItem) []string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	return ids
+}
+
+// vpTodayOpenIDs collects the ids of the four open sections of the Today
+// view (Today, This Evening, Overdue, Earlier), duplicates included.
+func vpTodayOpenIDs(v *model.TodayView) []string {
+	var ids []string
+	for _, section := range v.Sections {
+		for _, group := range section.Groups {
+			ids = append(ids, vpTaskIDs(group.Tasks)...)
+		}
+	}
+	ids = append(ids, vpTaskIDs(v.Overdue)...)
+	ids = append(ids, vpTaskIDs(v.Earlier)...)
+	return ids
+}
+
+// vpUpcomingIDs collects the ids of every Upcoming section (Overdue, the
+// date groups and Earlier), duplicates included.
+func vpUpcomingIDs(v *model.UpcomingView) []string {
+	var ids []string
+	ids = append(ids, vpTaskIDs(v.Overdue)...)
+	for _, group := range v.Dates {
+		ids = append(ids, vpTaskIDs(group.Tasks)...)
+	}
+	ids = append(ids, vpTaskIDs(v.Earlier)...)
+	return ids
+}
+
+// vpAnytimeIDs collects the ids of an Anytime or Someday view.
+func vpAnytimeIDs(v *model.AnytimeView) []string {
+	var ids []string
+	for _, area := range v.Areas {
+		for _, project := range area.Projects {
+			ids = append(ids, vpTaskIDs(project.Tasks)...)
+		}
+		ids = append(ids, vpTaskIDs(area.StandaloneTasks)...)
+	}
+	for _, project := range v.NoArea.Projects {
+		ids = append(ids, vpTaskIDs(project.Tasks)...)
+	}
+	ids = append(ids, vpTaskIDs(v.NoArea.StandaloneTasks)...)
+	return ids
+}
+
+// vpAnytimeTitles lists the titles of an Anytime or Someday view.
+func vpAnytimeTitles(v *model.AnytimeView) []string {
+	titles := make([]string, 0)
+	for _, area := range v.Areas {
+		for _, project := range area.Projects {
+			for _, task := range project.Tasks {
+				titles = append(titles, task.Title)
+			}
+		}
+		for _, task := range area.StandaloneTasks {
+			titles = append(titles, task.Title)
+		}
+	}
+	for _, project := range v.NoArea.Projects {
+		for _, task := range project.Tasks {
+			titles = append(titles, task.Title)
+		}
+	}
+	for _, task := range v.NoArea.StandaloneTasks {
+		titles = append(titles, task.Title)
+	}
+	return titles
+}
+
+// vpUpcomingDateTitles lists the titles inside the Upcoming date groups.
+func vpUpcomingDateTitles(v *model.UpcomingView) []string {
+	var titles []string
+	for _, group := range v.Dates {
+		for _, task := range group.Tasks {
+			titles = append(titles, task.Title)
+		}
+	}
+	return titles
+}
+
+// vpGroupTaskIDs collects the ids of grouped view tasks (Logbook, Trash).
+func vpGroupTaskIDs(groups []model.DateGroup) []string {
+	var ids []string
+	for _, group := range groups {
+		ids = append(ids, vpTaskIDs(group.Tasks)...)
+	}
+	return ids
+}
+
+// vpDistinct removes duplicate ids while keeping order.
+func vpDistinct(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// vpOccurrences counts how often id appears in ids.
+func vpOccurrences(ids []string, id string) int {
+	count := 0
+	for _, candidate := range ids {
+		if candidate == id {
+			count++
+		}
+	}
+	return count
+}
+
+// vpStripScheduleRows removes every task_schedules row of the task while
+// keeping when_date set: the shape pre-019 rows and sync pushes produce, and
+// the input for the synthetic-schedule rule.
+func vpStripScheduleRows(t *testing.T, db *sql.DB, taskID string) {
+	t.Helper()
+	if _, err := db.Exec("DELETE FROM task_schedules WHERE task_id = ?", taskID); err != nil {
+		t.Fatalf("strip schedule rows of %s: %v", taskID, err)
+	}
+}
+
+// vpApplyMigration029 runs the zero-padding migration SQL verbatim.
+func vpApplyMigration029(t *testing.T, db *sql.DB) {
+	t.Helper()
+	content, err := os.ReadFile("../database/migrations/029_zero_pad_schedule_times.sql")
+	if err != nil {
+		t.Fatalf("read migration 029: %v", err)
+	}
+	if _, err := db.Exec(string(content)); err != nil {
+		t.Fatalf("apply migration 029: %v", err)
+	}
+}
+
+// TestViews_DeadlineOnlyLooseTask pins E3: a task with a deadline but no
+// project, area or when_date is in Inbox, never in Anytime, and lands in
+// Overdue (deadline yesterday), Today (deadline today) or neither
+// (deadline tomorrow).
+func TestViews_DeadlineOnlyLooseTask(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	fixtures := []struct{ title, deadline string }{
+		{"Deadline yesterday", vpYesterday},
+		{"Deadline today", vpToday},
+		{"Deadline tomorrow", vpTomorrow},
+	}
+	for _, f := range fixtures {
+		deadline := f.deadline
+		if _, err := taskRepo.Create(model.CreateTaskInput{Title: f.title, Deadline: &deadline}); err != nil {
+			t.Fatalf("create %s: %v", f.title, err)
+		}
+	}
+
+	inbox, err := viewRepo.Inbox(nil, true)
+	if err != nil {
+		t.Fatalf("inbox view: %v", err)
+	}
+	inboxTitles := tzTaskTitles(inbox.Tasks)
+	for _, f := range fixtures {
+		if !tzHas(inboxTitles, f.title) {
+			t.Errorf("deadline-only loose task %q must be in Inbox; inbox has %v", f.title, inboxTitles)
+		}
+	}
+
+	anytime, err := viewRepo.Anytime()
+	if err != nil {
+		t.Fatalf("anytime view: %v", err)
+	}
+	anytimeTitles := vpAnytimeTitles(anytime)
+	for _, f := range fixtures {
+		if tzHas(anytimeTitles, f.title) {
+			t.Errorf("deadline-only loose task %q must never be in Anytime; anytime has %v", f.title, anytimeTitles)
+		}
+	}
+
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	dayTitles := tzTodayTitles(tv)
+	overdueTitles := tzTaskTitles(tv.Overdue)
+	if !tzHas(overdueTitles, "Deadline yesterday") {
+		t.Errorf("deadline yesterday must be in Overdue; got %v", overdueTitles)
+	}
+	if !tzHas(dayTitles, "Deadline today") {
+		t.Errorf("deadline today must be in the Today section; got %v", dayTitles)
+	}
+	if tzHas(overdueTitles, "Deadline today") || tzHas(overdueTitles, "Deadline tomorrow") {
+		t.Errorf("deadline today/tomorrow must not be in Overdue; got %v", overdueTitles)
+	}
+	if tzHas(dayTitles, "Deadline yesterday") || tzHas(dayTitles, "Deadline tomorrow") {
+		t.Errorf("deadline yesterday/tomorrow must not be in the Today section; got %v", dayTitles)
+	}
+
+	up, err := viewRepo.Upcoming("")
+	if err != nil {
+		t.Fatalf("upcoming view: %v", err)
+	}
+	dateTitles := vpUpcomingDateTitles(up)
+	earlierTitles := tzTaskTitles(up.Earlier)
+	for _, f := range fixtures {
+		if tzHas(dateTitles, f.title) {
+			t.Errorf("deadline-only loose task %q must not be in Upcoming dates; got %v", f.title, dateTitles)
+		}
+		if tzHas(earlierTitles, f.title) {
+			t.Errorf("deadline-only loose task %q must not be in Upcoming Earlier; got %v", f.title, earlierTitles)
+		}
+	}
+}
+
+// TestViews_PastDateWithoutSchedulesInEarlier pins E3: Earlier holds every
+// open task with when_date < today, not someday, regardless of schedule
+// rows — including one with no rows at all.
+func TestViews_PastDateWithoutSchedulesInEarlier(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	when := vpYesterday
+	task, err := taskRepo.Create(model.CreateTaskInput{Title: "Past without rows", WhenDate: &when})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	vpStripScheduleRows(t, db, task.ID)
+
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	if titles := tzTaskTitles(tv.Earlier); !tzHas(titles, "Past without rows") {
+		t.Errorf("rowless task dated %s must be in Today's Earlier; got %v", vpYesterday, titles)
+	}
+	if titles := tzTodayTitles(tv); tzHas(titles, "Past without rows") {
+		t.Errorf("rowless past task must not be in the Today section; got %v", titles)
+	}
+	if titles := tzTaskTitles(tv.Overdue); tzHas(titles, "Past without rows") {
+		t.Errorf("rowless past task without deadline must not be in Overdue; got %v", titles)
+	}
+
+	up, err := viewRepo.Upcoming("")
+	if err != nil {
+		t.Fatalf("upcoming view: %v", err)
+	}
+	if titles := tzTaskTitles(up.Earlier); !tzHas(titles, "Past without rows") {
+		t.Errorf("rowless task dated %s must be in Upcoming's Earlier; got %v", vpYesterday, titles)
+	}
+	if titles := vpUpcomingDateTitles(up); tzHas(titles, "Past without rows") {
+		t.Errorf("rowless past task must not be in Upcoming dates; got %v", titles)
+	}
+}
+
+// TestViews_FutureDateWithoutScheduleInUpcoming pins E3: a task with a
+// when_date and no schedule rows counts as one uncompleted schedule on that
+// when_date, so a rowless future task appears in Upcoming.
+func TestViews_FutureDateWithoutScheduleInUpcoming(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	when := vpTomorrow
+	task, err := taskRepo.Create(model.CreateTaskInput{Title: "Future without rows", WhenDate: &when})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	vpStripScheduleRows(t, db, task.ID)
+
+	up, err := viewRepo.Upcoming("")
+	if err != nil {
+		t.Fatalf("upcoming view: %v", err)
+	}
+	var found bool
+	for _, group := range up.Dates {
+		for _, item := range group.Tasks {
+			if item.ID == task.ID {
+				found = true
+				if group.Date != vpTomorrow {
+						t.Errorf("rowless future task grouped under %q, want %q", group.Date, vpTomorrow)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("rowless task dated %s must be in Upcoming dates; got groups %v", vpTomorrow, tzGroupDates(up.Dates))
+	}
+
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	if ids := vpTodayOpenIDs(tv); vpOccurrences(ids, task.ID) != 0 {
+		t.Errorf("future task must not be in any Today section")
+	}
+}
+
+// TestViews_TodayAllSchedulesDoneInNoList pins the single documented
+// exception to placement: a task dated today whose schedule rows all exist
+// and are completed is in no list at all.
+func TestViews_TodayAllSchedulesDoneInNoList(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	when := vpToday
+	task, err := taskRepo.Create(model.CreateTaskInput{Title: "Today all schedules done", WhenDate: &when})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := db.Exec("UPDATE task_schedules SET completed = 1 WHERE task_id = ?", task.ID); err != nil {
+		t.Fatalf("complete schedule row: %v", err)
+	}
+
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	if ids := vpTodayOpenIDs(tv); vpOccurrences(ids, task.ID) != 0 {
+		t.Errorf("task with all today schedules completed must be in no Today section; got %v", ids)
+	}
+
+	inbox, err := viewRepo.Inbox(nil, true)
+	if err != nil {
+		t.Fatalf("inbox view: %v", err)
+	}
+	if ids := vpTaskIDs(inbox.Tasks); vpOccurrences(ids, task.ID) != 0 {
+		t.Errorf("task with when_date must not be in Inbox; got %v", ids)
+	}
+
+	anytime, err := viewRepo.Anytime()
+	if err != nil {
+		t.Fatalf("anytime view: %v", err)
+	}
+	if ids := vpAnytimeIDs(anytime); vpOccurrences(ids, task.ID) != 0 {
+		t.Errorf("task with when_date must not be in Anytime; got %v", ids)
+	}
+
+	someday, err := viewRepo.Someday()
+	if err != nil {
+		t.Fatalf("someday view: %v", err)
+	}
+	if ids := vpAnytimeIDs(someday); vpOccurrences(ids, task.ID) != 0 {
+		t.Errorf("task dated today must not be in Someday; got %v", ids)
+	}
+
+	up, err := viewRepo.Upcoming("")
+	if err != nil {
+		t.Fatalf("upcoming view: %v", err)
+	}
+	if ids := vpUpcomingIDs(up); vpOccurrences(ids, task.ID) != 0 {
+		t.Errorf("task with all today schedules completed must be in no Upcoming section; got %v", ids)
+	}
+
+	counts, err := viewRepo.Counts(nil, true)
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+	if counts.Today != 0 || counts.Inbox != 0 || counts.Anytime != 0 || counts.Someday != 0 {
+		t.Errorf("task with all today schedules completed must not be counted; got %+v", counts)
+	}
+}
+
+// TestViews_EveryOpenTaskPlaced pins E3 placement: every open, non-trashed
+// task is in at least one of Inbox, Today, Upcoming, Anytime or Someday —
+// except the task whose today schedules are all completed.
+func TestViews_EveryOpenTaskPlaced(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	scheduleRepo := repository.NewScheduleRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	if _, err := db.Exec("INSERT INTO areas (id, title) VALUES ('vp_a1', 'Area')"); err != nil {
+		t.Fatalf("insert area: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO projects (id, title, area_id) VALUES ('vp_p1', 'Project', 'vp_a1')"); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+
+	someday := "someday"
+	eveningStart := "19:00"
+	eveningEnd := "20:00"
+	fixtures := []model.CreateTaskInput{
+		{Title: "loose undated"},
+		{Title: "loose deadline yesterday", Deadline: &vpYesterday},
+		{Title: "loose deadline today", Deadline: &vpToday},
+		{Title: "loose deadline tomorrow", Deadline: &vpTomorrow},
+		{Title: "past without rows", WhenDate: &vpYesterday},
+		{Title: "past with row", WhenDate: &vpYesterday},
+		{Title: "past all completed", WhenDate: &vpYesterday},
+		{Title: "today without rows", WhenDate: &vpToday},
+		{Title: "today with row", WhenDate: &vpToday},
+		{Title: "today all completed", WhenDate: &vpToday}, // the exception
+		{Title: "today day and evening", WhenDate: &vpToday},
+		{Title: "future without rows", WhenDate: &vpTomorrow},
+		{Title: "future with row", WhenDate: &vpTomorrow},
+		{Title: "loose someday", WhenDate: &someday},
+		{Title: "project someday", WhenDate: &someday, ProjectID: strPtr("vp_p1")},
+		{Title: "project undated", ProjectID: strPtr("vp_p1")},
+		{Title: "area standalone undated", AreaID: strPtr("vp_a1")},
+		{Title: "multi past and future", WhenDate: &vpYesterday},
+		{Title: "overdue and earlier", WhenDate: &vpYesterday, Deadline: &vpYesterday},
+	}
+	created := make(map[string]string, len(fixtures)) // title -> id
+	for _, f := range fixtures {
+		task, err := taskRepo.Create(f)
+		if err != nil {
+			t.Fatalf("create %s: %v", f.Title, err)
+		}
+		created[f.Title] = task.ID
+	}
+
+	// Row-level tweaks the create API cannot express.
+	vpStripScheduleRows(t, db, created["past without rows"])
+	vpStripScheduleRows(t, db, created["today without rows"])
+	vpStripScheduleRows(t, db, created["future without rows"])
+	if _, err := db.Exec("UPDATE task_schedules SET completed = 1 WHERE task_id = ?", created["past all completed"]); err != nil {
+		t.Fatalf("complete past rows: %v", err)
+	}
+	if _, err := db.Exec("UPDATE task_schedules SET completed = 1 WHERE task_id = ?", created["today all completed"]); err != nil {
+		t.Fatalf("complete today rows: %v", err)
+	}
+	if _, err := scheduleRepo.Create(created["today day and evening"], model.CreateTaskScheduleInput{
+		WhenDate: vpToday, StartTime: &eveningStart, EndTime: &eveningEnd,
+	}); err != nil {
+		t.Fatalf("add evening schedule: %v", err)
+	}
+	if _, err := scheduleRepo.Create(created["multi past and future"], model.CreateTaskScheduleInput{
+		WhenDate: vpTomorrow,
+	}); err != nil {
+		t.Fatalf("add future schedule: %v", err)
+	}
+
+	placed := make(map[string]bool)
+	mark := func(ids []string) {
+		for _, id := range ids {
+			placed[id] = true
+		}
+	}
+	inbox, err := viewRepo.Inbox(nil, true)
+	if err != nil {
+		t.Fatalf("inbox view: %v", err)
+	}
+	mark(vpTaskIDs(inbox.Tasks))
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	mark(vpTodayOpenIDs(tv))
+	up, err := viewRepo.Upcoming("")
+	if err != nil {
+		t.Fatalf("upcoming view: %v", err)
+	}
+	mark(vpUpcomingIDs(up))
+	anytime, err := viewRepo.Anytime()
+	if err != nil {
+		t.Fatalf("anytime view: %v", err)
+	}
+	mark(vpAnytimeIDs(anytime))
+	somedayView, err := viewRepo.Someday()
+	if err != nil {
+		t.Fatalf("someday view: %v", err)
+	}
+	mark(vpAnytimeIDs(somedayView))
+
+	exception := created["today all completed"]
+	for title, id := range created {
+		if id == exception {
+			if placed[id] {
+				t.Errorf("exception task %q must be in no list", title)
+			}
+			continue
+		}
+		if !placed[id] {
+			t.Errorf("open task %q is in no list", title)
+		}
+	}
+}
+
+// TestCounts_DistinctTasks pins C2: every count equals the distinct task ids
+// of its view, so a task with a day and an evening schedule today and a task
+// in both Overdue and Earlier each count once.
+func TestCounts_DistinctTasks(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	scheduleRepo := repository.NewScheduleRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	if _, err := db.Exec("INSERT INTO areas (id, title) VALUES ('vp_a1', 'Area')"); err != nil {
+		t.Fatalf("insert area: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO projects (id, title, area_id) VALUES ('vp_p1', 'Project', 'vp_a1')"); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+
+	dayEvening, err := taskRepo.Create(model.CreateTaskInput{Title: "Day and evening today", WhenDate: &vpToday})
+	if err != nil {
+		t.Fatalf("create day+evening task: %v", err)
+	}
+	eveningStart, eveningEnd := "19:00", "20:00"
+	if _, err := scheduleRepo.Create(dayEvening.ID, model.CreateTaskScheduleInput{
+		WhenDate: vpToday, StartTime: &eveningStart, EndTime: &eveningEnd,
+	}); err != nil {
+		t.Fatalf("add evening schedule: %v", err)
+	}
+	overdueEarlier, err := taskRepo.Create(model.CreateTaskInput{
+		Title: "Overdue and earlier", WhenDate: &vpYesterday, Deadline: &vpYesterday,
+	})
+	if err != nil {
+		t.Fatalf("create overdue+earlier task: %v", err)
+	}
+	someday := "someday"
+	for _, f := range []model.CreateTaskInput{
+		{Title: "Loose"},
+		{Title: "Project undated", ProjectID: strPtr("vp_p1")},
+		{Title: "Someday", WhenDate: &someday},
+		{Title: "Past", WhenDate: &vpYesterday},
+		{Title: "Future", WhenDate: &vpTomorrow},
+	} {
+		if _, err := taskRepo.Create(f); err != nil {
+			t.Fatalf("create %s: %v", f.Title, err)
+		}
+	}
+	done, err := taskRepo.Create(model.CreateTaskInput{Title: "Done"})
+	if err != nil {
+		t.Fatalf("create done task: %v", err)
+	}
+	if _, err := taskRepo.SetDoneStatus(done.ID, "completed"); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	deleted, err := taskRepo.Create(model.CreateTaskInput{Title: "Deleted"})
+	if err != nil {
+		t.Fatalf("create deleted task: %v", err)
+	}
+	if _, err := db.Exec("UPDATE tasks SET deleted_at = datetime('now') WHERE id = ?", deleted.ID); err != nil {
+		t.Fatalf("trash task: %v", err)
+	}
+
+	counts, err := viewRepo.Counts(nil, true)
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+
+	inbox, err := viewRepo.Inbox(nil, true)
+	if err != nil {
+		t.Fatalf("inbox view: %v", err)
+	}
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	anytime, err := viewRepo.Anytime()
+	if err != nil {
+		t.Fatalf("anytime view: %v", err)
+	}
+	somedayView, err := viewRepo.Someday()
+	if err != nil {
+		t.Fatalf("someday view: %v", err)
+	}
+	logbook, err := viewRepo.Logbook(50, 0)
+	if err != nil {
+		t.Fatalf("logbook view: %v", err)
+	}
+	trash, err := viewRepo.Trash(50, 0)
+	if err != nil {
+		t.Fatalf("trash view: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		got  int
+		ids  []string
+	}{
+		{"inbox", counts.Inbox, vpDistinct(vpTaskIDs(inbox.Tasks))},
+		{"today", counts.Today, vpDistinct(vpTodayOpenIDs(tv))},
+		{"overdue", counts.Overdue, vpDistinct(vpTaskIDs(tv.Overdue))},
+		{"anytime", counts.Anytime, vpDistinct(vpAnytimeIDs(anytime))},
+		{"someday", counts.Someday, vpDistinct(vpAnytimeIDs(somedayView))},
+		{"logbook", counts.Logbook, vpDistinct(vpGroupTaskIDs(logbook.Groups))},
+		{"trash", counts.Trash, vpDistinct(vpGroupTaskIDs(trash.Groups))},
+	} {
+		if tc.got != len(tc.ids) {
+			t.Errorf("count %s = %d, but the view holds %d distinct ids", tc.name, tc.got, len(tc.ids))
+		}
+	}
+
+	// The day+evening task appears on two Today rows but counts once.
+	if raw := vpTodayOpenIDs(tv); vpOccurrences(raw, dayEvening.ID) != 2 {
+		t.Errorf("fixture error: day+evening task should appear on two Today rows, got %d", vpOccurrences(raw, dayEvening.ID))
+	}
+	// The overdue+earlier task is in both sections and counts once in each.
+	if ids := vpTaskIDs(tv.Overdue); vpOccurrences(ids, overdueEarlier.ID) != 1 {
+		t.Errorf("overdue+earlier task must be in Overdue once")
+	}
+	if ids := vpTaskIDs(tv.Earlier); vpOccurrences(ids, overdueEarlier.ID) != 1 {
+		t.Errorf("overdue+earlier task must be in Earlier once")
+	}
+}
+
+// TestUpcoming_StartsTomorrowAndEarlierRelativeToToday pins E3: the default
+// from is tomorrow, an explicit from still overrides, and the Overdue and
+// Earlier sections stay relative to today.
+func TestUpcoming_StartsTomorrowAndEarlierRelativeToToday(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	for _, f := range []model.CreateTaskInput{
+		{Title: "Scheduled today", WhenDate: &vpToday},
+		{Title: "Scheduled tomorrow", WhenDate: &vpTomorrow},
+		{Title: "Scheduled past", WhenDate: &vpYesterday},
+		{Title: "Deadline past", Deadline: &vpYesterday},
+	} {
+		if _, err := taskRepo.Create(f); err != nil {
+			t.Fatalf("create %s: %v", f.Title, err)
+		}
+	}
+
+	up, err := viewRepo.Upcoming("")
+	if err != nil {
+		t.Fatalf("upcoming view: %v", err)
+	}
+	for _, group := range up.Dates {
+		if group.Date == vpToday {
+			t.Errorf("default from must skip today; got a group dated %q", vpToday)
+		}
+	}
+	if len(up.Dates) == 0 || up.Dates[0].Date != vpTomorrow {
+		t.Fatalf("first Upcoming group must be %q; got %v", vpTomorrow, tzGroupDates(up.Dates))
+	}
+	if titles := vpUpcomingDateTitles(up); !tzHas(titles, "Scheduled tomorrow") {
+		t.Errorf("Scheduled tomorrow must be in Upcoming dates; got %v", titles)
+	}
+	if titles := vpUpcomingDateTitles(up); tzHas(titles, "Scheduled today") {
+		t.Errorf("Scheduled today must not be in Upcoming dates with the default from; got %v", titles)
+	}
+	if titles := tzTaskTitles(up.Earlier); tzHas(titles, "Scheduled today") {
+		t.Errorf("Scheduled today must not be in Upcoming's Earlier; got %v", titles)
+	}
+	if titles := tzTaskTitles(up.Earlier); !tzHas(titles, "Scheduled past") {
+		t.Errorf("Scheduled past must be in Upcoming's Earlier (relative to today); got %v", titles)
+	}
+	if titles := tzTaskTitles(up.Overdue); !tzHas(titles, "Deadline past") {
+		t.Errorf("Deadline past must be in Upcoming's Overdue (relative to today); got %v", titles)
+	}
+
+	// An explicit from is still honored.
+	fromToday, err := viewRepo.Upcoming(vpToday)
+	if err != nil {
+		t.Fatalf("upcoming view: %v", err)
+	}
+	if len(fromToday.Dates) == 0 || fromToday.Dates[0].Date != vpToday {
+		t.Fatalf("explicit from=%s must be honored; got %v", vpToday, tzGroupDates(fromToday.Dates))
+	}
+	if titles := vpUpcomingDateTitles(fromToday); !tzHas(titles, "Scheduled today") {
+		t.Errorf("Scheduled today must be in Upcoming dates with explicit from=%s; got %v", vpToday, titles)
+	}
+	if titles := tzTaskTitles(fromToday.Earlier); tzHas(titles, "Scheduled today") {
+		t.Errorf("Earlier must stay relative to today with an explicit from; got %v", titles)
+	}
+	if titles := tzTaskTitles(fromToday.Earlier); !tzHas(titles, "Scheduled past") {
+		t.Errorf("Scheduled past must stay in Earlier with an explicit from; got %v", titles)
+	}
+}
+
+// TestToday_Legacy900NotEvening pins D1/E3: after migration 029 zero-pads a
+// legacy 9:00 start time to 09:00, the entry belongs to the Today section,
+// not This Evening.
+func TestToday_Legacy900NotEvening(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	when := vpToday
+	task, err := taskRepo.Create(model.CreateTaskInput{Title: "Legacy nine o'clock", WhenDate: &when})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := db.Exec("UPDATE task_schedules SET start_time = '9:00' WHERE task_id = ?", task.ID); err != nil {
+		t.Fatalf("plant legacy start_time: %v", err)
+	}
+	vpApplyMigration029(t, db)
+
+	var start string
+	if err := db.QueryRow("SELECT start_time FROM task_schedules WHERE task_id = ?", task.ID).Scan(&start); err != nil {
+		t.Fatalf("read start_time: %v", err)
+	}
+	if start != "09:00" {
+		t.Fatalf("migration 029 must store 09:00, got %q", start)
+	}
+
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	if titles := tzTodayTitles(tv); !tzHas(titles, "Legacy nine o'clock") {
+		t.Errorf("a 09:00 schedule belongs to the Today section; got %v", titles)
+	}
+	if len(tv.Sections) < 2 {
+		t.Fatalf("expected the This Evening section; got %d sections", len(tv.Sections))
+	}
+	var eveningTitles []string
+	for _, group := range tv.Sections[1].Groups {
+		for _, item := range group.Tasks {
+				eveningTitles = append(eveningTitles, item.Title)
+		}
+	}
+	if tzHas(eveningTitles, "Legacy nine o'clock") {
+		t.Errorf("a 09:00 schedule must not be in This Evening; got %v", eveningTitles)
 	}
 }

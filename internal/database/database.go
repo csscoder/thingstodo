@@ -44,6 +44,33 @@ func Open(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
+// CheckScheduleTimeFormats logs every task_schedules start_time and
+// end_time that still fails the HH:MM shape after migration 029 zero-padded
+// single-digit hours. It only reports; it never modifies rows and never
+// exits, so a stray legacy value cannot keep the server from starting.
+func CheckScheduleTimeFormats(db *sql.DB) {
+	rows, err := db.Query(`
+		SELECT id, 'start_time', start_time FROM task_schedules
+			WHERE start_time IS NOT NULL AND start_time NOT GLOB '[0-9][0-9]:[0-5][0-9]'
+		UNION ALL
+		SELECT id, 'end_time', end_time FROM task_schedules
+			WHERE end_time IS NOT NULL AND end_time NOT GLOB '[0-9][0-9]:[0-5][0-9]'
+		ORDER BY 1`)
+	if err != nil {
+		log.Printf("WARNING: schedule time format check failed: %v", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, field, value string
+		if err := rows.Scan(&id, &field, &value); err != nil {
+			log.Printf("WARNING: schedule time format check scan: %v", err)
+			return
+		}
+		log.Printf("WARNING: task_schedules %s has %s %q that is not HH:MM; leaving it unchanged", id, field, value)
+	}
+}
+
 func runMigrations(db *sql.DB) error {
 	// Create migrations tracking table.
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS _migrations (

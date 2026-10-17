@@ -72,6 +72,10 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Report schedule times that survived migration 029 without an HH:MM
+	// shape; logging only, the server keeps starting.
+	database.CheckScheduleTimeFormats(db)
+
 	broker := sse.NewBroker()
 
 	// Seed default user from LOGIN_PASSWORD if set and no users exist yet

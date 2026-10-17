@@ -1,6 +1,7 @@
 package database_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/collinjanssen/thingstodo/internal/testutil"
@@ -183,6 +184,66 @@ func TestSchemaTaskCascadeDelete(t *testing.T) {
 		_ = db.QueryRow(tc.query).Scan(&count)
 		if count != 0 {
 			t.Errorf("expected %s to be cascade-deleted with task, got count=%d", tc.table, count)
+		}
+	}
+}
+
+// TestMigration029_ZeroPads pins E3/D1: the migration zero-pads single-digit
+// hour times (9:00 -> 09:00), leaves HH:MM and unparseable values alone, and
+// re-running it is a no-op.
+func TestMigration029_ZeroPads(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+
+	// The migration ran when the test database was opened.
+	var applied int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM _migrations WHERE name = '029_zero_pad_schedule_times.sql'",
+	).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("expected migration 029 to be recorded, got applied=%d err=%v", applied, err)
+	}
+
+	rows := []struct{ id, start, end string }{
+		{"s_pad", "9:00", "9:30"},
+		{"s_ok", "09:30", "10:15"},
+		{"s_junk", "junk", "also junk"},
+	}
+	for _, row := range rows {
+		if _, err := db.Exec("INSERT INTO tasks (id, title) VALUES (?, ?)", row.id, row.id); err != nil {
+			t.Fatalf("insert task %s: %v", row.id, err)
+		}
+		if _, err := db.Exec(
+			"INSERT INTO task_schedules (id, task_id, when_date, start_time, end_time) VALUES (?, ?, '2026-10-17', ?, ?)",
+			row.id, row.id, row.start, row.end,
+		); err != nil {
+			t.Fatalf("insert schedule %s: %v", row.id, err)
+		}
+	}
+
+	content, err := os.ReadFile("migrations/029_zero_pad_schedule_times.sql")
+	if err != nil {
+		t.Fatalf("read migration 029: %v", err)
+	}
+	// Apply twice: the GLOB filter makes the second pass a no-op.
+	for i := 0; i < 2; i++ {
+		if _, err := db.Exec(string(content)); err != nil {
+			t.Fatalf("apply migration 029 (pass %d): %v", i+1, err)
+		}
+	}
+
+	want := map[string][2]string{
+		"s_pad":  {"09:00", "09:30"},
+		"s_ok":   {"09:30", "10:15"},
+		"s_junk": {"junk", "also junk"},
+	}
+	for id, expected := range want {
+		var start, end string
+		if err := db.QueryRow(
+			"SELECT start_time, end_time FROM task_schedules WHERE id = ?", id,
+		).Scan(&start, &end); err != nil {
+			t.Fatalf("read schedule %s: %v", id, err)
+		}
+		if start != expected[0] || end != expected[1] {
+			t.Errorf("%s: got %q/%q, want %q/%q", id, start, end, expected[0], expected[1])
 		}
 	}
 }

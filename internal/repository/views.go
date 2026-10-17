@@ -79,6 +79,10 @@ func utcToLocalDay(ts string, loc *time.Location) string {
 }
 
 func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*model.InboxView, error) {
+	inboxCond, inboxArgs, err := listCondition("inbox", r.today(), "")
+	if err != nil {
+		return nil, err
+	}
 	rows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -97,9 +101,8 @@ func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*mo
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.project_id IS NULL AND t.area_id IS NULL
-			AND t.status = 'open' AND t.when_date IS NULL AND t.deleted_at IS NULL
-		ORDER BY t.sort_order_today ASC`)
+		WHERE ` + inboxCond + `
+		ORDER BY t.sort_order_today ASC`, inboxArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -164,10 +167,10 @@ func (r *ViewRepository) Inbox(reviewAfterDays *int, includeRecurring bool) (*mo
 func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error) {
 	today := r.today()
 
-	// Today tasks: JOIN task_schedules so multi-schedule entries for today each appear.
-	// Includes tasks where ANY schedule entry matches today (not just when_date).
-	// Excludes evening entries (start_time >= eveningStartsAt).
-	// Tasks without any schedule entry for today (e.g. deadline-only) use LEFT JOIN.
+	// Today tasks: LEFT JOIN task_schedules so multi-schedule entries for
+	// today each appear. Membership comes from todaySectionsCond; the day
+	// section keeps entries with no start time or one before eveningStartsAt.
+	sectionsCond, sectionsArgs := todaySectionsCond(today)
 	todayRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -188,16 +191,10 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 			ts.id AS schedule_entry_id
 		FROM tasks t
 		LEFT JOIN task_schedules ts ON ts.task_id = t.id AND ts.when_date = ?
-		WHERE t.status = 'open'
-			AND (
-				(t.when_date = ?
-					AND (NOT EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date = ?)
-						OR EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date = ? AND completed = 0)))
-				OR t.deadline = ?
-				OR EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date = ? AND completed = 0))
-			AND t.deleted_at IS NULL
+		WHERE ` + sectionsCond + `
 			AND (ts.start_time IS NULL OR ts.start_time < ?)
-		ORDER BY t.sort_order_today ASC, ts.start_time ASC`, today, today, today, today, today, today, eveningStartsAt)
+		ORDER BY t.sort_order_today ASC, ts.start_time ASC`,
+		append([]any{today}, append(sectionsArgs, eveningStartsAt)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +202,8 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	todayTasks := scanTodayTaskListItems(r.db, todayRows)
 	populateActionableScheduleFlags(r.db, todayTasks, r.today())
 
-	// Evening tasks: schedule entry's start_time >= eveningStartsAt
+	// Evening tasks: same membership, but the joined entry's start_time is
+	// at or after eveningStartsAt.
 	eveningRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -226,16 +224,10 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 			ts.id AS schedule_entry_id
 		FROM tasks t
 		LEFT JOIN task_schedules ts ON ts.task_id = t.id AND ts.when_date = ?
-		WHERE t.status = 'open'
-			AND (
-				(t.when_date = ?
-					AND (NOT EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date = ?)
-						OR EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date = ? AND completed = 0)))
-				OR t.deadline = ?
-				OR EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date = ? AND completed = 0))
-			AND t.deleted_at IS NULL
+		WHERE ` + sectionsCond + `
 			AND ts.start_time IS NOT NULL AND ts.start_time >= ?
-		ORDER BY t.sort_order_today ASC, ts.start_time ASC`, today, today, today, today, today, today, eveningStartsAt)
+		ORDER BY t.sort_order_today ASC, ts.start_time ASC`,
+		append([]any{today}, append(sectionsArgs, eveningStartsAt)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +236,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	populateActionableScheduleFlags(r.db, eveningTasks, r.today())
 
 	// Overdue
+	overdueCondSQL, overdueArgs := overdueCond(today)
 	overdueRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -262,8 +255,8 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.status = 'open' AND t.deadline < ? AND t.deleted_at IS NULL
-		ORDER BY t.deadline ASC`, today)
+		WHERE ` + overdueCondSQL + `
+		ORDER BY t.deadline ASC`, overdueArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -271,8 +264,10 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	overdueTasks := scanTaskListItems(r.db, overdueRows)
 	populateActionableScheduleFlags(r.db, overdueTasks, r.today())
 
-	// Earlier: tasks with when_date before today, but not overdue (no overdue deadline)
-	// Only include tasks that have at least one uncompleted past schedule entry
+	// Earlier: open tasks with when_date before today and not someday,
+	// regardless of schedule rows (E3). A task with an overdue deadline may
+	// appear here and in Overdue at once.
+	earlierCondSQL, earlierArgs := earlierCond(today)
 	earlierRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -292,12 +287,9 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id AND when_date < ? AND when_date != 'someday' AND completed = 0 ORDER BY sort_order ASC LIMIT 1),
 			(SELECT id FROM task_schedules WHERE task_id = t.id AND when_date < ? AND when_date != 'someday' AND completed = 0 ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.status = 'open'
-			AND t.when_date < ? AND t.when_date != 'someday'
-			AND (t.deadline IS NULL OR t.deadline >= ?)
-			AND t.deleted_at IS NULL
-			AND EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date < ? AND when_date != 'someday' AND completed = 0)
-		ORDER BY t.when_date ASC, t.sort_order_today ASC`, today, today, today, today, today, today)
+		WHERE ` + earlierCondSQL + `
+		ORDER BY t.when_date ASC, t.sort_order_today ASC`,
+		append([]any{today, today, today}, earlierArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -351,10 +343,15 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 }
 
 func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
+	today := r.today()
 	if from == "" {
-		from = r.today()
+		// E3: Upcoming starts tomorrow unless from overrides it.
+		from = r.now().In(r.loc).AddDate(0, 0, 1).Format("2006-01-02")
 	}
-	// JOIN task_schedules so a task with multiple schedule dates appears once per date
+	// LEFT JOIN task_schedules so a task with multiple schedule dates appears
+	// once per date, and a task with a when_date but no schedule rows appears
+	// on its when_date (the synthetic schedule of E3).
+	datesCond, datesArgs := upcomingDatesJoinCond(from)
 	rows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -373,11 +370,12 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 			ts.start_time,
 			ts.end_time,
 			ts.id AS schedule_entry_id,
-			ts.when_date AS schedule_date
+			COALESCE(ts.when_date, t.when_date) AS schedule_date
 		FROM tasks t
-		JOIN task_schedules ts ON ts.task_id = t.id AND ts.completed = 0
-		WHERE t.status = 'open' AND ts.when_date >= ? AND ts.when_date != 'someday' AND t.deleted_at IS NULL
-		ORDER BY ts.when_date ASC, ts.start_time ASC, t.sort_order_today ASC`, from)
+		LEFT JOIN task_schedules ts ON ts.task_id = t.id AND ts.when_date >= ? AND ts.when_date != 'someday' AND ts.completed = 0
+		WHERE ` + datesCond + `
+		ORDER BY COALESCE(ts.when_date, t.when_date) ASC, ts.start_time ASC, t.sort_order_today ASC`,
+		append([]any{from}, datesArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +404,9 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 		dates = []model.DateGroup{}
 	}
 
-	// Overdue: tasks with deadline before today
+	// Overdue: tasks with deadline before today (E3: relative to today,
+	// never to from)
+	overdueCondSQL, overdueArgs := overdueCond(today)
 	overdueRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -425,8 +425,8 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.status = 'open' AND t.deadline < ? AND t.deleted_at IS NULL
-		ORDER BY t.deadline ASC`, from)
+		WHERE ` + overdueCondSQL + `
+		ORDER BY t.deadline ASC`, overdueArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -434,8 +434,9 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 	overdueTasks := scanTaskListItems(r.db, overdueRows)
 	populateActionableScheduleFlags(r.db, overdueTasks, r.today())
 
-	// Earlier: tasks with when_date before the from date, not someday, not overdue
-	// Only include tasks that have at least one uncompleted past schedule entry
+	// Earlier: open tasks with when_date before today and not someday,
+	// regardless of schedule rows (E3: relative to today, never to from)
+	earlierCondSQL, earlierArgs := earlierCond(today)
 	earlierRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -455,18 +456,15 @@ func (r *ViewRepository) Upcoming(from string) (*model.UpcomingView, error) {
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id AND when_date < ? AND when_date != 'someday' AND completed = 0 ORDER BY sort_order ASC LIMIT 1),
 			(SELECT id FROM task_schedules WHERE task_id = t.id AND when_date < ? AND when_date != 'someday' AND completed = 0 ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.status = 'open'
-			AND t.when_date < ? AND t.when_date != 'someday'
-			AND (t.deadline IS NULL OR t.deadline >= ?)
-			AND t.deleted_at IS NULL
-			AND EXISTS(SELECT 1 FROM task_schedules WHERE task_id = t.id AND when_date < ? AND when_date != 'someday' AND completed = 0)
-		ORDER BY t.when_date ASC, t.sort_order_today ASC`, from, from, from, from, from, from)
+		WHERE ` + earlierCondSQL + `
+		ORDER BY t.when_date ASC, t.sort_order_today ASC`,
+		append([]any{today, today, today}, earlierArgs...)...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = earlierRows.Close() }()
 	earlierTasks := scanTodayTaskListItems(r.db, earlierRows)
-	populatePastScheduleCounts(r.db, earlierTasks, from)
+	populatePastScheduleCounts(r.db, earlierTasks, today)
 	populateActionableScheduleFlags(r.db, earlierTasks, r.today())
 
 	return &model.UpcomingView{Overdue: overdueTasks, Dates: dates, Earlier: earlierTasks}, nil
@@ -556,10 +554,16 @@ func (r *ViewRepository) buildAnytimeView(somedayOnly bool) (*model.AnytimeView,
 }
 
 func (r *ViewRepository) getAnytimeTasks(projectID, areaID *string, byProject, somedayOnly bool) []model.TaskListItem {
-	var query string
-	var args []interface{}
+	list := "anytime"
+	if somedayOnly {
+		list = "someday"
+	}
+	cond, args, err := listCondition(list, r.today(), "")
+	if err != nil {
+		return []model.TaskListItem{}
+	}
 
-	query = `
+	query := `
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
 			t.sort_order_today, t.sort_order_project, t.sort_order_heading,
@@ -576,7 +580,7 @@ func (r *ViewRepository) getAnytimeTasks(projectID, areaID *string, byProject, s
 			(SELECT exact_at FROM reminders WHERE task_id = t.id ORDER BY created_at LIMIT 1),
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
-		FROM tasks t WHERE t.status = 'open' AND t.deleted_at IS NULL`
+		FROM tasks t WHERE ` + cond
 
 	if byProject && projectID != nil {
 		query += " AND t.project_id = ?"
@@ -587,12 +591,6 @@ func (r *ViewRepository) getAnytimeTasks(projectID, areaID *string, byProject, s
 			query += " AND t.area_id = ?"
 			args = append(args, *areaID)
 		}
-	}
-
-	if somedayOnly {
-		query += " AND t.when_date = 'someday'"
-	} else {
-		query += " AND t.when_date IS NULL"
 	}
 
 	query += " ORDER BY t.sort_order_today ASC"
@@ -607,9 +605,20 @@ func (r *ViewRepository) getAnytimeTasks(projectID, areaID *string, byProject, s
 	return tasks
 }
 
+// getAnytimeStandaloneNoArea lists the view's no-area standalone tasks.
+// For anytime the shared predicate and the standalone context contradict
+// each other — a loose task belongs to the Inbox (E3) — so the result is
+// always empty; someday keeps loose tasks.
 func (r *ViewRepository) getAnytimeStandaloneNoArea(somedayOnly bool) []model.TaskListItem {
-	var query string
-	query = `
+	list := "anytime"
+	if somedayOnly {
+		list = "someday"
+	}
+	cond, args, err := listCondition(list, r.today(), "")
+	if err != nil {
+		return []model.TaskListItem{}
+	}
+	query := `
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
 			t.sort_order_today, t.sort_order_project, t.sort_order_heading,
@@ -627,17 +636,10 @@ func (r *ViewRepository) getAnytimeStandaloneNoArea(somedayOnly bool) []model.Ta
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.status = 'open' AND t.project_id IS NULL AND t.area_id IS NULL AND t.deleted_at IS NULL`
+		WHERE ` + cond + ` AND t.project_id IS NULL AND t.area_id IS NULL
+		ORDER BY t.sort_order_today ASC`
 
-	if somedayOnly {
-		query += " AND t.when_date = 'someday'"
-	} else {
-		query += " AND t.when_date IS NULL AND t.deadline IS NOT NULL"
-	}
-
-	query += " ORDER BY t.sort_order_today ASC"
-
-	rows, err := r.db.Query(query)
+	rows, err := r.db.Query(query, args...)
 	if err != nil {
 		return []model.TaskListItem{}
 	}
@@ -652,8 +654,14 @@ func (r *ViewRepository) Logbook(limit, offset int) (*model.LogbookView, error) 
 		limit = 50
 	}
 
+	logbookCond, logbookArgs, err := listCondition("logbook", r.today(), "")
+	if err != nil {
+		return nil, err
+	}
+
 	var total int
-	_ = r.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status IN ('completed', 'canceled', 'wont_do') AND deleted_at IS NULL").Scan(&total)
+	_ = r.db.QueryRow("SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE " + logbookCond,
+		logbookArgs...).Scan(&total)
 
 	rows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
@@ -673,9 +681,9 @@ func (r *ViewRepository) Logbook(limit, offset int) (*model.LogbookView, error) 
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.status IN ('completed', 'canceled', 'wont_do') AND t.deleted_at IS NULL
+		WHERE ` + logbookCond + `
 		ORDER BY COALESCE(t.completed_at, t.canceled_at, t.updated_at) DESC
-		LIMIT ? OFFSET ?`, limit, offset)
+		LIMIT ? OFFSET ?`, append(append([]any{}, logbookArgs...), limit, offset)...)
 	if err != nil {
 		return nil, err
 	}
@@ -717,8 +725,14 @@ func (r *ViewRepository) Trash(limit, offset int) (*model.LogbookView, error) {
 		limit = 50
 	}
 
+	trashCond, trashArgs, err := listCondition("trash", r.today(), "")
+	if err != nil {
+		return nil, err
+	}
+
 	var total int
-	_ = r.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NOT NULL").Scan(&total)
+	_ = r.db.QueryRow("SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE "+trashCond,
+		trashArgs...).Scan(&total)
 
 	rows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
@@ -738,9 +752,9 @@ func (r *ViewRepository) Trash(limit, offset int) (*model.LogbookView, error) {
 			(SELECT start_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1),
 			(SELECT end_time FROM task_schedules WHERE task_id = t.id ORDER BY sort_order ASC LIMIT 1)
 		FROM tasks t
-		WHERE t.deleted_at IS NOT NULL
+		WHERE ` + trashCond + `
 		ORDER BY t.deleted_at DESC
-		LIMIT ? OFFSET ?`, limit, offset)
+		LIMIT ? OFFSET ?`, append(append([]any{}, trashArgs...), limit, offset)...)
 	if err != nil {
 		return nil, err
 	}
@@ -934,19 +948,59 @@ func groupByProject(db *sql.DB, tasks []model.TaskListItem) []model.TaskGroup {
 	return groups
 }
 
+// Counts returns one COUNT(DISTINCT t.id) per view, each built from the
+// same listCondition predicate as the view itself (C2), so a count always
+// equals the distinct task ids of its view — including today, which spans
+// the Today, This Evening, Overdue and Earlier sections.
 func (r *ViewRepository) Counts(reviewAfterDays *int, includeRecurring bool) (*model.ViewCounts, error) {
 	today := r.today()
 	var c model.ViewCounts
-	err := r.db.QueryRow(`
+
+	inboxCond, inboxArgs, err := listCondition("inbox", today, "")
+	if err != nil {
+		return nil, err
+	}
+	todayCond, todayArgs, err := listCondition("today", today, "")
+	if err != nil {
+		return nil, err
+	}
+	overdueCondSQL, overdueArgs := overdueCond(today)
+	anytimeCond, anytimeArgs, err := listCondition("anytime", today, "")
+	if err != nil {
+		return nil, err
+	}
+	somedayCond, somedayArgs, err := listCondition("someday", today, "")
+	if err != nil {
+		return nil, err
+	}
+	logbookCond, logbookArgs, err := listCondition("logbook", today, "")
+	if err != nil {
+		return nil, err
+	}
+	trashCond, trashArgs, err := listCondition("trash", today, "")
+	if err != nil {
+		return nil, err
+	}
+
+	args := make([]any, 0, 7)
+	args = append(args, inboxArgs...)
+	args = append(args, todayArgs...)
+	args = append(args, overdueArgs...)
+	args = append(args, anytimeArgs...)
+	args = append(args, somedayArgs...)
+	args = append(args, logbookArgs...)
+	args = append(args, trashArgs...)
+
+	err = r.db.QueryRow(`
 		SELECT
-			(SELECT COUNT(*) FROM tasks WHERE project_id IS NULL AND area_id IS NULL AND status = 'open' AND when_date IS NULL AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM tasks WHERE status = 'open' AND (when_date = ? OR deadline = ?) AND (deadline IS NULL OR deadline >= ?) AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM tasks WHERE status = 'open' AND deadline < ? AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM tasks WHERE status = 'open' AND when_date IS NULL AND deleted_at IS NULL AND (project_id IS NOT NULL OR area_id IS NOT NULL OR deadline IS NOT NULL)),
-			(SELECT COUNT(*) FROM tasks WHERE status = 'open' AND when_date = 'someday' AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM tasks WHERE status IN ('completed', 'canceled', 'wont_do') AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM tasks WHERE deleted_at IS NOT NULL)
-	`, today, today, today, today).Scan(&c.Inbox, &c.Today, &c.Overdue, &c.Anytime, &c.Someday, &c.Logbook, &c.Trash)
+			(SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE `+inboxCond+`),
+			(SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE `+todayCond+`),
+			(SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE `+overdueCondSQL+`),
+			(SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE `+anytimeCond+`),
+			(SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE `+somedayCond+`),
+			(SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE `+logbookCond+`),
+			(SELECT COUNT(DISTINCT t.id) FROM tasks t WHERE `+trashCond+`)
+	`, args...).Scan(&c.Inbox, &c.Today, &c.Overdue, &c.Anytime, &c.Someday, &c.Logbook, &c.Trash)
 	if err != nil {
 		return nil, err
 	}

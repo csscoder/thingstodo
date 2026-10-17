@@ -1110,8 +1110,12 @@ Errors (400 `VALIDATION` with `field`): a value outside the enums and ranges doc
 
 Pre-structured data for each smart list. Complex grouping/filtering happens server-side.
 
+All views share one set of membership predicates, and `/views/counts` counts `COUNT(DISTINCT id)` with the same predicates, so a count always equals the distinct tasks of its view. "Today" is resolved in the server timezone.
+
+Placement rule: every open, non-trashed task appears in at least one of Inbox, Today (any section), Upcoming, Anytime and Someday. The single documented exception: a task dated today whose schedule rows all exist and are completed appears in **no** list — its work for the date is done; it comes back when it is rescheduled or its schedules reopen. A task with a `when_date` and no `task_schedules` rows counts as one uncompleted schedule on that `when_date`.
+
 ### GET /api/views/inbox
-Tasks with no project, no area, no when_date, status=open.
+Open tasks with no project, no area and no `when_date`. A deadline-only "loose" task (deadline set, nothing else) stays in Inbox — it is never in Anytime — and still appears in Today (deadline today) or Overdue (deadline passed).
 ```json
 {
   "tasks": [/* task objects ordered by sort_order_today */],
@@ -1120,6 +1124,12 @@ Tasks with no project, no area, no when_date, status=open.
 ```
 
 ### GET /api/views/today
+Four open sections plus the day's completed log. Sections may overlap: a task with a day and an evening schedule appears in both Today and This Evening, and a task with a passed `when_date` and a passed deadline appears in both Overdue and Earlier.
+
+- **Today / This Evening**: open tasks due today (`deadline` = today) or with an uncompleted schedule entry for today; a rowless task dated today counts as one uncompleted entry. The day section holds entries with no `start_time` or one before the user's `evening_starts_at`; This Evening holds entries at or after it (times are zero-padded `HH:MM`).
+- **Overdue**: open tasks with `deadline < today`.
+- **Earlier**: open tasks with `when_date < today`, not `someday`, regardless of schedule rows — a rowless past task included.
+- **Completed**: tasks completed, canceled or marked won't-do during the local calendar day.
 ```json
 {
   "sections": [
@@ -1142,31 +1152,34 @@ Tasks with no project, no area, no when_date, status=open.
       ]
     }
   ],
-  "overdue": [/* tasks with deadline < today */],
-  "earlier": [/* past-dated open tasks without overdue deadlines */],
+  "overdue": [/* open tasks with deadline < today */],
+  "earlier": [/* open tasks with when_date < today, not someday */],
   "completed": [/* tasks completed today */]
 }
 ```
 
 ### GET /api/views/upcoming
-Query params: `from` (ISO date, default today)
+Query params: `from` (ISO date, default **tomorrow** in the server timezone; an explicit `from` is still honored)
 
-Tasks with multiple schedule entries appear once per date. Each task in the response includes a `schedule_date` field indicating which date it appears under.
+Date groups list one entry per uncompleted schedule row on or after `from`; a task with a `when_date` and no schedule rows appears once under its `when_date`. Each task in the response includes a `schedule_date` field indicating which date it appears under.
+
+The **Overdue** and **Earlier** sections stay in the response and are both relative to **today**, never to `from`, so a task dated today never lands in Upcoming at all with the default `from`.
 
 ```json
 {
-  "overdue": [/* tasks with deadline < today */],
+  "overdue": [/* open tasks with deadline < today */],
   "dates": [
     {
       "date": "2024-03-15",
       "tasks": [/* task objects, each with extra "schedule_date" field */]
     }
   ],
-  "earlier": [/* past-dated open tasks */]
+  "earlier": [/* open tasks with when_date < today, not someday */]
 }
 ```
 
 ### GET /api/views/anytime
+Open tasks with no `when_date` that belong to a project or an area. Loose tasks (no project, no area, no `when_date`) are Inbox only, so `no_area.standalone_tasks` is always empty here.
 ```json
 {
   "areas": [
@@ -1183,13 +1196,13 @@ Tasks with multiple schedule entries appear once per date. Each task in the resp
   ],
   "no_area": {
     "projects": [/* projects with no area */],
-    "standalone_tasks": [/* tasks with no area, no project, but with when_date or not inbox */]
+    "standalone_tasks": []
   }
 }
 ```
 
 ### GET /api/views/someday
-Same structure as anytime but filtered to someday-deferred items.
+Same structure as anytime, filtered to open tasks with `when_date = 'someday'` (loose someday tasks included under `no_area.standalone_tasks`).
 ```json
 {
   "areas": [/* same structure as anytime */],
@@ -1199,6 +1212,8 @@ Same structure as anytime but filtered to someday-deferred items.
 
 ### GET /api/views/logbook
 Query params: `limit` (default 50), `offset` (default 0)
+
+Tasks with status `completed`, `canceled` or `wont_do`, not trashed, grouped by completion date in the server timezone. `total` is the distinct task count.
 ```json
 {
   "groups": [
@@ -1213,6 +1228,8 @@ Query params: `limit` (default 50), `offset` (default 0)
 
 ### GET /api/views/trash
 Query params: `limit` (default 50), `offset` (default 0)
+
+Soft-deleted tasks (any status), grouped by deletion date in the server timezone. `total` is the distinct task count.
 ```json
 {
   "groups": [
@@ -1226,6 +1243,7 @@ Query params: `limit` (default 50), `offset` (default 0)
 ```
 
 ### GET /api/views/counts
+One `COUNT(DISTINCT id)` per view using the same predicates as the views above; completed tasks are excluded from the open lists. `today` counts the distinct tasks across the Today, This Evening, Overdue and Earlier sections; `overdue` matches the Overdue section of Today/Upcoming.
 Response (200):
 ```json
 {
