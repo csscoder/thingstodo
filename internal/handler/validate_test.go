@@ -1,6 +1,13 @@
 package handler
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	// Embed the tz database so Europe/Moscow resolves in any build
+	// environment (CI containers may ship without system tzdata).
+	_ "time/tzdata"
+)
 
 // TestValidators covers the pure boundary validators used by every handler.
 func TestValidators(t *testing.T) {
@@ -31,6 +38,45 @@ func TestValidators(t *testing.T) {
 	for _, tc := range cases {
 		if tc.got != tc.want {
 			t.Errorf("%s: expected %v, got %v", tc.name, tc.want, tc.got)
+		}
+	}
+}
+
+// TestNormalizeExactAt covers the exact-reminder time normalizer: RFC 3339
+// with a numeric offset or Z passes through as UTC, a naive timestamp is read
+// in the given location, and garbage is rejected.
+func TestNormalizeExactAt(t *testing.T) {
+	msk, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatalf("load Europe/Moscow: %v", err)
+	}
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"offset +03:00", "2026-10-20T09:00:00+03:00", "2026-10-20T06:00:00Z"},
+		{"Z", "2026-10-20T06:00:00Z", "2026-10-20T06:00:00Z"},
+		{"negative offset", "2026-10-20T01:30:00-05:00", "2026-10-20T06:30:00Z"},
+		{"naive without seconds in Europe/Moscow", "2026-10-20T09:00", "2026-10-20T06:00:00Z"},
+		{"naive with seconds in Europe/Moscow", "2026-10-20T09:00:30", "2026-10-20T06:00:30Z"},
+	}
+	for _, tc := range cases {
+		got, err := normalizeExactAt(tc.in, msk)
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: normalizeExactAt(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+	for _, bad := range []string{
+		"", "not-a-time", "2026-10-20", "2026-10-20 09:00",
+		"2026-13-01T09:00", "2026-02-31T09:00", "2026-10-20T25:00",
+	} {
+		if got, err := normalizeExactAt(bad, msk); err == nil {
+			t.Errorf("normalizeExactAt(%q): expected error, got %q", bad, got)
 		}
 	}
 }

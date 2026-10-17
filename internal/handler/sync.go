@@ -34,6 +34,7 @@ type SyncHandler struct {
 	reminders   *repository.ReminderRepository
 	repeatRules *repository.RepeatRuleRepository
 	scheduler   *scheduler.Scheduler
+	loc         *time.Location
 }
 
 // NewSyncHandler creates a new SyncHandler.
@@ -50,7 +51,11 @@ func NewSyncHandler(
 	reminders *repository.ReminderRepository,
 	repeatRules *repository.RepeatRuleRepository,
 	sched *scheduler.Scheduler,
+	loc *time.Location,
 ) *SyncHandler {
+	if loc == nil {
+		loc = time.UTC
+	}
 	return &SyncHandler{
 		changeLog:   changeLog,
 		tasks:       tasks,
@@ -64,6 +69,7 @@ func NewSyncHandler(
 		reminders:   reminders,
 		repeatRules: repeatRules,
 		scheduler:   sched,
+		loc:         loc,
 	}
 }
 
@@ -851,6 +857,9 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 			if _, ok := input.Raw["deadline"]; ok && input.Deadline != nil && !isDate(*input.Deadline) {
 				return syncFieldError(result, "deadline", "must be YYYY-MM-DD")
 			}
+			if _, ok := input.Raw["status"]; ok && input.Status != nil && !isProjectStatus(*input.Status) {
+				return syncFieldError(result, "status", "must be open, completed or canceled")
+			}
 			if _, ok := input.Raw["area_id"]; ok && input.AreaID != nil {
 				if field, msg, ok := refFound(h.tasks.Conn(), "areas", "area_id", "area not found", *input.AreaID); !ok {
 					return syncFieldError(result, field, msg)
@@ -1387,6 +1396,9 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 			return syncFieldError(result, field, msg)
 		}
 		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
+			return syncFieldError(result, field, msg)
+		}
+		if field, msg, ok := validateReminderCreate(&input, h.loc); !ok {
 			return syncFieldError(result, field, msg)
 		}
 		_, err := h.reminders.Create(taskID, input)

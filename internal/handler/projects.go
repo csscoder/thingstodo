@@ -117,6 +117,10 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeFieldError(w, http.StatusBadRequest, "deadline must be YYYY-MM-DD", "VALIDATION", "deadline")
 		return
 	}
+	if _, ok := input.Raw["status"]; ok && input.Status != nil && !isProjectStatus(*input.Status) {
+		writeFieldError(w, http.StatusBadRequest, "status must be open, completed or canceled", "VALIDATION", "status")
+		return
+	}
 	if _, ok := input.Raw["area_id"]; ok && input.AreaID != nil &&
 		!refExists(w, h.repo.Conn(), "areas", "area", "area_id", *input.AreaID) {
 		return

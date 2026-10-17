@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
 	"github.com/collinjanssen/thingstodo/internal/repository"
@@ -37,7 +38,7 @@ func setupSyncRouterWithDB(t *testing.T) (*testutil.TestClient, *repository.Chan
 	repeatRuleRepo := repository.NewRepeatRuleRepository(db, changeLogRepo)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil)
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, nil, time.UTC)
 
 	r := chi.NewRouter()
 	r.Get("/api/sync/pull", syncH.Pull)

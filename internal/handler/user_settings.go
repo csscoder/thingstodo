@@ -45,6 +45,10 @@ func (h *UserSettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Raw = raw
+	if field, msg, ok := validateSettingsPatch(&input); !ok {
+		writeFieldError(w, http.StatusBadRequest, msg, "VALIDATION", field)
+		return
+	}
 	settings, err := h.repo.Update(userID, input)
 	if err != nil {
 		log.Printf("ERROR user_settings.Update userID=%s: %v", userID, err)

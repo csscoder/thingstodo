@@ -67,6 +67,8 @@ All entity IDs are nanoid strings (8-10 chars). Task IDs double as permalink slu
 Mutation endpoints validate request fields at the API boundary, before any write reaches the database. Every validation error uses the error envelope above with code `VALIDATION` and the offending `field`:
 
 - **Malformed values → 400** `VALIDATION`: dates that are not real `YYYY-MM-DD` calendar dates (`2026-02-31` is rejected), `when_date` values that are neither a date nor `someday`, times not in `HH:MM` 24-hour form (`9:00`, `24:00`), client-supplied `id` values outside `^[A-Za-z0-9_-]{8,21}$`, empty titles on create/update, and `end_time` earlier than or equal to `start_time`.
+- **Reminder, repeat, settings and status fields → 400** `VALIDATION`: reminder `type` outside the documented set, reminder `value` outside 0-99, `exact` reminders without a parseable `exact_at`; repeat patterns with an unknown `type`, `every` below 1, an unknown `mode`, or invalid weekday/ordinal/day/month values; user settings fields outside their documented enums and ranges (`sort_areas`, `sort_tags`, `evening_starts_at`, `time_format`, `font_size`, `default_reminder_type`, `default_reminder_value`, `notification_provider`); project `status` outside `open|completed|canceled`.
+- **`exact_at` normalization**: reminder `exact_at` accepts RFC 3339 with a numeric offset or `Z`, or a naive `YYYY-MM-DDTHH:MM[:SS]` timestamp read in the server timezone, and is stored and returned as UTC RFC 3339 (`2026-10-20T09:00:00+03:00` → `2026-10-20T06:00:00Z`).
 - **Referenced ids that do not exist → 422** `VALIDATION`: `project_id`, `area_id`, `heading_id`, `tag_ids`, `parent_tag_id` and `task_id` (URL or body) must reference an existing row. A task create with both `project_id` and `heading_id` requires the heading to belong to that project.
 - Client ids apply to every create endpoint that accepts a body `id`: tasks, projects, areas, tags, headings, checklist items, schedules, reminders, link attachments, and sync creates.
 - Bulk `set_when`/`set_deadline` validate their date params the same way (an empty string clears the date and stays allowed); `PATCH /api/tasks/:id/move` validates `when_date` and its reference params.
@@ -513,12 +515,14 @@ Type+value encoding:
 Request:
 ```json
 {
-  "type": "minutes_before",
+  "type": "at_start|on_day|minutes_before|hours_before|days_before|exact",
   "value": 15,
   "exact_at": "optional, for exact type only"
 }
 ```
 Response (201): Created reminder object
+
+Errors (400 `VALIDATION` with `field`): unknown `type`; `value` outside 0-99; `exact` without `exact_at`; unparseable `exact_at` (see the normalization rule above — `exact_at` is stored and returned as UTC RFC 3339).
 
 ### DELETE /api/reminders/:id
 Response (204): No content
@@ -642,8 +646,10 @@ Response (200): Project with nested headings and tasks
 ```
 
 ### PATCH /api/projects/:id
-Request: Partial update
+Request: Partial update (`title`, `notes`, `area_id`, `status`, `when_date`, `deadline`, `tag_ids`)
 Response (200): Updated project
+
+Errors (400 `VALIDATION` with `field`): `status` outside `open|completed|canceled` (date, id and title rules are shared with other endpoints).
 
 ### DELETE /api/projects/:id
 Response (204): No content
@@ -899,6 +905,8 @@ Request (legacy format — still accepted):
 
 Response (200): Repeat rule object
 
+Errors (400 `VALIDATION` with `field`): unknown pattern `type`; `every` below 1; `mode` outside `fixed|after_completion`; weekly `on` values outside the DayOfWeek set; `monthly_dom` `day` outside -30..31; invalid `ordinal` or `weekday`; `monthly_workday` `workday_position` outside `first|last`; `month` outside 1-12.
+
 ### DELETE /api/tasks/:id/repeat
 Response (204): No content
 
@@ -1060,6 +1068,8 @@ Request: Partial update (any subset of fields)
 ```
 
 Response (200): Updated settings object
+
+Errors (400 `VALIDATION` with `field`): a value outside the enums and ranges documented above for `sort_areas`, `sort_tags`, `evening_starts_at`, `time_format`, `font_size`, `default_reminder_type`, `default_reminder_value` or `notification_provider`. Omitted fields are not validated; `default_reminder_type: null` clears the value.
 
 ---
 

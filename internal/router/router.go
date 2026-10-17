@@ -65,12 +65,12 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	settingsH := handler.NewUserSettingsHandler(settingsRepo)
 	savedFilterH := handler.NewSavedFilterHandler(savedFilterRepo, broker)
 	scheduleH := handler.NewScheduleHandler(scheduleRepo, taskRepo, broker)
-	reminderH := handler.NewReminderHandler(reminderRepo, broker)
+	reminderH := handler.NewReminderHandler(reminderRepo, broker, cfg.Location)
 	pushSender := push.NewSender(pushSubRepo, cfg.VAPIDPrivateKey, cfg.VAPIDPublicKey, cfg.VAPIDContact)
 	ntfySender := push.NewNtfySender(settingsRepo, userRepo)
 	notifier := push.NewDispatcher(pushSender, ntfySender, settingsRepo, userRepo)
 	pushSubH := handler.NewPushSubscriptionHandler(pushSubRepo, cfg, notifier)
-	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched)
+	syncH := handler.NewSyncHandler(changeLogRepo, taskRepo, projectRepo, areaRepo, tagRepo, checklistRepo, headingRepo, attachmentRepo, scheduleRepo, reminderRepo, repeatRuleRepo, sched, cfg.Location)
 	eventH := handler.NewEventHandler(broker)
 
 	var oidcH *handler.OIDCHandler

@@ -72,6 +72,12 @@ func (tc *TestClient) Patch(path string, body interface{}) *TestResponse {
 	return tc.do("PATCH", path, body)
 }
 
+// Put sends a PUT request with a JSON body.
+func (tc *TestClient) Put(path string, body interface{}) *TestResponse {
+	tc.t.Helper()
+	return tc.do("PUT", path, body)
+}
+
 // Delete sends a DELETE request to the given path.
 func (tc *TestClient) Delete(path string) *TestResponse {
 	tc.t.Helper()

@@ -2,7 +2,6 @@ package handler
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -44,8 +43,8 @@ func (h *RepeatRuleHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 
 	// Validate: either pattern or legacy fields must be present
 	if input.Pattern != nil {
-		if err := validatePattern(input.Pattern); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), "VALIDATION")
+		if field, msg, ok := validatePattern(input.Pattern); !ok {
+			writeFieldError(w, http.StatusBadRequest, msg, "VALIDATION", field)
 			return
 		}
 	} else if input.Frequency == "" || input.Mode == "" {
@@ -113,54 +112,58 @@ var validOrdinals = map[string]bool{
 	"first": true, "second": true, "third": true, "fourth": true, "last": true,
 }
 
-func validatePattern(p *model.RecurrencePattern) error {
+// validatePattern applies the recurrence pattern rules and returns the
+// failing field and message for the error envelope.
+func validatePattern(p *model.RecurrencePattern) (string, string, bool) {
 	if !validPatternTypes[p.Type] {
-		return fmt.Errorf("invalid pattern type: %s", p.Type)
+		return "type", "invalid pattern type: " + string(p.Type), false
+	}
+	if p.Every < 1 {
+		return "every", "must be at least 1", false
 	}
 	if p.Mode != model.RecurrenceModeFixed && p.Mode != model.RecurrenceModeAfterCompletion {
-		return fmt.Errorf("invalid mode: %s", p.Mode)
+		return "mode", "invalid mode: " + string(p.Mode), false
 	}
 
 	switch p.Type {
 	case model.PatternWeekly:
 		for _, d := range p.On {
 			if !validWeekdays[d] {
-				return fmt.Errorf("invalid weekday: %s", d)
+				return "on", "invalid weekday: " + d, false
 			}
 		}
 	case model.PatternMonthlyDOM:
 		if p.Day != nil {
-			d := *p.Day
-			if d < -30 || d > 31 {
-				return fmt.Errorf("day must be between -30 and 31, got %d", d)
+			if d := *p.Day; d < -30 || d > 31 {
+				return "day", "must be between -30 and 31", false
 			}
 		}
 	case model.PatternMonthlyDOW:
 		if p.Ordinal != "" && !validOrdinals[p.Ordinal] {
-			return fmt.Errorf("invalid ordinal: %s", p.Ordinal)
+			return "ordinal", "invalid ordinal: " + p.Ordinal, false
 		}
 		if p.Weekday != "" && !validWeekdays[p.Weekday] {
-			return fmt.Errorf("invalid weekday: %s", p.Weekday)
+			return "weekday", "invalid weekday: " + p.Weekday, false
 		}
 	case model.PatternMonthlyWorkday:
 		if p.WorkdayPosition != "first" && p.WorkdayPosition != "last" {
-			return fmt.Errorf("workday_position must be 'first' or 'last'")
+			return "workday_position", "must be 'first' or 'last'", false
 		}
 	case model.PatternYearlyDate:
 		if p.Month < 1 || p.Month > 12 {
-			return fmt.Errorf("month must be between 1 and 12")
+			return "month", "must be between 1 and 12", false
 		}
 	case model.PatternYearlyDOW:
 		if p.Month < 1 || p.Month > 12 {
-			return fmt.Errorf("month must be between 1 and 12")
+			return "month", "must be between 1 and 12", false
 		}
 		if p.Ordinal != "" && !validOrdinals[p.Ordinal] {
-			return fmt.Errorf("invalid ordinal: %s", p.Ordinal)
+			return "ordinal", "invalid ordinal: " + p.Ordinal, false
 		}
 		if p.Weekday != "" && !validWeekdays[p.Weekday] {
-			return fmt.Errorf("invalid weekday: %s", p.Weekday)
+			return "weekday", "invalid weekday: " + p.Weekday, false
 		}
 	}
 
-	return nil
+	return "", "", true
 }

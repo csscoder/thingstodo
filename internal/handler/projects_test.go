@@ -166,3 +166,17 @@ func TestProjectHandlerListEmpty(t *testing.T) {
 		t.Errorf("expected 0 projects, got %d", len(projects))
 	}
 }
+
+func TestProjectUpdate_RejectsUnknownStatus(t *testing.T) {
+	client, _ := setupProjectRouter(t)
+	areaID := createTestArea(t, client)
+
+	createResp := client.Post("/api/projects", map[string]string{"title": "Status test", "area_id": areaID})
+	var created map[string]interface{}
+	createResp.JSON(t, &created)
+
+	resp := client.Patch("/api/projects/"+created["id"].(string), map[string]string{"status": "archived"})
+	testutil.AssertStatus(t, resp, http.StatusBadRequest)
+	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+	testutil.AssertJSONField(t, resp, "field", "status")
+}

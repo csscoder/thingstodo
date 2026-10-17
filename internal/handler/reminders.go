@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
@@ -12,10 +13,16 @@ import (
 type ReminderHandler struct {
 	repo   *repository.ReminderRepository
 	broker *sse.Broker
+	loc    *time.Location
 }
 
-func NewReminderHandler(repo *repository.ReminderRepository, broker *sse.Broker) *ReminderHandler {
-	return &ReminderHandler{repo: repo, broker: broker}
+// NewReminderHandler builds a ReminderHandler. loc is the location naive
+// exact_at timestamps are read in (cfg.Location); nil falls back to UTC.
+func NewReminderHandler(repo *repository.ReminderRepository, broker *sse.Broker, loc *time.Location) *ReminderHandler {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return &ReminderHandler{repo: repo, broker: broker, loc: loc}
 }
 
 func (h *ReminderHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -42,16 +49,8 @@ func (h *ReminderHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if !refExists(w, h.repo.Conn(), "tasks", "task", "task_id", taskID) {
 		return
 	}
-	switch input.Type {
-	case model.ReminderAtStart, model.ReminderOnDay, model.ReminderMinutesBefore,
-		model.ReminderHoursBefore, model.ReminderDaysBefore, model.ReminderExact:
-		// valid
-	default:
-		writeFieldError(w, http.StatusBadRequest, "invalid reminder type", "VALIDATION", "type")
-		return
-	}
-	if input.Type == model.ReminderExact && input.ExactAt == nil {
-		writeFieldError(w, http.StatusBadRequest, "exact_at is required for exact type", "VALIDATION", "exact_at")
+	if field, msg, ok := validateReminderCreate(&input, h.loc); !ok {
+		writeFieldError(w, http.StatusBadRequest, msg, "VALIDATION", field)
 		return
 	}
 	item, err := h.repo.Create(taskID, input)
