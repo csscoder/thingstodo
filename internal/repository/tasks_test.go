@@ -496,3 +496,29 @@ func TestTaskListItemMetadata(t *testing.T) {
 		t.Errorf("expected checklist_count=1, got %d", task.ChecklistCount)
 	}
 }
+
+// TestBulkAction_StatusActionsRejected pins that the repository has no
+// status-writing bulk path: finishing a task goes through the scheduler's
+// guarded FinishTask (TaskRepository.SetDoneStatus), never BulkAction.
+func TestBulkAction_StatusActionsRejected(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	repo := repository.NewTaskRepository(db, nil)
+
+	created, _ := repo.Create(model.CreateTaskInput{Title: "Bulk guard"})
+
+	for _, action := range []string{"complete", "cancel", "wontdo"} {
+		affected, err := repo.BulkAction(model.BulkActionInput{TaskIDs: []string{created.ID}, Action: action})
+		if err == nil {
+			t.Errorf("bulk action %q must be rejected by the repository", action)
+		}
+		if affected != 0 {
+			t.Errorf("bulk action %q: expected affected=0, got %d", action, affected)
+		}
+	}
+
+	// The task must be untouched by the rejected actions.
+	task, _ := repo.GetByID(created.ID)
+	if task == nil || task.Status != "open" {
+		t.Fatalf("task should still be open, got %+v", task)
+	}
+}

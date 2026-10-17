@@ -522,15 +522,6 @@ func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
 		for _, id := range input.TaskIDs {
 			var execErr error
 			switch input.Action {
-			case "complete":
-				_, execErr = db.Exec(
-					"UPDATE tasks SET status = 'completed', completed_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
-			case "cancel":
-				_, execErr = db.Exec(
-					"UPDATE tasks SET status = 'canceled', canceled_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
-			case "wontdo":
-				_, execErr = db.Exec(
-					"UPDATE tasks SET status = 'wont_do', updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
 			case "delete":
 				_, execErr = db.Exec(
 					"UPDATE tasks SET deleted_at = "+now+", updated_at = "+now+" WHERE id = ? AND deleted_at IS NULL", id)
