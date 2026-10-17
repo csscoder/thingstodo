@@ -67,6 +67,22 @@ func (r *HeadingRepository) ListAll() ([]model.Heading, error) {
 	return headings, rows.Err()
 }
 
+// GetByID returns the heading with the given id, or nil when no heading
+// has it.
+func (r *HeadingRepository) GetByID(id string) (*model.Heading, error) {
+	var h model.Heading
+	err := r.db.QueryRow(
+		"SELECT id, title, project_id, sort_order FROM headings WHERE id = ?", id).
+		Scan(&h.ID, &h.Title, &h.ProjectID, &h.SortOrder)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get heading: %w", err)
+	}
+	return &h, nil
+}
+
 func (r *HeadingRepository) Create(projectID string, input model.CreateHeadingInput) (*model.Heading, error) {
 	id := input.ID
 	if id == "" {

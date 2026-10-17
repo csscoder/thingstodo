@@ -168,7 +168,7 @@ func (r *AreaRepository) GetByID(id string) (*model.AreaDetail, error) {
 	return &a, nil
 }
 
-func (r *AreaRepository) Create(input model.CreateAreaInput) (*model.Area, error) {
+func (r *AreaRepository) Create(input model.CreateAreaInput) (*model.AreaDetail, error) {
 	id := input.ID
 	if id == "" {
 		id = model.NewID()
@@ -185,11 +185,13 @@ func (r *AreaRepository) Create(input model.CreateAreaInput) (*model.Area, error
 		return nil, fmt.Errorf("create area: %w", err)
 	}
 
-	var a model.Area
-	_ = r.db.QueryRow("SELECT id, title, sort_order, created_at, updated_at FROM areas WHERE id = ?", id).
-		Scan(&a.ID, &a.Title, &a.SortOrder, &a.CreatedAt, &a.UpdatedAt)
-	logChange(r.changeLog, "area", id, "create", nil, &a, "", "")
-	return &a, nil
+	// Answer with the same detail a GET of the area returns, so an
+	// idempotent replay of this create responds with an identical body.
+	area, err := r.GetByID(id)
+	if err == nil && area != nil {
+		logChange(r.changeLog, "area", id, "create", nil, area, "", "")
+	}
+	return area, err
 }
 
 func (r *AreaRepository) Update(id string, input model.UpdateAreaInput) (*model.Area, error) {

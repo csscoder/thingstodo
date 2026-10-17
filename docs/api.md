@@ -52,7 +52,12 @@ JSON request bodies are capped at 10 MiB (10485760 bytes), regardless of `Conten
 Exception: the route `POST /api/tasks/:id/attachments` is exempt from this middleware-level cap regardless of `Content-Type` (the exemption is keyed on route and method, not Content-Type). Multipart uploads there are capped by `MAX_UPLOAD_SIZE` instead (see below); JSON link-creates on that route remain capped at 10 MiB by the handler itself and return 413 `BODY_TOO_LARGE` beyond that.
 
 ### Duplicate Name Errors
-`POST` and `PATCH` for projects, areas, and tags return **409 Conflict** with code `DUPLICATE_NAME` if the title already exists.
+`POST` and `PATCH` for projects, areas, and tags return **409 Conflict** with code `DUPLICATE_NAME` if the title already exists. A retried create that carries the `id` of an already-stored entity is not a duplicate-name error — it replays 200 (see Idempotent Creates).
+
+### Idempotent Creates
+Every create endpoint that accepts a body `id` — tasks, projects, areas, tags, headings, checklist items, schedules, reminders and link attachments — is idempotent by that id. Validation runs first; if it passes and the `id` already exists in the target table, the endpoint returns **200** with the stored entity (the same shape a GET of that entity returns). Nothing is modified on the replay: no row is written, no SSE event is broadcast and no change-log entry is recorded, so retried creates from agents, widgets or shortcuts never duplicate. A body `id` that does not exist yet is created normally with **201**.
+
+For schedules, the replay check runs after the field validation but before the per-task entry limits (max 12 entries, only-first-`someday`, duplicate timeless date): a retried create of an entry that already exists replays 200 even when the task is now at those limits.
 
 ### Pagination (where applicable)
 Query params: `?limit=50&offset=0`
@@ -749,7 +754,7 @@ Request:
 { "title": "string (required)" }
 ```
 
-Response (201): Area object
+Response (201): Full area detail (same shape as GET /api/areas/:id; a new area has empty `projects`, `tasks` and `completed_tasks` collections)
 
 ### GET /api/areas/:id
 Response (200): Area with nested projects and tasks
@@ -972,6 +977,7 @@ Validation:
 - `start_time` requires `end_time`
 - `when_date` must be `YYYY-MM-DD` or `someday` (400 `when_date`); `start_time`/`end_time` must be `HH:MM` 24h (400 `start_time`/`end_time`); `end_time` must be after `start_time` (400 `end_time`)
 - Unknown `task_id` → 422 `VALIDATION` `task_id`
+- A create whose `id` already exists replays 200 before the entry limits above are applied (see Idempotent Creates)
 
 SSE: broadcasts `task_updated`
 

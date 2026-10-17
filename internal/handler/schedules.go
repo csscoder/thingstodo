@@ -70,6 +70,35 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// start_time requires end_time
+	if input.StartTime != nil && input.EndTime == nil {
+		writeFieldError(w, http.StatusBadRequest, "end_time is required when start_time is set", "VALIDATION", "end_time")
+		return
+	}
+	if input.StartTime != nil && input.EndTime != nil && *input.EndTime <= *input.StartTime {
+		writeFieldError(w, http.StatusBadRequest, "end_time must be after start_time", "VALIDATION", "end_time")
+		return
+	}
+
+	// Idempotent create: a client-supplied id that already exists replays
+	// the stored entry with 200 — no write, no broadcast, no change log. It
+	// runs after the field validation above but before the entry-count
+	// checks below: those decide whether a NEW entry may be added, and a
+	// replayed create already happened (a retry of the 12th entry or of the
+	// someday first entry must not be rejected by limits it already
+	// satisfies).
+	if input.ID != "" {
+		existing, err := h.repo.GetByID(input.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+			return
+		}
+		if existing != nil {
+			writeJSON(w, http.StatusOK, existing)
+			return
+		}
+	}
+
 	// Validate max 12 entries
 	count, err := h.repo.CountByTask(taskID)
 	if err != nil {
@@ -84,16 +113,6 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Non-first entries cannot be 'someday'
 	if count > 0 && input.WhenDate == "someday" {
 		writeError(w, http.StatusBadRequest, "only the first schedule entry can be 'someday'", "VALIDATION")
-		return
-	}
-
-	// start_time requires end_time
-	if input.StartTime != nil && input.EndTime == nil {
-		writeFieldError(w, http.StatusBadRequest, "end_time is required when start_time is set", "VALIDATION", "end_time")
-		return
-	}
-	if input.StartTime != nil && input.EndTime != nil && *input.EndTime <= *input.StartTime {
-		writeFieldError(w, http.StatusBadRequest, "end_time must be after start_time", "VALIDATION", "end_time")
 		return
 	}
 

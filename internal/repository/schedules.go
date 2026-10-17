@@ -85,6 +85,22 @@ func (r *ScheduleRepository) ListAll() ([]model.TaskSchedule, error) {
 	return items, rows.Err()
 }
 
+// GetByID returns the schedule entry with the given id, or nil when no
+// entry has it.
+func (r *ScheduleRepository) GetByID(id string) (*model.TaskSchedule, error) {
+	var s model.TaskSchedule
+	err := r.db.QueryRow(
+		"SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id).
+		Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get schedule: %w", err)
+	}
+	return &s, nil
+}
+
 func (r *ScheduleRepository) Create(taskID string, input model.CreateTaskScheduleInput) (*model.TaskSchedule, error) {
 	id := input.ID
 	if id == "" {

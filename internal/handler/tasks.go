@@ -138,6 +138,19 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if !tagsExist(w, db, "tag_ids", input.TagIDs) {
 		return
 	}
+	// Idempotent create: a client-supplied id that already exists replays
+	// the stored entity with 200 — no write, no broadcast, no change log.
+	if input.ID != "" {
+		existing, err := h.repo.GetByID(input.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+			return
+		}
+		if existing != nil {
+			writeJSON(w, http.StatusOK, existing)
+			return
+		}
+	}
 	// Read the settings before opening the transaction: GetOrCreate may write
 	// on its own connection, which would contend with the transaction below.
 	userID, _ := r.Context().Value(mw.UserIDKey).(string)

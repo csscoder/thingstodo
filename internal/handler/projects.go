@@ -82,6 +82,19 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if !tagsExist(w, h.repo.Conn(), "tag_ids", input.TagIDs) {
 		return
 	}
+	// Idempotent create: a client-supplied id that already exists replays
+	// the stored entity with 200 — no write, no broadcast, no change log.
+	if input.ID != "" {
+		existing, err := h.repo.GetByID(input.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "INTERNAL")
+			return
+		}
+		if existing != nil {
+			writeJSON(w, http.StatusOK, existing)
+			return
+		}
+	}
 	project, err := h.repo.Create(input)
 	if err != nil {
 		if errors.Is(err, repository.ErrDuplicateProjectName) {

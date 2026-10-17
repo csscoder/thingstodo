@@ -95,6 +95,24 @@ func (r *ChecklistRepository) ListAll() ([]model.ChecklistItem, error) {
 	return items, rows.Err()
 }
 
+// GetByID returns the checklist item with the given id, or nil when no
+// item has it.
+func (r *ChecklistRepository) GetByID(id string) (*model.ChecklistItem, error) {
+	var c model.ChecklistItem
+	var completed int
+	err := r.db.QueryRow(
+		"SELECT id, task_id, title, completed, sort_order FROM checklist_items WHERE id = ?", id).
+		Scan(&c.ID, &c.TaskID, &c.Title, &completed, &c.SortOrder)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get checklist item: %w", err)
+	}
+	c.Completed = completed == 1
+	return &c, nil
+}
+
 func (r *ChecklistRepository) Create(taskID string, input model.CreateChecklistInput) (*model.ChecklistItem, error) {
 	id := input.ID
 	if id == "" {

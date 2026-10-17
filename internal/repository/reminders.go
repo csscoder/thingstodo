@@ -91,6 +91,22 @@ func (r *ReminderRepository) ListAll() ([]model.Reminder, error) {
 	return items, rows.Err()
 }
 
+// GetByID returns the reminder with the given id, or nil when no reminder
+// has it.
+func (r *ReminderRepository) GetByID(id string) (*model.Reminder, error) {
+	var rm model.Reminder
+	err := r.db.QueryRow(
+		"SELECT id, task_id, type, value, exact_at, created_at FROM reminders WHERE id = ?", id).
+		Scan(&rm.ID, &rm.TaskID, &rm.Type, &rm.Value, &rm.ExactAt, &rm.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reminder: %w", err)
+	}
+	return &rm, nil
+}
+
 func (r *ReminderRepository) Create(taskID string, input model.CreateReminderInput) (*model.Reminder, error) {
 	id := input.ID
 	if id == "" {
