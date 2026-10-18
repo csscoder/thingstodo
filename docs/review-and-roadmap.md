@@ -289,7 +289,7 @@ To do:
 
 ### Project 3 — Built-in UI bugs and frontend tests (IN DESIGN)
 
-- **Spec:** `docs/superpowers/specs/2026-10-18-web-ui-sync-correctness-design.md` (approved 2026-10-18). A re-check on 2026-10-18 found the UI also breaks on server changes from Project 2 (403 under the Vite proxy, stuck sync entries, Trash lost on full sync); the spec covers those server fixes and the sync-push items Project 2 deferred here.
+- **Spec:** `docs/superpowers/specs/2026-10-18-web-ui-sync-correctness-design.md` (approved 2026-10-18). **Plan:** `docs/superpowers/plans/2026-10-18-web-ui-sync-correctness.md` (30 tasks). A re-check on 2026-10-18 found the UI also breaks on server changes from Project 2 (403 under the Vite proxy, stuck sync entries, Trash lost on full sync); the spec covers those server fixes and the sync-push items Project 2 deferred here.
 
 Goal: the secondary UI is correct and stops diverging from the server.
 
