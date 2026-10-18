@@ -1561,6 +1561,113 @@ func TestSyncPush_CompleteRecurringSpawnsOnce(t *testing.T) {
 	}
 }
 
+// TestSyncPushStatusChangeKeepsOtherFields (P1.6): one change may carry a
+// plain field and a status transition; both must apply. The status branch
+// may no longer return early and drop the rest of the change.
+func TestSyncPushStatusChangeKeepsOtherFields(t *testing.T) {
+	client, taskRepo, db := setupSyncRouterWithScheduler(t)
+
+	created, err := taskRepo.Create(model.CreateTaskInput{Title: "Original"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	result := pushSyncChanges(t, client, []map[string]interface{}{
+		syncChange("task", created.ID, "update",
+			map[string]interface{}{"title": "Renamed", "status": "completed"},
+			[]string{"title", "status"}),
+	})
+	if len(result.Results) != 1 || result.Results[0].Status != "applied" {
+		t.Fatalf("expected one applied change, got %+v", result.Results)
+	}
+
+	var title, status string
+	if err := db.QueryRow("SELECT title, status FROM tasks WHERE id = ?", created.ID).Scan(&title, &status); err != nil {
+		t.Fatalf("load task %s: %v", created.ID, err)
+	}
+	if title != "Renamed" {
+		t.Errorf("expected title %q, got %q", "Renamed", title)
+	}
+	if status != "completed" {
+		t.Errorf("expected status %q, got %q", "completed", status)
+	}
+}
+
+// TestSyncPushRestoreKeepsOtherFields (P1.6): a restore change that also
+// carries a plain field must restore the task and write the field.
+func TestSyncPushRestoreKeepsOtherFields(t *testing.T) {
+	client, _, taskRepo, db := setupSyncRouterWithDB(t)
+
+	created, err := taskRepo.Create(model.CreateTaskInput{Title: "Trashed"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := taskRepo.Delete(created.ID); err != nil {
+		t.Fatalf("trash task: %v", err)
+	}
+
+	result := pushSyncChanges(t, client, []map[string]interface{}{
+		syncChange("task", created.ID, "update",
+			map[string]interface{}{"deleted_at": nil, "notes": "n"},
+			[]string{"deleted_at", "notes"}),
+	})
+	if len(result.Results) != 1 || result.Results[0].Status != "applied" {
+		t.Fatalf("expected one applied change, got %+v", result.Results)
+	}
+
+	var deletedAt sql.NullString
+	var notes string
+	if err := db.QueryRow("SELECT deleted_at, notes FROM tasks WHERE id = ?", created.ID).Scan(&deletedAt, &notes); err != nil {
+		t.Fatalf("load task %s: %v", created.ID, err)
+	}
+	if deletedAt.Valid {
+		t.Errorf("expected task restored (deleted_at NULL), got %q", deletedAt.String)
+	}
+	if notes != "n" {
+		t.Errorf("expected notes %q, got %q", "n", notes)
+	}
+}
+
+// TestSyncPushFieldsThenStatusIsAtomic (P1.6): a change with an invalid
+// plain field plus a status transition is rejected whole before any write:
+// the task stays open and the invalid field is not stored.
+func TestSyncPushFieldsThenStatusIsAtomic(t *testing.T) {
+	client, taskRepo, db := setupSyncRouterWithScheduler(t)
+
+	created, err := taskRepo.Create(model.CreateTaskInput{Title: "Atomic"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	result := pushSyncChanges(t, client, []map[string]interface{}{
+		syncChange("task", created.ID, "update",
+			map[string]interface{}{"when_date": "tomorrow", "status": "completed"},
+			[]string{"when_date", "status"}),
+	})
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	r := result.Results[0]
+	if r.Status != "error" {
+		t.Fatalf("expected status 'error', got %q", r.Status)
+	}
+	if r.Code != "VALIDATION" {
+		t.Errorf("expected code VALIDATION, got %q (error: %s)", r.Code, r.Error)
+	}
+
+	var status string
+	var whenDate sql.NullString
+	if err := db.QueryRow("SELECT status, when_date FROM tasks WHERE id = ?", created.ID).Scan(&status, &whenDate); err != nil {
+		t.Fatalf("load task %s: %v", created.ID, err)
+	}
+	if status != "open" {
+		t.Errorf("expected task still open, got status %q", status)
+	}
+	if whenDate.Valid {
+		t.Errorf("expected when_date untouched (NULL), got %q", whenDate.String)
+	}
+}
+
 func TestSyncDeleteProject_TasksGoToTrash(t *testing.T) {
 	client, changeLogRepo, taskRepo, db := setupSyncRouterWithDB(t)
 

@@ -479,12 +479,31 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			status = "conflict_resolved"
 		}
 
-		// Build update input only for specified fields
+		// Build the update input from every field of the change. The
+		// status and deleted_at transitions are collected here, not
+		// applied: they run after the plain fields so one change applies
+		// everything it carries instead of returning early on the first
+		// transition field.
 		input := model.UpdateTaskInput{
 			Raw: make(map[string]json.RawMessage),
 		}
+		var statusVal string
+		var hasDeletedAt, deleted bool
 		for _, field := range change.Fields {
 			val := change.Data[field]
+
+			switch field {
+			case "status":
+				if s, ok := val.(string); ok {
+					statusVal = s
+				}
+				continue
+			case "deleted_at":
+				hasDeletedAt = true
+				deleted = val != nil
+				continue
+			}
+
 			rawVal, _ := json.Marshal(val)
 			input.Raw[field] = rawVal
 
@@ -554,61 +573,66 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 					// Explicit null → clear all tags
 					input.TagIDs = []string{}
 				}
-			case "status":
-				if s, ok := val.(string); ok {
-					switch s {
-					case "completed", "canceled", "wont_do":
-						// One finishing path: the guarded, transactional
-						// FinishTask (idempotent on re-push, spawns once).
-						if h.scheduler == nil {
-							result.Status = "error"
-							result.Code = "INTERNAL"
-							result.Error = "scheduler not available"
-							return result
-						}
-						if _, _, cErr := h.scheduler.FinishTask(change.EntityID, s); cErr != nil {
-							return syncFail(result, cErr)
-						}
-						h.broadcastTaskChange("task_updated", change.EntityID)
-						result.Status = status
-						return result
-					case "open":
-						if _, cErr := h.tasks.Reopen(change.EntityID); cErr != nil {
-							return syncFail(result, cErr)
-						}
-						h.broadcastTaskChange("task_updated", change.EntityID)
-						result.Status = status
-						return result
-					}
-				}
-			case "deleted_at":
-				if val != nil {
-					// Soft-delete
-					if cErr := h.tasks.Delete(change.EntityID); cErr != nil {
-						return syncFail(result, cErr)
-					}
-					h.broadcastTaskChange("task_deleted", change.EntityID)
-					result.Status = status
-					return result
-				}
-				// Restore (deleted_at = null)
-				if _, cErr := h.tasks.Restore(change.EntityID); cErr != nil {
-					return syncFail(result, cErr)
-				}
-				h.broadcastTaskChange("task_updated", change.EntityID)
-				result.Status = status
+			}
+		}
+
+		// A finishing status needs the scheduler; fail before writing
+		// anything rather than leaving the change half-applied.
+		switch statusVal {
+		case "completed", "canceled", "wont_do":
+			if h.scheduler == nil {
+				result.Status = "error"
+				result.Code = "INTERNAL"
+				result.Error = "scheduler not available"
 				return result
 			}
 		}
 
+		// Validate every field before the first repository write: a
+		// validation failure leaves the task, and the change's status
+		// and deleted_at transitions, untouched.
 		if len(input.Raw) > 0 {
 			if field, msg, ok := h.validateTaskUpdate(input, existing); !ok {
 				return syncFieldError(result, field, msg)
 			}
-			_, err = h.tasks.Update(change.EntityID, input)
-			if err != nil {
+			if _, err = h.tasks.Update(change.EntityID, input); err != nil {
 				return syncFail(result, err)
 			}
+		}
+
+		// Apply the trash/restore transition, then the status
+		// transition: one change, every field, in a fixed order.
+		if hasDeletedAt {
+			if deleted {
+				if cErr := h.tasks.Delete(change.EntityID); cErr != nil {
+					return syncFail(result, cErr)
+				}
+			} else if _, cErr := h.tasks.Restore(change.EntityID); cErr != nil {
+				return syncFail(result, cErr)
+			}
+		}
+		statusApplied := false
+		switch statusVal {
+		case "completed", "canceled", "wont_do":
+			// One finishing path: the guarded, transactional FinishTask
+			// (idempotent on re-push, spawns once).
+			if _, _, cErr := h.scheduler.FinishTask(change.EntityID, statusVal); cErr != nil {
+				return syncFail(result, cErr)
+			}
+			statusApplied = true
+		case "open":
+			if _, cErr := h.tasks.Reopen(change.EntityID); cErr != nil {
+				return syncFail(result, cErr)
+			}
+			statusApplied = true
+		}
+
+		// One event per change, for the most significant transition it
+		// applied: a delete outweighs any other write in the change.
+		switch {
+		case hasDeletedAt && deleted:
+			h.broadcastTaskChange("task_deleted", change.EntityID)
+		case len(input.Raw) > 0 || hasDeletedAt || statusApplied:
 			h.broadcastTaskChange("task_updated", change.EntityID)
 		}
 		result.Status = status
