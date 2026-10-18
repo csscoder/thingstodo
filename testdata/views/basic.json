@@ -1,0 +1,34 @@
+{
+  "name": "basic",
+  "now": "2026-10-19T10:00:00Z",
+  "timezone": "Asia/Tokyo",
+  "evening_starts_at": "18:00",
+  "seed": {
+    "areas": [],
+    "projects": [],
+    "headings": [],
+    "tags": [],
+    "tasks": [
+      {"id": "b1", "title": "Note to self"},
+      {"id": "b2", "title": "Read book", "when_date": "someday"},
+      {"id": "b3", "title": "Done thing", "status": "completed", "completed_at": "2026-10-19 08:00:00"},
+      {"id": "b4", "title": "Gone", "deleted_at": "2026-10-19 06:30:00"},
+      {"id": "b5", "title": "Buy milk", "when_date": "2026-10-19", "sort_order_today": 1},
+      {"id": "b6", "title": "Tomorrow jog", "when_date": "2026-10-20", "sort_order_today": 2}
+    ],
+    "schedules": [
+      {"id": "s-b5", "task_id": "b5", "when_date": "2026-10-19"},
+      {"id": "s-b6", "task_id": "b6", "when_date": "2026-10-20", "start_time": "07:00"}
+    ]
+  },
+  "expect": {
+    "inbox": [{"task": "b1"}],
+    "anytime": [],
+    "someday": [{"task": "b2"}],
+    "logbook": [{"task": "b3", "date": "2026-10-19"}],
+    "trash": [{"task": "b4", "date": "2026-10-19"}],
+    "today": [{"task": "b5", "section": "today", "entry": "s-b5"}],
+    "upcoming": [{"task": "b6", "date": "2026-10-20", "entry": "s-b6"}],
+    "counts": {"inbox": 1, "today": 1, "overdue": 0, "anytime": 0, "someday": 1, "logbook": 1, "trash": 1}
+  }
+}

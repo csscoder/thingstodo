@@ -1,0 +1,45 @@
+{
+  "name": "midnight-moscow",
+  "now": "2026-10-18T21:30:00Z",
+  "timezone": "Europe/Moscow",
+  "evening_starts_at": "18:00",
+  "seed": {
+    "areas": [],
+    "projects": [],
+    "headings": [],
+    "tags": [],
+    "tasks": [
+      {"id": "m1", "title": "Today after midnight", "when_date": "2026-10-19", "sort_order_today": 1},
+      {"id": "m2", "title": "Evening after midnight", "when_date": "2026-10-19", "sort_order_today": 2},
+      {"id": "m3", "title": "Done at 00:00 Moscow", "status": "completed", "completed_at": "2026-10-18 21:00:00"},
+      {"id": "m4", "title": "Done at 23:30 Moscow", "status": "completed", "completed_at": "2026-10-18 20:30:00"},
+      {"id": "m5", "title": "Left from Saturday", "when_date": "2026-10-17", "sort_order_today": 3},
+      {"id": "m6", "title": "Deadline passed", "deadline": "2026-10-16", "sort_order_today": 4}
+    ],
+    "schedules": [
+      {"id": "s-m1", "task_id": "m1", "when_date": "2026-10-19"},
+      {"id": "s-m2", "task_id": "m2", "when_date": "2026-10-19", "start_time": "19:30"}
+    ]
+  },
+  "expect": {
+    "inbox": [{"task": "m6"}],
+    "anytime": [],
+    "someday": [],
+    "logbook": [
+      {"task": "m3", "date": "2026-10-19"},
+      {"task": "m4", "date": "2026-10-18"}
+    ],
+    "trash": [],
+    "today": [
+      {"task": "m1", "section": "today", "entry": "s-m1"},
+      {"task": "m2", "section": "evening", "entry": "s-m2"},
+      {"task": "m6", "section": "overdue"},
+      {"task": "m5", "section": "earlier"}
+    ],
+    "upcoming": [
+      {"task": "m6", "section": "overdue"},
+      {"task": "m5", "section": "earlier"}
+    ],
+    "counts": {"inbox": 1, "today": 4, "overdue": 1, "anytime": 0, "someday": 0, "logbook": 2, "trash": 0}
+  }
+}

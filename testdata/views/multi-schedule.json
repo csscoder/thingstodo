@@ -1,0 +1,42 @@
+{
+  "name": "multi-schedule",
+  "now": "2026-10-19T08:00:00Z",
+  "timezone": "UTC",
+  "evening_starts_at": "18:00",
+  "seed": {
+    "areas": [],
+    "projects": [],
+    "headings": [],
+    "tags": [],
+    "tasks": [
+      {"id": "ms1", "title": "Double-booked day", "when_date": "2026-10-19", "sort_order_today": 5},
+      {"id": "ms2", "title": "Half done", "when_date": "2026-10-19", "sort_order_today": 5},
+      {"id": "ms3", "title": "Deadline today, entry done", "when_date": "2026-10-19", "deadline": "2026-10-19", "sort_order_today": 1},
+      {"id": "ms4", "title": "Fully checked off", "when_date": "2026-10-19", "sort_order_today": 9}
+    ],
+    "schedules": [
+      {"id": "s-ms1a", "task_id": "ms1", "when_date": "2026-10-19", "start_time": "09:00"},
+      {"id": "s-ms1b", "task_id": "ms1", "when_date": "2026-10-19", "start_time": "19:00"},
+      {"id": "s-ms1c", "task_id": "ms1", "when_date": "2026-10-20", "start_time": "10:00"},
+      {"id": "s-ms2a", "task_id": "ms2", "when_date": "2026-10-19", "start_time": "10:00", "completed": true},
+      {"id": "s-ms2b", "task_id": "ms2", "when_date": "2026-10-19", "start_time": "14:00"},
+      {"id": "s-ms3a", "task_id": "ms3", "when_date": "2026-10-19", "start_time": "12:00", "completed": true},
+      {"id": "s-ms4a", "task_id": "ms4", "when_date": "2026-10-19", "start_time": "08:00", "completed": true}
+    ]
+  },
+  "expect": {
+    "inbox": [],
+    "anytime": [],
+    "someday": [],
+    "logbook": [],
+    "trash": [],
+    "today": [
+      {"task": "ms3", "section": "today"},
+      {"task": "ms1", "section": "today", "entry": "s-ms1a"},
+      {"task": "ms2", "section": "today", "entry": "s-ms2b"},
+      {"task": "ms1", "section": "evening", "entry": "s-ms1b"}
+    ],
+    "upcoming": [{"task": "ms1", "date": "2026-10-20", "entry": "s-ms1c"}],
+    "counts": {"inbox": 0, "today": 3, "overdue": 0, "anytime": 0, "someday": 0, "logbook": 0, "trash": 0}
+  }
+}
