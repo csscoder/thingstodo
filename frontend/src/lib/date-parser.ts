@@ -12,7 +12,6 @@ import {
   startOfMonth,
   parse,
   isValid,
-  isBefore,
   addYears,
 } from 'date-fns'
 import { ownerToday } from './owner-time'
@@ -115,9 +114,10 @@ export function parseNaturalDate(input: string): ParsedDate | null {
     if (monthNum !== undefined) {
       const day = parseInt(monthDayMatch[2], 10)
       let candidate = new Date(today.getFullYear(), monthNum, day)
-      if (!isValid(candidate)) return null
+      // Reject impossible days ("feb 31") instead of letting them roll over.
+      if (candidate.getMonth() !== monthNum || candidate.getDate() !== day) return null
       // If the date has passed this year, use next year
-      if (isBefore(candidate, today)) {
+      if (formatDate(candidate) < ownerToday()) {
         candidate = addYears(candidate, 1)
       }
       return { date: formatDate(candidate) }
@@ -127,9 +127,11 @@ export function parseNaturalDate(input: string): ParsedDate | null {
   // Try parsing as a date string directly (YYYY-MM-DD, MM/DD, etc.)
   for (const fmt of ['yyyy-MM-dd', 'MM/dd', 'M/d']) {
     const parsed = parse(text, fmt, today)
-    if (isValid(parsed)) {
+    // Strict round-trip: a rolled-over date ("2/30" -> Mar 2) formats back
+    // differently, so impossible days are rejected.
+    if (isValid(parsed) && format(parsed, fmt) === text) {
       // For short formats without year, advance if in the past
-      if (!text.includes('-') && isBefore(parsed, today)) {
+      if (!text.includes('-') && formatDate(parsed) < ownerToday()) {
         return { date: formatDate(addYears(parsed, 1)) }
       }
       return { date: formatDate(parsed) }

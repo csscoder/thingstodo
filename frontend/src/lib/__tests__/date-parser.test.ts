@@ -1,5 +1,10 @@
+process.env.TZ = 'UTC'
+
+// Imports are hoisted above the TZ pin, but no module-scope date math runs
+// before a test body, so the pin lands first (convention from owner-time.test.ts).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { parseNaturalDate } from '../date-parser'
+import { setOwnerTimeZone } from '../owner-time'
 import { format, addDays, addMonths, startOfMonth, nextMonday, nextFriday } from 'date-fns'
 
 function fmt(d: Date) {
@@ -8,9 +13,10 @@ function fmt(d: Date) {
 
 describe('parseNaturalDate', () => {
   beforeEach(() => {
-    // Fix "today" to 2026-02-15 (a Sunday)
+    // Fix "today" to 2026-02-15 (a Sunday) at 09:00, not midnight.
     vi.useFakeTimers()
-    vi.setSystemTime(new Date(2026, 1, 15))
+    vi.setSystemTime(new Date(2026, 1, 15, 9, 0, 0))
+    setOwnerTimeZone('Europe/Moscow')
   })
 
   afterEach(() => {
@@ -120,4 +126,28 @@ describe('parseNaturalDate', () => {
       date: fmt(addDays(today, 1)),
     })
   })
+})
+
+describe('parseNaturalDate today and overflow (owner Europe/Moscow, browser TZ UTC)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    setOwnerTimeZone('Europe/Moscow')
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    localStorage.clear()
+  })
+
+  // 09:00, 15:00 and 23:30 owner time on 2026-10-16 in Moscow (UTC+3)
+  // are 06:00Z, 12:00Z and 20:30Z.
+  for (const utcTime of ['T06:00:00Z', 'T12:00:00Z', 'T20:30:00Z']) {
+    it(`compares by owner date and rejects impossible days at ${utcTime}`, () => {
+      vi.setSystemTime(new Date(`2026-10-16${utcTime}`))
+      expect(parseNaturalDate('oct 16')).toEqual({ date: '2026-10-16' })
+      expect(parseNaturalDate('oct 15')).toEqual({ date: '2027-10-15' })
+      expect(parseNaturalDate('feb 31')).toBeNull()
+      expect(parseNaturalDate('2/30')).toBeNull()
+    })
+  }
 })
