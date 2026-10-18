@@ -1138,3 +1138,176 @@ func TestToday_Legacy900NotEvening(t *testing.T) {
 		t.Errorf("a 09:00 schedule must not be in This Evening; got %v", eveningTitles)
 	}
 }
+
+// --- Task 20: Today hides completed time blocks; counts mirror the views ---
+
+// TestTodayHidesCompletedTimeBlocks pins Q2: the Today sections list one row
+// per OPEN schedule entry of today, so a completed time block is hidden while
+// the task stays a member of the view through its open evening entry.
+func TestTodayHidesCompletedTimeBlocks(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	scheduleRepo := repository.NewScheduleRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	task, err := taskRepo.Create(model.CreateTaskInput{Title: "Day done, evening open", WhenDate: &vpToday})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := db.Exec("UPDATE task_schedules SET start_time = '09:00', completed = 1 WHERE task_id = ?", task.ID); err != nil {
+		t.Fatalf("complete the day block: %v", err)
+	}
+	eveningStart, eveningEnd := "19:00", "20:00"
+	if _, err := scheduleRepo.Create(task.ID, model.CreateTaskScheduleInput{
+		WhenDate: vpToday, StartTime: &eveningStart, EndTime: &eveningEnd,
+	}); err != nil {
+		t.Fatalf("add evening block: %v", err)
+	}
+	var eveningEntryID string
+	if err := db.QueryRow(
+		"SELECT id FROM task_schedules WHERE task_id = ? AND start_time = ?", task.ID, eveningStart,
+	).Scan(&eveningEntryID); err != nil {
+		t.Fatalf("read evening entry id: %v", err)
+	}
+
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	if n := vpOccurrences(vpTodayOpenIDs(tv), task.ID); n != 1 {
+		t.Fatalf("task must appear on exactly one open Today row; got %d", n)
+	}
+	if titles := tzTodayTitles(tv); tzHas(titles, task.Title) {
+		t.Errorf("the completed 09:00 block must be hidden from the Today section; got %v", titles)
+	}
+	if len(tv.Sections) < 2 {
+		t.Fatalf("expected the This Evening section; got %d sections", len(tv.Sections))
+	}
+	var eveningRow *model.TaskListItem
+	for _, group := range tv.Sections[1].Groups {
+		for i, item := range group.Tasks {
+			if item.ID == task.ID {
+				eveningRow = &group.Tasks[i]
+			}
+		}
+	}
+	if eveningRow == nil {
+		t.Fatalf("the open 19:00 block must keep the task in This Evening")
+	}
+	if eveningRow.ScheduleEntryID == nil || *eveningRow.ScheduleEntryID != eveningEntryID {
+		t.Errorf("the evening row must carry the 19:00 entry id %q; got %v", eveningEntryID, eveningRow.ScheduleEntryID)
+	}
+	if eveningRow.FirstScheduleTime == nil || *eveningRow.FirstScheduleTime != eveningStart {
+		t.Errorf("the evening row must show start_time %q; got %v", eveningStart, eveningRow.FirstScheduleTime)
+	}
+}
+
+// TestTodayTaskWithOnlyCompletedEntryShowsOnce pins the Q2 ruling: a task in
+// Today by membership (deadline today) whose only today entry is completed
+// shows exactly one row, in the Today section, with no start time.
+func TestTodayTaskWithOnlyCompletedEntryShowsOnce(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	task, err := taskRepo.Create(model.CreateTaskInput{
+		Title: "Deadline today, block done", WhenDate: &vpToday, Deadline: &vpToday,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := db.Exec("UPDATE task_schedules SET start_time = '09:00', completed = 1 WHERE task_id = ?", task.ID); err != nil {
+		t.Fatalf("complete the today block: %v", err)
+	}
+
+	tv, err := viewRepo.Today("18:00")
+	if err != nil {
+		t.Fatalf("today view: %v", err)
+	}
+	if n := vpOccurrences(vpTodayOpenIDs(tv), task.ID); n != 1 {
+		t.Fatalf("task must appear on exactly one open Today row; got %d", n)
+	}
+	if titles := tzTodayTitles(tv); !tzHas(titles, task.Title) {
+		t.Errorf("a task in Today by deadline membership must stay in the Today section; got %v", titles)
+	}
+	var row *model.TaskListItem
+	for _, group := range tv.Sections[0].Groups {
+		for i, item := range group.Tasks {
+			if item.ID == task.ID {
+				row = &group.Tasks[i]
+			}
+		}
+	}
+	if row == nil {
+		t.Fatalf("task row missing from the Today section")
+	}
+	if row.FirstScheduleTime != nil {
+		t.Errorf("the row must not show the completed block's start time; got %q", *row.FirstScheduleTime)
+	}
+	if row.ScheduleEntryID != nil {
+		t.Errorf("the row must not reference the completed entry; got %q", *row.ScheduleEntryID)
+	}
+}
+
+// TestCountsExcludeTasksOfClosedProjects pins C2 for Anytime/Someday: the
+// counts mirror buildAnytimeView's ownership, so tasks of closed projects
+// are not counted and each count equals its view's row count.
+func TestCountsExcludeTasksOfClosedProjects(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	taskRepo := repository.NewTaskRepository(db, nil)
+	viewRepo := newFixedClockViewRepo(t, db)
+
+	if _, err := db.Exec("INSERT INTO areas (id, title) VALUES ('vp_ca', 'Counts area')"); err != nil {
+		t.Fatalf("insert area: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO projects (id, title, area_id, status) VALUES ('vp_popen', 'Open project', 'vp_ca', 'open')",
+	); err != nil {
+		t.Fatalf("insert open project: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO projects (id, title, area_id, status) VALUES ('vp_pdone', 'Done project', 'vp_ca', 'completed')",
+	); err != nil {
+		t.Fatalf("insert completed project: %v", err)
+	}
+
+	someday := "someday"
+	for _, f := range []model.CreateTaskInput{
+		{Title: "Open project undated", ProjectID: strPtr("vp_popen")},
+		{Title: "Done project undated", ProjectID: strPtr("vp_pdone")},
+		{Title: "Open project someday", ProjectID: strPtr("vp_popen"), WhenDate: &someday},
+		{Title: "Done project someday", ProjectID: strPtr("vp_pdone"), WhenDate: &someday},
+	} {
+		if _, err := taskRepo.Create(f); err != nil {
+			t.Fatalf("create %s: %v", f.Title, err)
+		}
+	}
+
+	counts, err := viewRepo.Counts(nil, true)
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+	anytime, err := viewRepo.Anytime()
+	if err != nil {
+		t.Fatalf("anytime view: %v", err)
+	}
+	somedayView, err := viewRepo.Someday()
+	if err != nil {
+		t.Fatalf("someday view: %v", err)
+	}
+
+	anytimeIDs := vpDistinct(vpAnytimeIDs(anytime))
+	if counts.Anytime != 1 {
+		t.Errorf("counts.anytime = %d, want 1 (the closed project's task excluded)", counts.Anytime)
+	}
+	if counts.Anytime != len(anytimeIDs) {
+		t.Errorf("counts.anytime = %d, but the Anytime view holds %d tasks", counts.Anytime, len(anytimeIDs))
+	}
+	somedayIDs := vpDistinct(vpAnytimeIDs(somedayView))
+	if counts.Someday != 1 {
+		t.Errorf("counts.someday = %d, want 1 (the closed project's task excluded)", counts.Someday)
+	}
+	if counts.Someday != len(somedayIDs) {
+		t.Errorf("counts.someday = %d, but the Someday view holds %d tasks", counts.Someday, len(somedayIDs))
+	}
+}

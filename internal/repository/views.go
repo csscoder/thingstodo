@@ -170,6 +170,9 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	// Today tasks: LEFT JOIN task_schedules so multi-schedule entries for
 	// today each appear. Membership comes from todaySectionsCond; the day
 	// section keeps entries with no start time or one before eveningStartsAt.
+	// Completed today entries never join (Q2): one row per OPEN entry, and a
+	// member whose today entries are all completed falls back to one rowless
+	// (timeless) row.
 	sectionsCond, sectionsArgs := todaySectionsCond(today)
 	todayRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
@@ -190,7 +193,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 			ts.end_time,
 			ts.id AS schedule_entry_id
 		FROM tasks t
-		LEFT JOIN task_schedules ts ON ts.task_id = t.id AND ts.when_date = ?
+		LEFT JOIN task_schedules ts ON ts.task_id = t.id AND ts.when_date = ? AND ts.completed = 0
 		WHERE ` + sectionsCond + `
 			AND (ts.start_time IS NULL OR ts.start_time < ?)
 		ORDER BY t.sort_order_today ASC, ts.start_time ASC`,
@@ -203,7 +206,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 	populateActionableScheduleFlags(r.db, todayTasks, r.today())
 
 	// Evening tasks: same membership, but the joined entry's start_time is
-	// at or after eveningStartsAt.
+	// at or after eveningStartsAt. Completed entries never join here either.
 	eveningRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -223,7 +226,7 @@ func (r *ViewRepository) Today(eveningStartsAt string) (*model.TodayView, error)
 			ts.end_time,
 			ts.id AS schedule_entry_id
 		FROM tasks t
-		LEFT JOIN task_schedules ts ON ts.task_id = t.id AND ts.when_date = ?
+		LEFT JOIN task_schedules ts ON ts.task_id = t.id AND ts.when_date = ? AND ts.completed = 0
 		WHERE ` + sectionsCond + `
 			AND ts.start_time IS NOT NULL AND ts.start_time >= ?
 		ORDER BY t.sort_order_today ASC, ts.start_time ASC`,
@@ -948,10 +951,24 @@ func groupByProject(db *sql.DB, tasks []model.TaskListItem) []model.TaskGroup {
 	return groups
 }
 
-// Counts returns one COUNT(DISTINCT t.id) per view, each built from the
-// same listCondition predicate as the view itself (C2), so a count always
-// equals the distinct task ids of its view — including today, which spans
-// the Today, This Evening, Overdue and Earlier sections.
+// Counts returns one COUNT(DISTINCT t.id) per view, each equivalent to the
+// distinct task ids of its view (C2) — including today, which spans the
+// Today, This Evening, Overdue and Earlier sections. Anytime and Someday
+// additionally mirror buildAnytimeView's ownership so tasks of closed
+// projects are not counted.
+//
+// anytimeOwnershipCond mirrors buildAnytimeView's grouping: a task is
+// listed only under an open project whose area exists (or with no area), or
+// as a standalone task of an existing area. Tasks of closed projects appear
+// in no Anytime/Someday group, so they must not be counted either.
+const anytimeOwnershipCond = `(
+	t.project_id IS NOT NULL AND EXISTS(SELECT 1 FROM projects p
+		WHERE p.id = t.project_id AND p.status = 'open'
+		AND (p.area_id IS NULL OR EXISTS(SELECT 1 FROM areas a WHERE a.id = p.area_id)))
+	OR (t.project_id IS NULL AND t.area_id IS NOT NULL
+		AND EXISTS(SELECT 1 FROM areas a WHERE a.id = t.area_id))
+)`
+
 func (r *ViewRepository) Counts(reviewAfterDays *int, includeRecurring bool) (*model.ViewCounts, error) {
 	today := r.today()
 	var c model.ViewCounts
@@ -965,14 +982,15 @@ func (r *ViewRepository) Counts(reviewAfterDays *int, includeRecurring bool) (*m
 		return nil, err
 	}
 	overdueCondSQL, overdueArgs := overdueCond(today)
-	anytimeCond, anytimeArgs, err := listCondition("anytime", today, "")
-	if err != nil {
-		return nil, err
-	}
-	somedayCond, somedayArgs, err := listCondition("someday", today, "")
-	if err != nil {
-		return nil, err
-	}
+	// Anytime/Someday mirror buildAnytimeView's ownership instead of
+	// listCondition: only tasks the view can list are counted — tasks of an
+	// open project (whose area exists) or of an existing area, plus the
+	// loose tasks getAnytimeStandaloneNoArea keeps for someday.
+	anytimeCond := openNotDeleted + " AND t.when_date IS NULL AND " + anytimeOwnershipCond
+	var anytimeArgs []any
+	somedayCond := openNotDeleted + " AND t.when_date = 'someday' AND (" + anytimeOwnershipCond +
+		" OR (t.project_id IS NULL AND t.area_id IS NULL))"
+	var somedayArgs []any
 	logbookCond, logbookArgs, err := listCondition("logbook", today, "")
 	if err != nil {
 		return nil, err
