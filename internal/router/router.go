@@ -48,6 +48,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	savedFilterRepo := repository.NewSavedFilterRepository(db)
 	scheduleRepo := repository.NewScheduleRepository(db, changeLogRepo).WithTasks(taskRepo)
 	reminderRepo := repository.NewReminderRepository(db, changeLogRepo)
+	tokenRepo := repository.NewAPITokenRepository(db)
 
 	// Single-entity change events carry the latest change-log seq, read at
 	// broadcast time, so clients can gauge the feed position.
@@ -70,6 +71,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 	savedFilterH := handler.NewSavedFilterHandler(savedFilterRepo, broker)
 	scheduleH := handler.NewScheduleHandler(scheduleRepo, taskRepo, broker)
 	reminderH := handler.NewReminderHandler(reminderRepo, broker, cfg.Location)
+	tokenH := handler.NewAPITokenHandler(tokenRepo)
 	pushSender := push.NewSender(pushSubRepo, cfg.VAPIDPrivateKey, cfg.VAPIDPublicKey, cfg.VAPIDContact)
 	ntfySender := push.NewNtfySender(settingsRepo, userRepo)
 	notifier := push.NewDispatcher(pushSender, ntfySender, settingsRepo, userRepo)
@@ -126,13 +128,25 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 			}, func(id string) (bool, error) {
 				u, err := userRepo.GetByID(id)
 				return u != nil, err
-			}))
+			}, func(token string) (string, bool) {
+				id, ok, err := tokenRepo.Lookup(token)
+				if err != nil {
+					log.Printf("ERROR api token lookup: %v", err)
+					return "", false
+				}
+				return id, ok
+			}, tokenRepo.TouchLastUsed))
 
 			// SSE events
 			r.Get("/events", eventH.Stream)
 
 			// Auth
 			r.Get("/auth/me", authH.Me)
+
+			// API tokens
+			r.Get("/tokens", tokenH.List)
+			r.Post("/tokens", tokenH.Create)
+			r.Delete("/tokens/{id}", tokenH.Revoke)
 
 			// Tasks
 			r.Get("/tasks", taskH.List)

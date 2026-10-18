@@ -9,7 +9,7 @@ import (
 // TestAuth_ErrorsAreJSON verifies the auth middleware rejects requests with
 // the JSON error envelope (Content-Type application/json), not plain text.
 func TestAuth_ErrorsAreJSON(t *testing.T) {
-	rec := runAuth(builtinCfg(), firstUserStub, userExistsStub, requestWithSession(""))
+	rec := runAuth(builtinCfg(), firstUserStub, userExistsStub, nil, nil, requestWithSession(""))
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status %d, got %d (body %q)", http.StatusUnauthorized, rec.Code, rec.Body.String())

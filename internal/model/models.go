@@ -535,6 +535,18 @@ type SearchResult struct {
 	Rank         float64      `json:"rank"`
 }
 
+// APIToken is the management view of a named API token. The plaintext
+// value is shown only once at creation and is never part of this model;
+// neither is the stored hash.
+type APIToken struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Prefix     string  `json:"prefix"`
+	CreatedAt  string  `json:"created_at"`
+	LastUsedAt *string `json:"last_used_at"`
+	RevokedAt  *string `json:"revoked_at"`
+}
+
 type SavedFilter struct {
 	ID        string `json:"id"`
 	View      string `json:"view"`

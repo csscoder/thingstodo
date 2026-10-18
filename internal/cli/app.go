@@ -150,8 +150,79 @@ func (a *App) Run(args []string) int {
 		return a.runTags(ctx, client, resolved)
 	case "areas":
 		return a.runAreas(ctx, client, resolved)
+	case "token":
+		return a.runToken(ctx, client, resolved, rest[1:])
 	default:
 		return a.fail(2, fmt.Sprintf("unknown command %q", rest[0]))
+	}
+}
+
+// runToken implements "ttd token <create|list|revoke>". Token management
+// must be authenticated with the master API key or a session; the CLI
+// itself authenticates with the configured API key.
+func (a *App) runToken(ctx context.Context, client *Client, cfg ResolvedConfig, args []string) int {
+	if len(args) == 0 {
+		return a.fail(2, "usage: ttd token <create|list|revoke>")
+	}
+	switch args[0] {
+	case "create":
+		if len(args) < 2 {
+			return a.fail(2, "usage: ttd token create <name>")
+		}
+		var created struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Prefix string `json:"prefix"`
+			Token  string `json:"token"`
+		}
+		raw, err := client.Post(ctx, "/api/tokens", map[string]any{"name": args[1]}, &created)
+		if err != nil {
+			return a.renderError(err)
+		}
+		if cfg.JSON {
+			_, _ = a.stdout.Write(append(raw, '\n'))
+			return 0
+		}
+		// The token is printed exactly once; it can never be shown again.
+		_, _ = fmt.Fprintln(a.stdout, created.Token)
+		if !cfg.Quiet {
+			_, _ = fmt.Fprintln(a.stderr, "save this token now; it cannot be shown again")
+		}
+		return 0
+	case "list":
+		var resp struct {
+			Tokens []model.APIToken `json:"tokens"`
+		}
+		raw, err := client.Get(ctx, "/api/tokens", nil, &resp)
+		if err != nil {
+			return a.renderError(err)
+		}
+		if cfg.JSON {
+			_, _ = a.stdout.Write(append(raw, '\n'))
+			return 0
+		}
+		for _, tok := range resp.Tokens {
+			status := "active"
+			if tok.RevokedAt != nil {
+				status = "revoked"
+			}
+			_, _ = fmt.Fprintf(a.stdout, "%s\t%s\t%s\t%s\n", tok.ID, tok.Name, tok.Prefix, status)
+		}
+		return 0
+	case "revoke":
+		if len(args) < 2 {
+			return a.fail(2, "usage: ttd token revoke <id>")
+		}
+		id := args[1]
+		if _, err := client.Delete(ctx, "/api/tokens/"+id); err != nil {
+			return a.renderError(err)
+		}
+		if !cfg.Quiet {
+			_, _ = fmt.Fprintf(a.stdout, "revoked %s\n", id)
+		}
+		return 0
+	default:
+		return a.fail(2, fmt.Sprintf("unknown token command %q", args[0]))
 	}
 }
 
@@ -1007,6 +1078,9 @@ commands:
   project show
   tags
   areas
+  token create
+  token list
+  token revoke
   version
   doctor
   config

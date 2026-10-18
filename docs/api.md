@@ -26,13 +26,13 @@ Error codes:
 | Code | Status | Meaning |
 | --- | --- | --- |
 | `UNAUTHORIZED` | 401 | Missing/invalid session cookie, proxy header, API key, or credentials |
-| `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. OIDC email not permitted) |
+| `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. OIDC email not permitted, or a named API token calling `/api/tokens`) |
 | `NOT_FOUND` | 404 | Unknown `/api` route, or entity does not exist |
 | `METHOD_NOT_ALLOWED` | 405 | Method not registered for a known `/api` route; `Allow` header lists supported methods |
 | `BAD_REQUEST` | 400 | Malformed JSON body or invalid request parameters |
 | `VALIDATION` | 400/422 | Request field failed validation; 400 for malformed values, 422 for referenced ids that do not exist (carries `field`) |
 | `RESERVED` | 403 | Reserved tag name |
-| `DUPLICATE_NAME` | 409 | Project/area/tag title already exists |
+| `DUPLICATE_NAME` | 409 | Project/area/tag title or API token name already exists |
 | `HAS_PROJECTS` | 409 | Area still contains projects |
 | `CURSOR_EXPIRED` | 410 | Sync cursor purged; perform a full sync |
 | `BODY_TOO_LARGE` | 413 | Request body over the size cap |
@@ -52,12 +52,14 @@ JSON request bodies are capped at 10 MiB (10485760 bytes), regardless of `Conten
 Exception: the route `POST /api/tasks/:id/attachments` is exempt from this middleware-level cap regardless of `Content-Type` (the exemption is keyed on route and method, not Content-Type). Multipart uploads there are capped by `MAX_UPLOAD_SIZE` instead (see below); JSON link-creates on that route remain capped at 10 MiB by the handler itself and return 413 `BODY_TOO_LARGE` beyond that.
 
 ### Duplicate Name Errors
-`POST` and `PATCH` for projects, areas, and tags return **409 Conflict** with code `DUPLICATE_NAME` if the title already exists. A retried create that carries the `id` of an already-stored entity is not a duplicate-name error — it replays 200 (see Idempotent Creates).
+`POST` and `PATCH` for projects, areas, and tags return **409 Conflict** with code `DUPLICATE_NAME` if the title already exists, as does `POST /api/tokens` for a duplicate token name. A retried create that carries the `id` of an already-stored entity is not a duplicate-name error — it replays 200 (see Idempotent Creates).
 
 ### Idempotent Creates
 Every create endpoint that accepts a body `id` — tasks, projects, areas, tags, headings, checklist items, schedules, reminders and link attachments — is idempotent by that id. Validation runs first; if it passes and the `id` already exists in the target table, the endpoint returns **200** with the stored entity (the same shape a GET of that entity returns). Nothing is modified on the replay: no row is written, no SSE event is broadcast and no change-log entry is recorded, so retried creates from agents, widgets or shortcuts never duplicate. A body `id` that does not exist yet is created normally with **201**.
 
 For schedules, the replay check runs after the field validation but before the per-task entry limits (max 12 entries, only-first-`someday`, duplicate timeless date): a retried create of an entry that already exists replays 200 even when the task is now at those limits.
+
+`POST /api/tokens` is the exception: token creates are **not** idempotent. A body `id` is ignored, every call mints a new token, and the server always generates its own id.
 
 ### Pagination (where applicable)
 Query params: `?limit=50&offset=0`
@@ -99,6 +101,16 @@ Authorization: Bearer <your-api-key>
 The API key authenticates as the first (admin) user in the database. This is useful for programmatic access (e.g., iOS Shortcuts, scripts) where cookie-based auth isn't practical.
 
 If the header is present but the key is wrong, the request is rejected with 401 immediately (no fallback to cookie auth).
+
+### Named API Tokens (all modes except `none`)
+
+Named tokens created via `POST /api/tokens` (see [API Tokens](#api-tokens)) authenticate the same way as the master key:
+
+```
+Authorization: Bearer ttd_<token>
+```
+
+Precedence: the master `API_KEY` is checked first, then the session (cookie or proxy header), then named tokens. A valid session wins over a presented Bearer token; a Bearer value that matches nothing (wrong master key, unknown or revoked token) rejects the request with 401 immediately, with no cookie fallback. In `none` mode Bearer headers are ignored entirely. A named token authenticates as the first (admin) user, updates its `last_used_at` (at most one write per minute per token) and cannot call the `/api/tokens` management endpoints (403 `FORBIDDEN`).
 
 ### GET /api/auth/config
 **Mode: all** (public, no authentication required)
@@ -161,6 +173,57 @@ Returns `403` `{"error":"account not allowed","code":"FORBIDDEN"}` when the emai
 
 Required env vars: `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`, `OIDC_ALLOWED_EMAIL`
 ```
+
+---
+
+## API Tokens
+
+Named, revocable API tokens for programmatic access. A token value is `ttd_` followed by 43 base64url characters of crypto-random entropy (32 bytes); only its SHA-256 hash is stored, and the plaintext is returned exactly once — at creation. Token names are unique.
+
+All three endpoints reject requests that authenticated with a named API token: **403** `{"error":"token authentication cannot manage tokens","code":"FORBIDDEN"}`. Authenticate with a session or the master `API_KEY`.
+
+### GET /api/tokens
+**Auth: session or API key** (403 with a named token)
+
+Response (200):
+```json
+{
+  "tokens": [
+    {
+      "id": "string",
+      "name": "string",
+      "prefix": "first 8 characters of the token value",
+      "created_at": "timestamp",
+      "last_used_at": "timestamp or null (updated at most once per minute per token)",
+      "revoked_at": "timestamp or null"
+    }
+  ]
+}
+```
+
+The hash and the token value are never returned after creation.
+
+### POST /api/tokens
+**Auth: session or API key** (403 with a named token)
+
+Request:
+```json
+{ "name": "string" }
+```
+
+Creates are **not** idempotent: a body `id` is ignored — the server always generates its own id, and every POST mints a new token.
+
+Response (201):
+```json
+{ "id": "string", "name": "string", "prefix": "string", "token": "ttd_..." }
+```
+
+`token` is the only time the plaintext value is ever returned; it cannot be shown again. Errors: 409 `DUPLICATE_NAME` if the name already exists; 400 `VALIDATION` (`field: "name"`) for a missing name.
+
+### DELETE /api/tokens/:id
+**Auth: session or API key** (403 with a named token)
+
+Marks the token revoked. Response: **204 No Content**. Revoking an already-revoked token is a no-op (204); an unknown id returns 404 `NOT_FOUND`. A revoked token stops authenticating immediately (Lookup skips revoked rows).
 
 ---
 

@@ -111,6 +111,18 @@ Enable external access (e.g. iOS Shortcuts) with a static API key alongside any 
 |---|---|---|
 | `API_KEY` | — | Static bearer token for `Authorization: Bearer <key>` |
 
+### Named API Tokens
+
+For per-device or per-script credentials you can revoke individually, create named API tokens:
+
+```sh
+ttd token create laptop-sync   # prints the token once — save it now
+ttd token list                 # id, name, prefix, active/revoked
+ttd token revoke <id>
+```
+
+Tokens authenticate like the API key (`Authorization: Bearer ttd_...`) in every auth mode except `none`, work on all endpoints except `/api/tokens` (403: a token cannot manage tokens), and only a SHA-256 hash is stored — the plaintext is shown exactly once at creation. See `docs/api.md` for the HTTP API.
+
 ### Notifications
 
 Push notifications for task reminders can be delivered via **Browser Push** (default) or **[ntfy](https://ntfy.sh)**. Configure the provider in **Settings > Notifications > Delivery**.

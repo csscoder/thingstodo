@@ -153,6 +153,49 @@ func TestCLIUnknownTagFails(t *testing.T) {
 	}
 }
 
+func TestCLI_TokenCommands(t *testing.T) {
+	app, client := newTestCLI(t)
+
+	code, stdout, stderr := runCLI(t, app, "--url", client.baseURL, "--api-key", "test-key", "token", "create", "ci-token")
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%s", code, stderr)
+	}
+	token := strings.TrimSpace(stdout)
+	if !strings.HasPrefix(token, "ttd_") {
+		t.Fatalf("expected create to print the token once, got %q", stdout)
+	}
+
+	code, stdout, stderr = runCLI(t, app, "--url", client.baseURL, "--api-key", "test-key", "token", "list")
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "ci-token") {
+		t.Fatalf("expected list to print the token name, got %q", stdout)
+	}
+	fields := strings.Fields(stdout)
+	if len(fields) == 0 {
+		t.Fatalf("expected list to print the token id, got %q", stdout)
+	}
+	id := fields[0]
+
+	code, stdout, stderr = runCLI(t, app, "--url", client.baseURL, "--api-key", "test-key", "token", "revoke", id)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "revoked") {
+		t.Fatalf("expected revoke confirmation, got %q", stdout)
+	}
+
+	// The revoked token shows up as revoked in the list.
+	code, stdout, stderr = runCLI(t, app, "--url", client.baseURL, "--api-key", "test-key", "token", "list")
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "revoked") {
+		t.Fatalf("expected list to mark the token revoked, got %q", stdout)
+	}
+}
+
 func urlValues(k, v string) url.Values {
 	return url.Values{k: []string{v}}
 }
