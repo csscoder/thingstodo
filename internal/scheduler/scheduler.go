@@ -114,6 +114,11 @@ func (s *Scheduler) FinishTask(taskID, status string) (task *model.TaskDetail, c
 	// contend with the transaction below.
 	copyReminders := s.reminderCopyEnabled()
 
+	// instanceID is set inside the transaction when a repeat rule spawned
+	// the next instance; the task_created broadcast happens only after the
+	// transaction commits, so a rollback never announces an instance.
+	var instanceID string
+
 	txErr := repository.InTx(s.db, func(tx *sql.Tx) error {
 		txTaskRepo := s.taskRepo.WithTx(tx)
 		c, err := txTaskRepo.SetDoneStatus(taskID, status)
@@ -144,9 +149,11 @@ func (s *Scheduler) FinishTask(taskID, status string) (task *model.TaskDetail, c
 			return fmt.Errorf("load repeat rule for task %s: %w", taskID, err)
 		}
 		if rule != nil {
-			if err := s.createNextInstance(tx, taskID, rule.Pattern, today, copyReminders); err != nil {
+			spawned, err := s.createNextInstance(tx, taskID, rule.Pattern, today, copyReminders)
+			if err != nil {
 				return err
 			}
+			instanceID = spawned
 		}
 
 		// Re-read so the response reflects everything the transaction did.
@@ -155,6 +162,20 @@ func (s *Scheduler) FinishTask(taskID, status string) (task *model.TaskDetail, c
 	})
 	if txErr != nil {
 		return nil, false, txErr
+	}
+
+	// The instance is a new task: announce it like POST /api/tasks does, so
+	// widgets keying on task_created learn it exists. A nil broker (unit
+	// setups) skips the broadcast; a failed snapshot load still announces
+	// the id — the event is the signal, the payload the convenience.
+	if changed && instanceID != "" && s.broker != nil {
+		payload := map[string]any{}
+		if detail, err := s.taskRepo.GetByID(instanceID); err != nil {
+			log.Printf("scheduler: load spawned instance %s for broadcast: %v", instanceID, err)
+		} else if detail != nil {
+			payload["task"] = detail
+		}
+		s.broker.BroadcastChange("task_created", "task", instanceID, payload)
 	}
 	return task, changed, nil
 }
@@ -192,7 +213,8 @@ func (s *Scheduler) processFixedRules() {
 		}
 
 		err = repository.InTx(s.db, func(tx *sql.Tx) error {
-			return s.createNextInstance(tx, rule.TaskID, rule.Pattern, today, copyReminders)
+			_, err := s.createNextInstance(tx, rule.TaskID, rule.Pattern, today, copyReminders)
+			return err
 		})
 		if err != nil {
 			log.Printf("scheduler: create next instance for task %s: %v", rule.TaskID, err)
@@ -237,20 +259,22 @@ func (s *Scheduler) nextInstanceDate(original *model.TaskDetail, pattern model.R
 
 // createNextInstance creates the next repeat instance of the task and moves
 // the repeat rule to it, using tx-bound repositories so every write joins the
-// caller's transaction. Every error is returned — the caller rolls back.
-func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, pattern model.RecurrencePattern, today string, copyReminders bool) error {
+// caller's transaction. Every error is returned — the caller rolls back. The
+// id of the spawned instance is returned so callers can broadcast it after
+// the transaction commits; an empty id means no instance was created.
+func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, pattern model.RecurrencePattern, today string, copyReminders bool) (string, error) {
 	txTaskRepo := s.taskRepo.WithTx(tx)
 	original, err := txTaskRepo.GetByID(originalTaskID)
 	if err != nil {
-		return fmt.Errorf("load original task %s: %w", originalTaskID, err)
+		return "", fmt.Errorf("load original task %s: %w", originalTaskID, err)
 	}
 	if original == nil {
-		return nil
+		return "", nil
 	}
 
 	nextDate, err := s.nextInstanceDate(original, pattern, today)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Collect tag IDs from original
@@ -272,7 +296,7 @@ func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, patter
 
 	newTask, err := txTaskRepo.Create(input)
 	if err != nil {
-		return fmt.Errorf("create task instance: %w", err)
+		return "", fmt.Errorf("create task instance: %w", err)
 	}
 
 	// Note: first schedule entry is created by taskRepo.Create via syncFirstScheduleDate
@@ -283,7 +307,7 @@ func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, patter
 		if _, err := txChecklistRepo.Create(newTask.ID, model.CreateChecklistInput{
 			Title: item.Title,
 		}); err != nil {
-			return fmt.Errorf("copy checklist item for task %s: %w", newTask.ID, err)
+			return "", fmt.Errorf("copy checklist item for task %s: %w", newTask.ID, err)
 		}
 	}
 
@@ -297,35 +321,35 @@ func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, patter
 			MimeType: att.MimeType,
 			FileSize: att.FileSize,
 		}); err != nil {
-			return fmt.Errorf("copy attachment for task %s: %w", newTask.ID, err)
+			return "", fmt.Errorf("copy attachment for task %s: %w", newTask.ID, err)
 		}
 	}
 
 	// Copy reminders if setting is enabled
 	txReminderRepo := s.reminderRepo.WithTx(tx)
 	if err := s.copyRemindersToNewInstance(txReminderRepo, copyReminders, originalTaskID, newTask.ID); err != nil {
-		return fmt.Errorf("copy reminders for task %s: %w", newTask.ID, err)
+		return "", fmt.Errorf("copy reminders for task %s: %w", newTask.ID, err)
 	}
 
 	// Move repeat rule to new task (pass through the pattern)
 	txRuleRepo := s.ruleRepo.WithTx(tx)
 	if err := txRuleRepo.DeleteByTask(originalTaskID); err != nil {
-		return fmt.Errorf("delete rule for task %s: %w", originalTaskID, err)
+		return "", fmt.Errorf("delete rule for task %s: %w", originalTaskID, err)
 	}
 	if _, err := txRuleRepo.Upsert(newTask.ID, model.CreateRepeatRuleInput{
 		Pattern: &pattern,
 	}); err != nil {
-		return fmt.Errorf("upsert rule for task %s: %w", newTask.ID, err)
+		return "", fmt.Errorf("upsert rule for task %s: %w", newTask.ID, err)
 	}
 
 	if s.testHookAfterInstance != nil {
 		if err := s.testHookAfterInstance(); err != nil {
-			return fmt.Errorf("test hook after instance: %w", err)
+			return "", fmt.Errorf("test hook after instance: %w", err)
 		}
 	}
 
 	log.Printf("scheduler: created repeat instance %s from %s (next: %s)", newTask.ID, originalTaskID, nextDate)
-	return nil
+	return newTask.ID, nil
 }
 
 func (s *Scheduler) processReminders() {

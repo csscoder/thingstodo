@@ -9,6 +9,7 @@ import (
 	"github.com/collinjanssen/thingstodo/internal/database"
 	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
+	"github.com/collinjanssen/thingstodo/internal/sse"
 )
 
 // setupTestDB opens a migrated SQLite database. Same-package tests cannot
@@ -24,7 +25,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func setupScheduler(t *testing.T, loc *time.Location) (*Scheduler, *repository.TaskRepository, *repository.RepeatRuleRepository, *sql.DB) {
+func setupScheduler(t *testing.T, loc *time.Location, broker *sse.Broker) (*Scheduler, *repository.TaskRepository, *repository.RepeatRuleRepository, *sql.DB) {
 	t.Helper()
 	db := setupTestDB(t)
 	taskRepo := repository.NewTaskRepository(db, nil)
@@ -35,7 +36,7 @@ func setupScheduler(t *testing.T, loc *time.Location) (*Scheduler, *repository.T
 	reminderRepo := repository.NewReminderRepository(db, nil)
 	settingsRepo := repository.NewUserSettingsRepository(db)
 	userRepo := repository.NewUserRepository(db)
-	s := New(db, taskRepo, ruleRepo, checklistRepo, attachRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, nil, nil, nil, loc)
+	s := New(db, taskRepo, ruleRepo, checklistRepo, attachRepo, scheduleRepo, reminderRepo, settingsRepo, userRepo, nil, nil, broker, loc)
 	return s, taskRepo, ruleRepo, db
 }
 
@@ -91,7 +92,7 @@ func openWhenDate(t *testing.T, db *sql.DB, title string) string {
 }
 
 func TestFinishTask_DoubleCompleteSpawnsOnce(t *testing.T) {
-	s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC)
+	s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC, nil)
 	task := mustCreateTask(t, taskRepo, "Recur", "2026-10-14")
 	mustUpsertRule(t, ruleRepo, task.ID, model.RecurrencePattern{
 		Type: model.PatternWeekly, Every: 1, Mode: model.RecurrenceModeAfterCompletion,
@@ -125,6 +126,58 @@ func TestFinishTask_DoubleCompleteSpawnsOnce(t *testing.T) {
 	}
 }
 
+// TestFinishTask_BroadcastsCreatedInstance pins the SSE contract of the
+// finishing path: the spawned repeat instance is a new task, so widgets
+// keying on task_created must hear about it — exactly once, after the
+// transaction commits, with the instance id as the event id.
+func TestFinishTask_BroadcastsCreatedInstance(t *testing.T) {
+	broker := sse.NewBroker()
+	s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC, broker)
+	events := broker.Subscribe("test-client")
+	task := mustCreateTask(t, taskRepo, "RecurCast", "2026-10-14")
+	mustUpsertRule(t, ruleRepo, task.ID, model.RecurrencePattern{
+		Type: model.PatternWeekly, Every: 1, Mode: model.RecurrenceModeAfterCompletion,
+	})
+	setClock(s, 2026, 10, 17)
+
+	if _, _, err := s.FinishTask(task.ID, "completed"); err != nil {
+		t.Fatalf("FinishTask: %v", err)
+	}
+
+	var instanceID string
+	if err := db.QueryRow(
+		"SELECT id FROM tasks WHERE title = ? AND status = 'open' AND deleted_at IS NULL", "RecurCast",
+	).Scan(&instanceID); err != nil {
+		t.Fatalf("load spawned instance: %v", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Type != "task_created" {
+			t.Fatalf("event type = %q, want task_created", ev.Type)
+		}
+		payload, ok := ev.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("event data is not a payload map: %#v", ev.Data)
+		}
+		if payload["entity"] != "task" || payload["id"] != instanceID {
+			t.Errorf("event = %v/%v, want task/%s", payload["entity"], payload["id"], instanceID)
+		}
+		taskPayload, ok := payload["task"].(*model.TaskDetail)
+		if !ok {
+			t.Fatalf("event carries no task payload: %#v", payload["task"])
+		}
+		if taskPayload.ID != instanceID {
+			t.Errorf("event task payload id = %s, want %s", taskPayload.ID, instanceID)
+		}
+		if taskPayload.Status != "open" {
+			t.Errorf("event task payload status = %s, want open", taskPayload.Status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no task_created event for the spawned instance")
+	}
+}
+
 func TestFinishTask_AfterCompletionUsesCompletionDate(t *testing.T) {
 	cases := []struct {
 		name string
@@ -136,7 +189,7 @@ func TestFinishTask_AfterCompletionUsesCompletionDate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC)
+			s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC, nil)
 			// when_date is Wed 2026-10-14, completion happens Sat 2026-10-17:
 			// the next instance must be computed from the completion date,
 			// not the original when_date.
@@ -157,7 +210,7 @@ func TestFinishTask_AfterCompletionUsesCompletionDate(t *testing.T) {
 }
 
 func TestFinishTask_FixedRollsForward(t *testing.T) {
-	s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC)
+	s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC, nil)
 	// Daily fixed rule anchored at 2026-10-01, finished on 2026-10-17:
 	// the next instance rolls forward to today instead of landing in the past.
 	task := mustCreateTask(t, taskRepo, "Daily", "2026-10-01")
@@ -175,7 +228,7 @@ func TestFinishTask_FixedRollsForward(t *testing.T) {
 }
 
 func TestFinishTask_InstanceFailureRollsBack(t *testing.T) {
-	s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC)
+	s, taskRepo, ruleRepo, db := setupScheduler(t, time.UTC, nil)
 	task := mustCreateTask(t, taskRepo, "Rollback", "2026-10-14")
 	mustUpsertRule(t, ruleRepo, task.ID, model.RecurrencePattern{
 		Type: model.PatternWeekly, Every: 1, Mode: model.RecurrenceModeAfterCompletion,
@@ -208,7 +261,7 @@ func TestFinishTask_InstanceFailureRollsBack(t *testing.T) {
 }
 
 func TestFinishTask_UnknownTaskReturnsNilFalseNil(t *testing.T) {
-	s, _, _, _ := setupScheduler(t, time.UTC)
+	s, _, _, _ := setupScheduler(t, time.UTC, nil)
 
 	task, changed, err := s.FinishTask("nope0000", "completed")
 	if err != nil {
@@ -333,7 +386,7 @@ func TestComputeFireAt_DST(t *testing.T) {
 
 func TestRemindersDue_NeverEarly(t *testing.T) {
 	msk := mustLoadLocation(t, "Europe/Moscow")
-	s, taskRepo, _, db := setupScheduler(t, msk)
+	s, taskRepo, _, db := setupScheduler(t, msk, nil)
 	reminderRepo := repository.NewReminderRepository(db, nil)
 	task := mustCreateTask(t, taskRepo, "Standing desk", "2026-10-20")
 	if _, err := reminderRepo.Create(task.ID, model.CreateReminderInput{Type: model.ReminderAtStart}); err != nil {
@@ -376,7 +429,7 @@ func TestExactReminder_RFC3339Fires(t *testing.T) {
 	msk := mustLoadLocation(t, "Europe/Moscow")
 
 	t.Run("rfc3339 stored value fires at the local wall-clock time", func(t *testing.T) {
-		s, taskRepo, _, db := setupScheduler(t, msk)
+		s, taskRepo, _, db := setupScheduler(t, msk, nil)
 		reminderRepo := repository.NewReminderRepository(db, nil)
 		task := mustCreateTask(t, taskRepo, "Call airport", "2026-10-20")
 		exactAt := "2026-10-20T06:00:00Z" // normalized UTC == 09:00 Moscow
@@ -399,7 +452,7 @@ func TestExactReminder_RFC3339Fires(t *testing.T) {
 	})
 
 	t.Run("legacy naive stored value still fires", func(t *testing.T) {
-		s, taskRepo, _, db := setupScheduler(t, msk)
+		s, taskRepo, _, db := setupScheduler(t, msk, nil)
 		reminderRepo := repository.NewReminderRepository(db, nil)
 		task := mustCreateTask(t, taskRepo, "Renew passport", "2026-10-20")
 		exactAt := "2026-10-20T09:00:00" // legacy naive layout, read in loc
