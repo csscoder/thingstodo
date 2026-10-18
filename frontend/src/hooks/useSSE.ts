@@ -14,6 +14,16 @@ export function nextBackoffMs(attempt: number): number {
   return Math.min(30000, 1000 * 2 ** Math.min(attempt, 30))
 }
 
+/** Close callback registered by the active useSSE effect, so the connection
+ *  can be torn down from outside React (logout's clearLocalData). */
+let closeActiveSource: (() => void) | null = null
+
+/** Close the current SSE source and clear any pending reconnect timer.
+ *  No-op when no connection is active. Callable outside React. */
+export function closeSSE(): void {
+  closeActiveSource?.()
+}
+
 function dismissToast(toast: HTMLElement) {
   toast.style.animation = 'toast-out 0.2s ease-in forwards'
   setTimeout(() => toast.remove(), 200)
@@ -108,6 +118,15 @@ export function useSSE() {
         reconnectTimerRef.current = null
       }
     }
+
+    function closeCurrentSource() {
+      clearReconnectTimer()
+      sourceRef.current?.close()
+      sourceRef.current = null
+    }
+
+    // Register so closeSSE() can tear this connection down outside React
+    closeActiveSource = closeCurrentSource
 
     function connect() {
       clearReconnectTimer()
@@ -282,11 +301,7 @@ export function useSSE() {
     }
 
     function handleOffline() {
-      clearReconnectTimer()
-      if (sourceRef.current) {
-        sourceRef.current.close()
-        sourceRef.current = null
-      }
+      closeCurrentSource()
     }
 
     if (navigator.onLine) {
@@ -297,9 +312,7 @@ export function useSSE() {
 
     function handleVisibility() {
       if (document.hidden) {
-        clearReconnectTimer()
-        sourceRef.current?.close()
-        sourceRef.current = null
+        closeCurrentSource()
       } else {
         if (!sourceRef.current && navigator.onLine) {
           attemptRef.current = 0
@@ -315,9 +328,8 @@ export function useSSE() {
       document.removeEventListener('visibilitychange', handleVisibility)
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
-      clearReconnectTimer()
-      sourceRef.current?.close()
-      sourceRef.current = null
+      if (closeActiveSource === closeCurrentSource) closeActiveSource = null
+      closeCurrentSource()
     }
   }, [queryClient])
 }

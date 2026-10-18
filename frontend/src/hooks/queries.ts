@@ -17,6 +17,7 @@ import * as schedulesApi from '../api/schedules'
 import * as savedFiltersApi from '../api/savedFilters'
 import * as localMutations from '../db/mutations'
 import { localDb } from '../db/index'
+import { clearLocalData } from '../sync/clearLocalData'
 import { playCompleteSound, playReviewSound } from '../lib/sounds'
 import type {
   Task,
@@ -962,7 +963,14 @@ export function useLogout() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: () => authApi.logout(),
-    onSuccess: () => {
+    onSuccess: async () => {
+      await clearLocalData()
+      window.location.href = '/login'
+      queryClient.clear()
+    },
+    onError: async () => {
+      // Server logout failed (e.g. network down) — still end up clean locally
+      await clearLocalData()
       window.location.href = '/login'
       queryClient.clear()
     },

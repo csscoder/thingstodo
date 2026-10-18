@@ -40,6 +40,8 @@ import { TAG_COLORS, getTagIconClass, getTagDropClasses } from '../lib/tag-color
 import { isReservedTag, isObsidianTag } from '../lib/reserved-tags'
 import { ReservedTagIcon } from './ReservedTagIcon'
 import { SyncStatus } from './SyncStatus'
+import { ConfirmDialog } from './ConfirmDialog'
+import { localDb } from '../db/index'
 
 const indicatorTransition = { type: 'spring' as const, stiffness: 400, damping: 35 }
 
@@ -1130,18 +1132,43 @@ function PlusMenu({ side }: { side: 'top' | 'right' }) {
 function LogoutButton({ size = 16 }: { size?: number }) {
   const { data } = useMe()
   const logout = useLogout()
+  // null = dialog closed; a number = unsynced changes that would be lost
+  const [unsyncedCount, setUnsyncedCount] = useState<number | null>(null)
 
   if (data?.auth_mode !== 'builtin' && data?.auth_mode !== 'oidc') return null
 
+  const handleClick = async () => {
+    const pending = await localDb.syncQueue.count()
+    if (pending > 0) {
+      setUnsyncedCount(pending)
+    } else {
+      logout.mutate()
+    }
+  }
+
   return (
-    <button
-      onClick={() => logout.mutate()}
-      className="rounded-lg p-1.5 text-neutral-500 hover:bg-neutral-200 dark:text-neutral-400 dark:hover:bg-neutral-700"
-      aria-label="Log out"
-      title="Log out"
-    >
-      <LogOut size={size} />
-    </button>
+    <>
+      <button
+        onClick={() => void handleClick()}
+        className="rounded-lg p-1.5 text-neutral-500 hover:bg-neutral-200 dark:text-neutral-400 dark:hover:bg-neutral-700"
+        aria-label="Log out"
+        title="Log out"
+      >
+        <LogOut size={size} />
+      </button>
+      <ConfirmDialog
+        open={unsyncedCount !== null}
+        title="Log out"
+        description={`You have ${unsyncedCount ?? 0} unsynced change(s). Logging out will lose them.`}
+        confirmLabel="Log out anyway"
+        destructive
+        onConfirm={() => {
+          setUnsyncedCount(null)
+          logout.mutate()
+        }}
+        onCancel={() => setUnsyncedCount(null)}
+      />
+    </>
   )
 }
 

@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { useInbox, useCreateTask, useCompleteTask, useUpdateTaskSchedule } from '../queries'
+import { useInbox, useCreateTask, useCompleteTask, useUpdateTaskSchedule, useLogout } from '../queries'
 import { localDb } from '../../db'
+import { server } from '../../test/mocks/server'
+import { http, HttpResponse } from 'msw'
 
 // Mock audio to avoid AudioContext errors in jsdom
 vi.mock('../../lib/sounds', () => ({
@@ -14,6 +16,7 @@ vi.mock('../../lib/sounds', () => ({
 // Mock sync engine to avoid network calls in tests
 vi.mock('../../sync/engine', () => ({
   syncNow: vi.fn().mockResolvedValue(undefined),
+  stopSyncEngine: vi.fn(),
 }))
 
 function createWrapper() {
@@ -281,5 +284,116 @@ describe('useUpdateTaskSchedule', () => {
     expect(schedules).toHaveLength(0)
     const queue = await localDb.syncQueue.toArray()
     expect(queue).toHaveLength(0)
+  })
+})
+
+describe('useLogout', () => {
+  const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await localDb.tasks.clear()
+    await localDb.syncQueue.clear()
+    await localDb.syncMeta.clear()
+    localStorage.setItem('thingstodo_timezone', 'Europe/Berlin')
+    server.use(http.delete('/api/auth/logout', () => new HttpResponse(null, { status: 204 })))
+    // jsdom-safe navigation stub: capture href assignments without navigating
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { href: 'http://localhost/' },
+    })
+  })
+
+  afterEach(() => {
+    if (originalLocation) Object.defineProperty(window, 'location', originalLocation)
+  })
+
+  it('logout clears every Dexie table including the queue', async () => {
+    const { Wrapper, queryClient } = createWrapper()
+    const clearSpy = vi.spyOn(queryClient, 'clear')
+
+    await localDb.tasks.put({
+      id: 'logout-task',
+      title: 'Pending local edit',
+      status: 'open',
+      notes: '',
+      when_date: null,
+      high_priority: false,
+      deadline: null,
+      project_id: null,
+      area_id: null,
+      heading_id: null,
+      sort_order_today: 0,
+      sort_order_project: 0,
+      sort_order_heading: 0,
+      completed_at: null,
+      canceled_at: null,
+      deleted_at: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      tags: [],
+      checklist_count: 0,
+      checklist_done: 0,
+      has_notes: false,
+      has_links: false,
+      has_files: false,
+      has_repeat_rule: false,
+      has_reminders: false,
+      first_reminder_type: null,
+      first_reminder_value: null,
+      first_reminder_exact_at: null,
+      project_name: null,
+      area_name: null,
+      first_schedule_time: null,
+      first_schedule_end_time: null,
+      first_schedule_completed: undefined,
+      schedule_entry_id: null,
+      past_schedule_count: undefined,
+      has_actionable_schedules: undefined,
+      all_today_schedules_completed: undefined,
+      _syncStatus: 'pending',
+      _localUpdatedAt: '2026-01-01T00:00:00Z',
+    })
+    await localDb.syncQueue.bulkPut([
+      {
+        entity: 'task',
+        entityId: 'logout-task',
+        action: 'update',
+        data: { title: 'Pending local edit' },
+        clientUpdatedAt: '2026-01-01T00:00:00Z',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        entity: 'project',
+        entityId: 'logout-proj',
+        action: 'create',
+        data: { title: 'Local project' },
+        clientUpdatedAt: '2026-01-01T00:00:00Z',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    ])
+    await localDb.syncMeta.put({ key: 'cursor', value: 42 })
+
+    const { result } = renderHook(() => useLogout(), { wrapper: Wrapper })
+
+    await act(async () => {
+      result.current.mutate()
+    })
+
+    await waitFor(() => {
+      expect(result.current.isSuccess).toBe(true)
+    })
+
+    // Every Dexie table is dropped and recreated empty
+    await waitFor(() => expect(localDb.tasks.count()).resolves.toBe(0))
+    await expect(localDb.syncQueue.count()).resolves.toBe(0)
+    await expect(localDb.syncMeta.count()).resolves.toBe(0)
+
+    // Local device state is removed
+    expect(localStorage.getItem('thingstodo_timezone')).toBeNull()
+
+    // Redirect happens and the query cache is cleared
+    expect((window.location as unknown as { href: string }).href).toBe('/login')
+    expect(clearSpy).toHaveBeenCalled()
   })
 })
