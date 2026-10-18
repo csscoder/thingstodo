@@ -217,9 +217,9 @@ Things' URL scheme, Shortcuts and AppleScript are the prior art for an external 
 
 ## 7. Roadmap
 
-Four projects, in order. Each goes through brainstorming → spec → plan → implementation with review.
+Three projects, in order. Each goes through brainstorming → spec → plan → implementation with review. Status: Project 1 is done; the original Projects 2 and 3 were merged and executed as Project 2 (the 2026-10-17 agent-widget-api plan); the frontend project was renumbered to 3.
 
-### Project 1 — Security hardening and runnable tests
+### Project 1 — Security hardening and runnable tests (DONE)
 
 - **Spec:** `docs/superpowers/specs/2026-10-16-security-hardening-design.md` (approved 2026-10-16; Droid review `REVIEW_APPROVED`, 3/3 rounds).
 - **Plan:** `docs/superpowers/plans/2026-10-16-security-hardening.md` (9 tasks).
@@ -246,9 +246,13 @@ Key decisions (designer's calls, accepted by the owner with the spec):
 - Link URLs: scheme denylist (`javascript`, `data`, `vbscript`, `file`), so `obsidian://`, `siyuan://` keep working.
 - Links the server now rejects stay stuck in the web UI's sync queue until project 4 fixes H3.
 
-### Project 2 — The server is the single source of business rules
+### Project 2 — The server is the single source of business rules, exposed for AI and widgets (DONE)
 
-Goal: Hermes, widgets and the web UI see the same lists, dates and filters.
+Merges the original Projects 2 and 3, which were executed together as one plan: [docs/superpowers/plans/2026-10-17-agent-widget-api.md](superpowers/plans/2026-10-17-agent-widget-api.md) (spec: [docs/superpowers/specs/2026-10-17-agent-widget-api-design.md](superpowers/specs/2026-10-17-agent-widget-api-design.md), 21 tasks, branch `csscoder/review-and-test-coverage`). It delivered named revocable tokens, CORS, boundary validation, atomic writes, escaped FTS, the widget query API (`GET /api/tasks` filters, sort, cursor pagination), idempotent creates, the single JSON error envelope, the OpenAPI contract at `GET /api/openapi.yaml` with a drift test, and the MCP server served from the Go binary at `/mcp`.
+
+Goal: Hermes, widgets and the web UI see the same lists, dates and filters — and an external program can do everything safely and predictably. The original scopes of both merged projects follow for the record.
+
+#### Original Project 2 scope
 
 To do:
 1. **Canonical view rules on the server** for Inbox, Today (+ This Evening, Overdue, Earlier), Upcoming, Anytime, Someday, Logbook, Trash, counts. Resolve the inconsistencies in 3.3 and 6.1 (no vanishing tasks; one list per task; counts equal views).
@@ -264,7 +268,7 @@ To do:
 
 Decisions for the owner (in project 2 brainstorming): tag inheritance and AND/OR filter semantics; whether Upcoming starts tomorrow; whether a project may have no area; priority boolean vs levels.
 
-### Project 3 — API for AI and widgets
+#### Original Project 3 scope
 
 Goal: an external program (Hermes via MCP, widget apps, scripts) can do everything safely and predictably.
 
@@ -283,7 +287,7 @@ To do:
 12. **Docs:** reconcile `docs/api.md` with code (section 3.6).
 13. **Tests:** handler tests per endpoint for validation and error shapes; MCP tool tests against a test server.
 
-### Project 4 — Built-in UI bugs and frontend tests
+### Project 3 — Built-in UI bugs and frontend tests
 
 Goal: the secondary UI is correct and stops diverging from the server.
 
@@ -301,7 +305,7 @@ To do:
 
 ## 8. Housekeeping
 
-- `CLAUDE.md` says "Current Phase: Phase 1 - Scaffolding" and references a missing plan file. Update it when a later project touches shared files.
+- ~~`CLAUDE.md` says "Current Phase: Phase 1 - Scaffolding" and references a missing plan file.~~ Resolved: CLAUDE.md now points to this file for the current phase.
 - Seven older plans/specs from 2026-03 under `docs/superpowers/` are deleted in the working tree but not committed. They were not deleted by this review. The owner decides whether to commit or restore them.
 
 ## 9. Source reports

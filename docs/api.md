@@ -4,6 +4,8 @@ Base URL: `/api`
 
 All endpoints return JSON. All mutations broadcast SSE events. Authentication via httpOnly JWT cookie (builtin/oidc mode), proxy header (proxy mode), or API key via `Authorization: Bearer <key>` header.
 
+An OpenAPI 3.1 contract of every route below is served at `GET /api/openapi.yaml` (no auth). For agent integration over MCP, see the `/mcp` endpoint (README documents it fully).
+
 ---
 
 ## Common Patterns
@@ -313,6 +315,7 @@ project or area).
 Request:
 ```json
 {
+  "id": "string (optional, client-supplied; a known id replays 200 — see Idempotent Creates)",
   "title": "string (required)",
   "notes": "string",
   "when_date": "string|null",
@@ -325,7 +328,9 @@ Request:
 }
 ```
 
-Response (201): Full task object (same shape as list item)
+When the user settings carry a `default_reminder_type`, that reminder is added atomically with the task.
+
+Response (201): the full task detail — the same shape as `GET /api/tasks/:id`, with nested checklist, attachments, tags, repeat_rule and schedules (not the list-item shape).
 
 ### GET /api/tasks/:id
 Response (200): Full task object with nested checklist, attachments, tags, repeat_rule
@@ -491,7 +496,7 @@ Request:
 ```json
 {
   "task_ids": ["string"],
-  "action": "complete|cancel|wontdo|delete|set_when|set_deadline|set_priority|move_project|add_tags|remove_tags|mark_reviewed",
+  "action": "complete|cancel|wontdo|delete|set_when|set_deadline|set_priority|toggle_priority|move_project|add_tags|remove_tags|toggle_tags|mark_reviewed",
   "params": {}
 }
 ```
@@ -501,9 +506,11 @@ Request:
 | set_when | `when_date` (string, empty = clear) |
 | set_deadline | `deadline` (string) |
 | set_priority | `high_priority` (boolean) or legacy `priority` (number, 1 = high); `high_priority` wins when both are sent |
+| toggle_priority | _(none)_ — flips each task's `high_priority` |
 | move_project | `project_id` (string or null), `area_id` (string or null, empty = null); the area is derived from the target project and a heading not in it is cleared |
 | add_tags | `tag_ids` (string[]) |
 | remove_tags | `tag_ids` (string[]) |
+| toggle_tags | `tag_ids` (string[]) — adds the tag where absent, removes it where present |
 | mark_reviewed | _(none)_ — bumps `updated_at` to now |
 
 Limits: max 100 tasks per request.
@@ -657,7 +664,7 @@ Response (204): No content
 ### GET /api/push/vapid-key
 Response (200):
 ```json
-{ "key": "base64url-encoded VAPID public key" }
+{ "public_key": "base64url-encoded VAPID public key" }
 ```
 
 ### POST /api/push/subscribe
@@ -1167,7 +1174,8 @@ Response (200):
   "ntfy_topic": "thingstodo",
   "ntfy_access_token": "",
   "base_url": "",
-  "privacy_mode": false
+  "privacy_mode": false,
+  "review_include_recurring": true
 }
 ```
 
@@ -1195,7 +1203,8 @@ Request: Partial update (any subset of fields)
   "ntfy_topic": "string (default thingstodo)",
   "ntfy_access_token": "string (optional, Bearer token for authenticated ntfy servers)",
   "base_url": "string (optional, e.g. https://tasks.example.com, for ntfy click-through links)",
-  "privacy_mode": "boolean (default false)"
+  "privacy_mode": "boolean (default false)",
+  "review_include_recurring": "boolean (default true; includes recurring tasks in the Review section)"
 }
 ```
 
@@ -1397,7 +1406,7 @@ Response (200):
 ## SSE Events
 
 ### GET /api/events
-**No auth required.** Response: text/event-stream
+**Auth required** (Bearer token; the browser session works same-origin). Response: text/event-stream
 
 On connect the server sends:
 ```
@@ -1483,7 +1492,7 @@ single-entity task events as their REST equivalents.
 
 ## Saved Filters
 
-### GET /saved-filters?view={view}
+### GET /api/saved-filters?view={view}
 
 Returns all saved filters for the current user for a specific view, sorted A-Z by name.
 
@@ -1504,7 +1513,7 @@ Response (200):
 }
 ```
 
-### POST /saved-filters
+### POST /api/saved-filters
 
 Creates a new saved filter. Maximum 10 per view.
 
@@ -1523,7 +1532,7 @@ Error (422): `LIMIT_REACHED` — maximum 10 saved filters per view.
 
 SSE: broadcasts `saved_filter_changed` with `{ "view": "<view>" }`.
 
-### DELETE /saved-filters/{id}
+### DELETE /api/saved-filters/{id}
 
 Deletes a saved filter. Only the owning user can delete it.
 
@@ -1581,7 +1590,7 @@ Response (410 Gone): Cursor has been purged, perform a full sync
 | `entity` | Entity type: task, project, area, tag, heading, checklist_item, attachment, schedule, reminder, repeat_rule |
 | `entity_id` | ID of the entity that changed |
 | `action` | Type of change: create, update, or delete |
-| `fields` | Comma-separated list of fields that changed (for updates); null for create/delete |
+| `fields` | JSON-encoded string array of the fields that changed (for updates), e.g. `["title","notes"]`; null for create/delete |
 | `snapshot` | Full entity state as JSON string (always populated for create/update, empty string for delete) |
 | `user_id` | User ID (omitted if empty) |
 | `device_id` | Device ID of origin (omitted if empty) |
@@ -1618,7 +1627,7 @@ Request:
   "device_id": "string (required)",
   "changes": [
     {
-      "entity": "task|project|area|tag",
+      "entity": "task|project|area|tag|heading|checklistItem|attachment|schedule|reminder",
       "entity_id": "string",
       "action": "create|update|delete",
       "data": { "title": "string", "notes": "string", ... },
@@ -1650,7 +1659,7 @@ Response (200):
 | `conflict_resolved` | Change conflicted with server state (server was newer), but was still recorded for audit |
 | `error` | Change could not be applied; check `error` field for details. Internal failures report the generic `internal error`; user-facing messages (validation, not found, duplicate name, unsupported entity/action) keep their own text. Boundary validation failures use `"<field>: <message>"` (e.g. `when_date: must be YYYY-MM-DD or 'someday'`) and do not fail the batch |
 
-**Supported entities:** task, project, area, tag
+**Supported entities:** task, project, area, tag, heading, checklistItem, attachment, schedule, reminder
 
 **Conflict resolution:** For task, project, and area updates, if the server's `updated_at` is strictly newer than the client's `client_updated_at`, the status is marked as `conflict_resolved`. The client's change is still recorded in the change log. The client is responsible for pulling the latest state and reapplying their changes if needed.
 

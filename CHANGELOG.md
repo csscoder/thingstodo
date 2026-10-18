@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+- **OpenAPI contract** — the full `/api` surface is documented as an OpenAPI 3.1 spec (embedded at `docs/openapi.yaml`) and served publicly at `GET /api/openapi.yaml`; a drift test pins the spec to the router's route table so the contract cannot silently diverge from the code
+
 ### Changed
+- **docs/api.md reconciled with the code** — `/api/events` auth, `push/vapid-key` `public_key` field, `POST /api/tasks` response shape and default reminder, bulk `toggle_priority`/`toggle_tags`, the sync push entity list, the saved-filter paths and settings `review_include_recurring`
 - **MCP server served from the Go binary** — `/mcp` now speaks Streamable HTTP (stateless) with the same tokens as the REST API; every tool call dispatches in-process to the REST router, so validation, recurring-task behavior and error codes are identical. Adds `query_tasks` (full filter, sort and pagination set), repeat-rule, reminder, settings and counts tools — 54 tools in total
 
 ### Removed

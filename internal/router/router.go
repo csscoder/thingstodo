@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/collinjanssen/thingstodo/docs"
 	"github.com/collinjanssen/thingstodo/internal/config"
 	"github.com/collinjanssen/thingstodo/internal/frontend"
 	"github.com/collinjanssen/thingstodo/internal/handler"
@@ -135,6 +136,14 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 			mw.WriteError(w, http.StatusNotFound, "not found", "NOT_FOUND", "")
 		})
 		r.Use(methodNotAllowedJSON)
+
+		// OpenAPI contract (spec F): the embedded document is served
+		// verbatim at a public route so agents, widgets and the drift
+		// test can discover the API without credentials.
+		r.Get("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/yaml")
+			_, _ = w.Write(docs.OpenAPI)
+		})
 
 		// Auth endpoints (no middleware)
 		r.Post("/auth/login", authH.Login)

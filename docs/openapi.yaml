@@ -1,0 +1,3518 @@
+openapi: 3.1.0
+info:
+  title: ThingsToDo API
+  version: 0.13.2
+  summary: Self-hosted Things 3-inspired task manager API
+  description: |
+    The /api surface of ThingsToDo. Everything an agent, widget or script
+    can do goes through this API; the MCP server at /mcp wraps it (see
+    README). Authentication is a Bearer token: the master API_KEY or a
+    named ttd_ token. Errors always use the JSON envelope
+    {error, code, field?}. Calendar-day boundaries use the server TZ.
+servers:
+  - url: /
+    description: Same-origin deployment (SPA, widgets, agents)
+tags:
+  - name: auth
+  - name: tokens
+    description: Named API tokens; a named token cannot manage tokens (403).
+  - name: tasks
+  - name: checklist
+  - name: attachments
+  - name: reminders
+  - name: schedules
+  - name: repeat
+  - name: push
+  - name: projects
+  - name: headings
+  - name: areas
+  - name: tags
+  - name: views
+  - name: settings
+  - name: saved-filters
+  - name: search
+  - name: sync
+  - name: events
+  - name: meta
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/openapi.yaml:
+    get:
+      tags: [meta]
+      summary: This OpenAPI document
+      operationId: getOpenAPI
+      security: []
+      responses:
+        '200':
+          description: The OpenAPI 3.1 contract, served verbatim
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /api/auth/config:
+    get:
+      tags: [auth]
+      summary: Current auth mode
+      operationId: getAuthConfig
+      security: []
+      responses:
+        '200':
+          description: Auth mode for the login page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthConfig'
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Password login (builtin mode only)
+      operationId: login
+      description: 404 in proxy/oidc modes. Sets the httpOnly JWT session
+        cookie. Failed logins are rate-limited per client IP (10 failures
+        per 15 minutes, then 429).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Logged in; session cookie set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/auth/logout:
+    delete:
+      tags: [auth]
+      summary: Log out (clear the session cookie)
+      operationId: logout
+      description: Local logout only (no IdP redirect). Builtin and oidc modes.
+      security: []
+      responses:
+        '200':
+          description: Cookie cleared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: Current user and auth mode
+      operationId: me
+      responses:
+        '200':
+          description: Current session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/oidc/login:
+    get:
+      tags: [auth]
+      summary: Start OIDC login (oidc mode only)
+      operationId: oidcLogin
+      description: Browser navigation, not a JSON API. Redirects to the IdP
+        and sets a signed oidc_state cookie. Registered only when
+        AUTH_MODE=oidc.
+      security: []
+      responses:
+        '302':
+          description: Redirect to the OIDC provider authorization endpoint
+
+  /api/auth/oidc/callback:
+    get:
+      tags: [auth]
+      summary: OIDC redirect URI (oidc mode only)
+      operationId: oidcCallback
+      description: Verifies state, exchanges the code, accepts only the
+        configured OIDC_ALLOWED_EMAIL with email_verified, issues the app
+        JWT cookie and redirects to /inbox. Registered only when
+        AUTH_MODE=oidc.
+      security: []
+      responses:
+        '302':
+          description: Redirect to /inbox on success
+        '403':
+          description: Email not allowed or not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/tokens:
+    get:
+      tags: [tokens]
+      summary: List named API tokens
+      operationId: listTokens
+      responses:
+        '200':
+          description: Tokens (hashes and values are never returned)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [tokens]
+      summary: Create a named API token
+      operationId: createToken
+      description: 'Not idempotent: every POST mints a new token. The
+        plaintext token value is returned exactly once.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenCreateRequest'
+      responses:
+        '201':
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Duplicate token name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/tokens/{id}:
+    delete:
+      tags: [tokens]
+      summary: Revoke a named API token
+      operationId: revokeToken
+      description: Revoking is idempotent (204 for an already-revoked
+        token); a revoked token stops authenticating immediately.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks:
+    get:
+      tags: [tasks]
+      summary: Query tasks
+      operationId: listTasks
+      description: Filter-only listing for widgets and agents. All params
+        combine with AND; unknown params or invalid values get 400
+        VALIDATION.
+      parameters:
+        - {name: status, in: query, description: 'Comma list of open,completed,canceled,wont_do. Default: all.', schema: {type: string}}
+        - {name: list, in: query, description: 'inbox, today, upcoming, anytime, someday, logbook or trash (same predicates as /api/views/*).', schema: {type: string, enum: [inbox, today, upcoming, anytime, someday, logbook, trash]}}
+        - {name: project_id, in: query, schema: {type: string}}
+        - {name: area_id, in: query, schema: {type: string}}
+        - {name: heading_id, in: query, schema: {type: string}}
+        - {name: tag_ids, in: query, description: 'Comma list of tag ids.', schema: {type: string}}
+        - {name: tag_mode, in: query, description: 'any (default) or all.', schema: {type: string, enum: [any, all]}}
+        - {name: when_date, in: query, description: 'YYYY-MM-DD or someday.', schema: {type: string}}
+        - {name: when_before, in: query, schema: {type: string, format: date}}
+        - {name: when_after, in: query, schema: {type: string, format: date}}
+        - {name: deadline_before, in: query, schema: {type: string, format: date}}
+        - {name: deadline_after, in: query, schema: {type: string, format: date}}
+        - {name: has_deadline, in: query, schema: {type: string, enum: ['true', 'false']}}
+        - {name: has_when, in: query, schema: {type: string, enum: ['true', 'false']}}
+        - {name: high_priority, in: query, schema: {type: string, enum: ['true', 'false']}}
+        - {name: updated_since, in: query, description: 'Inclusive UTC timestamp.', schema: {type: string}}
+        - {name: created_since, in: query, description: 'Inclusive UTC timestamp.', schema: {type: string}}
+        - {name: search, in: query, description: 'FTS over title and notes (quoted tokens, no prefix match).', schema: {type: string}}
+        - {name: sort, in: query, description: 'manual (default), when_date, deadline, created_at, updated_at, title; prefix - for descending.', schema: {type: string}}
+        - {name: limit, in: query, description: '1-500. Opt-in pagination; without limit all matching tasks return.', schema: {type: integer, minimum: 1, maximum: 500}}
+        - {name: cursor, in: query, description: Opaque cursor from the previous response., schema: {type: string}}
+      responses:
+        '200':
+          description: Matching tasks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TasksList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [tasks]
+      summary: Create a task
+      operationId: createTask
+      description: Idempotent by a client-supplied body id (see
+        docs/api.md). When the user settings carry a default reminder, it is
+        added atomically with the task. Returns the full TaskDetail.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateInput'
+      responses:
+        '201':
+          description: Task created (200 when the id replayed an existing task)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/tasks/{id}:
+    get:
+      tags: [tasks]
+      summary: Get one task
+      operationId: getTask
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Task detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [tasks]
+      summary: Update a task
+      operationId: updateTask
+      description: Partial update; absent keys are untouched, explicit null
+        clears. Container derivation follows docs/api.md.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdateInput'
+      responses:
+        '200':
+          description: Updated task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [tasks]
+      summary: Move a task to trash
+      operationId: deleteTask
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Soft-deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/purge:
+    delete:
+      tags: [tasks]
+      summary: Permanently delete a task
+      operationId: purgeTask
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Purged
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/complete:
+    patch:
+      tags: [tasks]
+      summary: Complete a task
+      operationId: completeTask
+      description: Guarded transactional finish — completes past/today
+        schedule entries, deletes future ones, and for a repeat rule creates
+        exactly one next instance. Idempotent for an already-finished task.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Completed task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/cancel:
+    patch:
+      tags: [tasks]
+      summary: Cancel a task
+      operationId: cancelTask
+      description: Same guarded finishing path as complete, with
+        status=canceled.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Canceled task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/wontdo:
+    patch:
+      tags: [tasks]
+      summary: Mark a task won't-do
+      operationId: wontdoTask
+      description: Same guarded finishing path as complete, with
+        status=wont_do.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Won't-do task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/reopen:
+    patch:
+      tags: [tasks]
+      summary: Reopen a task
+      operationId: reopenTask
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Reopened task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/restore:
+    patch:
+      tags: [tasks]
+      summary: Restore a task from trash
+      operationId: restoreTask
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Restored task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/review:
+    patch:
+      tags: [tasks]
+      summary: Mark a task reviewed
+      operationId: reviewTask
+      description: Bumps updated_at so the task leaves the review queue.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Updated task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/move:
+    patch:
+      tags: [tasks]
+      summary: Move a task
+      operationId: moveTask
+      description: Precise move — only keys present in the body are
+        applied; absent keys keep their stored values, explicit null clears.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskMoveInput'
+      responses:
+        '200':
+          description: Moved task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/tasks/reorder:
+    patch:
+      tags: [tasks]
+      summary: Reorder tasks
+      operationId: reorderTasks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskReorderRequest'
+      responses:
+        '200':
+          description: Reordered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/tasks/bulk:
+    post:
+      tags: [tasks]
+      summary: Apply one action to many tasks
+      operationId: bulkAction
+      description: One transaction, at most 100 tasks. Status actions run
+        the guarded finishing path per task; affected counts only real
+        changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkActionRequest'
+      responses:
+        '200':
+          description: Action applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkActionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/tasks/{id}/checklist:
+    get:
+      tags: [checklist]
+      summary: List a task's checklist items
+      operationId: listChecklist
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Checklist items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChecklistList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [checklist]
+      summary: Add a checklist item
+      operationId: createChecklistItem
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChecklistCreate'
+      responses:
+        '201':
+          description: Item created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChecklistItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/checklist/{id}:
+    patch:
+      tags: [checklist]
+      summary: Update a checklist item
+      operationId: updateChecklistItem
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChecklistUpdate'
+      responses:
+        '200':
+          description: Updated item
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChecklistItem'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [checklist]
+      summary: Delete a checklist item
+      operationId: deleteChecklistItem
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/attachments:
+    get:
+      tags: [attachments]
+      summary: List a task's attachments
+      operationId: listAttachments
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Attachments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentsList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [attachments]
+      summary: Attach a file or a link
+      operationId: createAttachment
+      description: 'Files: multipart/form-data with a file field (the only
+        way to create file attachments, capped by MAX_UPLOAD_SIZE). Links:
+        application/json accepting only type=link; javascript:, data:,
+        vbscript: and file: schemes are rejected with 400 VALIDATION.'
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttachmentLinkCreate'
+      responses:
+        '201':
+          description: Attachment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/attachments/{id}:
+    patch:
+      tags: [attachments]
+      summary: Update an attachment
+      operationId: updateAttachment
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttachmentUpdate'
+      responses:
+        '200':
+          description: Updated attachment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attachment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [attachments]
+      summary: Delete an attachment
+      operationId: deleteAttachment
+      description: Deletes exactly the attachment row; the stored file is
+        removed only when no other row references it.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/attachments/{id}/file:
+    get:
+      tags: [attachments]
+      summary: Download an attachment's file
+      operationId: downloadAttachment
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Binary file stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/repeat:
+    get:
+      tags: [repeat]
+      summary: Get a task's repeat rule
+      operationId: getRepeatRule
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Repeat rule or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepeatRuleResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [repeat]
+      summary: Create or replace a task's repeat rule
+      operationId: upsertRepeatRule
+      description: Accepts the pattern format (preferred) or the legacy
+        flat format.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RepeatRuleUpsert'
+      responses:
+        '200':
+          description: Stored repeat rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepeatRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [repeat]
+      summary: Delete a task's repeat rule
+      operationId: deleteRepeatRule
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/schedules:
+    get:
+      tags: [schedules]
+      summary: List a task's schedule entries
+      operationId: listSchedules
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Schedule entries (max 12 per task)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchedulesList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [schedules]
+      summary: Add a schedule entry
+      operationId: createSchedule
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleCreate'
+      responses:
+        '201':
+          description: Entry created (200 when the id replayed an existing entry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/tasks/{id}/schedules/reorder:
+    patch:
+      tags: [schedules]
+      summary: Reorder a task's schedule entries
+      operationId: reorderSchedules
+      description: Body is a bare array. Every id must belong to the task
+        in the URL; a foreign id rejects the whole request.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleReorderRequest'
+      responses:
+        '204':
+          description: Reordered
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/schedules/{id}:
+    patch:
+      tags: [schedules]
+      summary: Update a schedule entry
+      operationId: updateSchedule
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleUpdate'
+      responses:
+        '200':
+          description: Updated entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Schedule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [schedules]
+      summary: Delete a schedule entry
+      operationId: deleteSchedule
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tasks/{id}/reminders:
+    get:
+      tags: [reminders]
+      summary: List a task's reminders
+      operationId: listReminders
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Reminders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemindersList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [reminders]
+      summary: Add a reminder
+      operationId: createReminder
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReminderCreate'
+      responses:
+        '201':
+          description: Reminder created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reminder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/reminders/{id}:
+    delete:
+      tags: [reminders]
+      summary: Delete a reminder
+      operationId: deleteReminder
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/push/subscribe:
+    post:
+      tags: [push]
+      summary: Subscribe to web push
+      operationId: pushSubscribe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushSubscribeRequest'
+      responses:
+        '201':
+          description: Subscription stored
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [push]
+      summary: Unsubscribe from web push
+      operationId: pushUnsubscribe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushUnsubscribeRequest'
+      responses:
+        '204':
+          description: Subscription removed
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/push/vapid-key:
+    get:
+      tags: [push]
+      summary: VAPID public key
+      operationId: getVapidKey
+      responses:
+        '200':
+          description: Base64url VAPID public key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VapidKeyResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/push/test:
+    post:
+      tags: [push]
+      summary: Send a test notification
+      operationId: testNotification
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Notification sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/projects:
+    get:
+      tags: [projects]
+      summary: List projects
+      operationId: listProjects
+      parameters:
+        - {name: area_id, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [open, completed, canceled]}}
+      responses:
+        '200':
+          description: Projects
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectsList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [projects]
+      summary: Create a project
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreate'
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/DuplicateName'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/projects/{id}:
+    get:
+      tags: [projects]
+      summary: Get a project with nested headings and tasks
+      operationId: getProject
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Project detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [projects]
+      summary: Update a project
+      operationId: updateProject
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdate'
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/DuplicateName'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [projects]
+      summary: Delete a project (children go to trash)
+      operationId: deleteProject
+      description: One transaction; child tasks are soft-deleted (project,
+        heading and area cleared) with a change-log entry each. Unknown ids
+        are an idempotent success.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/projects/{id}/complete:
+    patch:
+      tags: [projects]
+      summary: Complete a project
+      operationId: completeProject
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Completed project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/projects/reorder:
+    patch:
+      tags: [projects]
+      summary: Reorder projects
+      operationId: reorderProjects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderRequest'
+      responses:
+        '200':
+          description: Reordered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/projects/{id}/headings:
+    get:
+      tags: [headings]
+      summary: List a project's headings
+      operationId: listHeadings
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Headings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeadingsList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [headings]
+      summary: Create a heading
+      operationId: createHeading
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeadingCreate'
+      responses:
+        '201':
+          description: Heading created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Heading'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/headings/{id}:
+    patch:
+      tags: [headings]
+      summary: Update a heading
+      operationId: updateHeading
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeadingUpdate'
+      responses:
+        '200':
+          description: Updated heading
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Heading'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [headings]
+      summary: Delete a heading
+      operationId: deleteHeading
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/headings/reorder:
+    patch:
+      tags: [headings]
+      summary: Reorder headings
+      operationId: reorderHeadings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderRequest'
+      responses:
+        '200':
+          description: Reordered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/areas:
+    get:
+      tags: [areas]
+      summary: List areas
+      operationId: listAreas
+      responses:
+        '200':
+          description: Areas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AreasList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [areas]
+      summary: Create an area
+      operationId: createArea
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AreaCreate'
+      responses:
+        '201':
+          description: Area created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Area'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/DuplicateName'
+
+  /api/areas/{id}:
+    get:
+      tags: [areas]
+      summary: Get an area with nested projects and tasks
+      operationId: getArea
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Area detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AreaDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [areas]
+      summary: Update an area
+      operationId: updateArea
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AreaUpdate'
+      responses:
+        '200':
+          description: Updated area
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Area'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [areas]
+      summary: Delete an area (standalone tasks go to trash)
+      operationId: deleteArea
+      description: Only while it holds no projects (409 HAS_PROJECTS
+        otherwise); standalone tasks are soft-deleted with a change-log
+        entry each. Unknown ids are an idempotent success.
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Area still has projects
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/areas/reorder:
+    patch:
+      tags: [areas]
+      summary: Reorder areas
+      operationId: reorderAreas
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderRequest'
+      responses:
+        '200':
+          description: Reordered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/tags:
+    get:
+      tags: [tags]
+      summary: List tags
+      operationId: listTags
+      responses:
+        '200':
+          description: Tags
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TagsList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [tags]
+      summary: Create a tag
+      operationId: createTag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagCreate'
+      responses:
+        '201':
+          description: Tag created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Reserved'
+        '409':
+          $ref: '#/components/responses/DuplicateName'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/tags/{id}:
+    patch:
+      tags: [tags]
+      summary: Update a tag
+      operationId: updateTag
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagUpdate'
+      responses:
+        '200':
+          description: Updated tag
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/DuplicateName'
+    delete:
+      tags: [tags]
+      summary: Delete a tag
+      operationId: deleteTag
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tags/{id}/tasks:
+    get:
+      tags: [tags]
+      summary: Tasks carrying a tag
+      operationId: getTagTasks
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '200':
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TasksList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/tags/reorder:
+    patch:
+      tags: [tags]
+      summary: Reorder tags
+      operationId: reorderTags
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReorderRequest'
+      responses:
+        '200':
+          description: Reordered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/inbox:
+    get:
+      tags: [views]
+      summary: Inbox view
+      operationId: getInboxView
+      responses:
+        '200':
+          description: Inbox tasks and review queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewInbox'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/today:
+    get:
+      tags: [views]
+      summary: Today view
+      operationId: getTodayView
+      responses:
+        '200':
+          description: Today sections plus overdue, earlier and completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewToday'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/upcoming:
+    get:
+      tags: [views]
+      summary: Upcoming view
+      operationId: getUpcomingView
+      parameters:
+        - {name: from, in: query, description: 'ISO date; default tomorrow in the server timezone.', schema: {type: string, format: date}}
+      responses:
+        '200':
+          description: Overdue, date groups and earlier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewUpcoming'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/anytime:
+    get:
+      tags: [views]
+      summary: Anytime view
+      operationId: getAnytimeView
+      responses:
+        '200':
+          description: Tasks grouped by area and project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewGrouped'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/someday:
+    get:
+      tags: [views]
+      summary: Someday view
+      operationId: getSomedayView
+      responses:
+        '200':
+          description: Someday tasks grouped by area and project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewGrouped'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/logbook:
+    get:
+      tags: [views]
+      summary: Logbook view
+      operationId: getLogbookView
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, default: 0}}
+      responses:
+        '200':
+          description: Finished tasks grouped by completion date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewPaged'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/trash:
+    get:
+      tags: [views]
+      summary: Trash view
+      operationId: getTrashView
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, default: 0}}
+      responses:
+        '200':
+          description: Soft-deleted tasks grouped by deletion date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewPaged'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/views/counts:
+    get:
+      tags: [views]
+      summary: Per-view counts
+      operationId: getViewCounts
+      responses:
+        '200':
+          description: One count per view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewCounts'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/user/settings:
+    get:
+      tags: [settings]
+      summary: Get user settings
+      operationId: getUserSettings
+      responses:
+        '200':
+          description: Settings row (upserted on first save)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [settings]
+      summary: Update user settings
+      operationId: updateUserSettings
+      description: Partial update; the row is upserted on first save, so a
+        PATCH before any GET persists with defaults for missing fields.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserSettingsUpdate'
+      responses:
+        '200':
+          description: Merged settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/saved-filters:
+    get:
+      tags: [saved-filters]
+      summary: List saved filters for a view
+      operationId: listSavedFilters
+      parameters:
+        - {name: view, in: query, required: true, description: 'today, upcoming, anytime, someday or logbook.', schema: {type: string, enum: [today, upcoming, anytime, someday, logbook]}}
+      responses:
+        '200':
+          description: Saved filters, sorted A-Z by name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFiltersList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [saved-filters]
+      summary: Save a filter preset
+      operationId: createSavedFilter
+      description: Maximum 10 saved filters per view (422 LIMIT_REACHED).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SavedFilterCreate'
+      responses:
+        '201':
+          description: Saved filter created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFilter'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/saved-filters/{id}:
+    delete:
+      tags: [saved-filters]
+      summary: Delete a saved filter
+      operationId: deleteSavedFilter
+      parameters:
+        - $ref: '#/components/parameters/IdInPath'
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/search:
+    get:
+      tags: [search]
+      summary: Full-text search
+      operationId: searchTasks
+      description: Tokens are quoted as FTS5 strings (punctuation is
+        literal, operators never 500) and prefix-matched; ordered by rank
+        then id.
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 20, maximum: 500}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: Ranked results with snippets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/sync/pull:
+    get:
+      tags: [sync]
+      summary: Pull changes since a cursor
+      operationId: syncPull
+      parameters:
+        - {name: since, in: query, description: 'Return changes after this sequence number.', schema: {type: integer, format: int64, default: 0}}
+        - {name: limit, in: query, schema: {type: integer, default: 500, maximum: 1000}}
+      responses:
+        '200':
+          description: Change-log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncPullResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '410':
+          description: Cursor purged; perform a full sync
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/sync/push:
+    post:
+      tags: [sync]
+      summary: Push client changes
+      operationId: syncPush
+      description: Last-write-wins per entity. Supported entities are
+        task, project, area, tag, heading, checklistItem, attachment,
+        schedule and reminder. Task status finishes run the guarded
+        finishing path; project/area deletes use the delete-to-trash
+        semantics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncPushRequest'
+      responses:
+        '200':
+          description: Per-change results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncPushResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+
+  /api/sync/full:
+    get:
+      tags: [sync]
+      summary: Full snapshot of every entity
+      operationId: syncFull
+      responses:
+        '200':
+          description: Complete state plus the current cursor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncFullResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/events:
+    get:
+      tags: [events]
+      summary: SSE change feed
+      operationId: streamEvents
+      description: text/event-stream. EventSource cannot send headers;
+        read the stream with fetch() and a Bearer token instead. On connect
+        the server sends a connected event; single-entity events carry
+        {entity, id, seq}.
+      responses:
+        '200':
+          description: Server-sent events stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        The master API_KEY or a named ttd_ token (POST /api/tokens), sent
+        as "Authorization: Bearer <token>". A named token authenticates as
+        the first user and cannot call the /api/tokens endpoints.
+
+  parameters:
+    IdInPath:
+      name: id
+      in: path
+      required: true
+      description: Entity id (nanoid, 8-10 chars; doubles as permalink slug for tasks)
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{8,21}$'
+
+  responses:
+    BadRequest:
+      description: Malformed JSON or invalid parameter (code BAD_REQUEST or VALIDATION)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid credentials (code UNAUTHORIZED)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Authenticated but not allowed (code FORBIDDEN)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Reserved:
+      description: Reserved tag name (code RESERVED)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Unknown route or entity (code NOT_FOUND)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    DuplicateName:
+      description: Title or token name already exists (code DUPLICATE_NAME)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Field validation failed; 400 malformed value, 422 unknown referenced id (code VALIDATION, carries field)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BodyTooLarge:
+      description: Request body over the size cap (code BODY_TOO_LARGE)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Too many failed login attempts (code RATE_LIMITED)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      description: The single JSON error envelope used by every endpoint
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          description: Human-readable message
+        code:
+          type: string
+          enum: [UNAUTHORIZED, FORBIDDEN, NOT_FOUND, METHOD_NOT_ALLOWED, BAD_REQUEST, VALIDATION, RESERVED, DUPLICATE_NAME, HAS_PROJECTS, CURSOR_EXPIRED, BODY_TOO_LARGE, LIMIT_REACHED, RATE_LIMITED, FILE_TOO_LARGE, NOT_CONFIGURED, INTERNAL]
+        field:
+          type: string
+          description: Offending request field, present only for field-level errors
+
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+
+    User:
+      type: object
+      required: [id, username]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+
+    AuthConfig:
+      type: object
+      required: [auth_mode]
+      properties:
+        auth_mode:
+          type: string
+          enum: [builtin, proxy, oidc, none]
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    LoginResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+
+    MeResponse:
+      type: object
+      required: [user, auth_mode]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        auth_mode:
+          type: string
+          enum: [builtin, proxy, oidc, none]
+
+    TokenCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+
+    TokenInfo:
+      type: object
+      required: [id, name, prefix, created_at, last_used_at, revoked_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+          description: First 8 characters of the token value
+        created_at:
+          type: string
+        last_used_at:
+          type: [string, 'null']
+          description: Updated at most once per minute per token
+        revoked_at:
+          type: [string, 'null']
+
+    TokensList:
+      type: object
+      required: [tokens]
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/TokenInfo'
+
+    TokenCreated:
+      type: object
+      required: [id, name, prefix, token]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+        token:
+          type: string
+          description: The plaintext ttd_ token, returned exactly once
+
+    TagRef:
+      type: object
+      required: [id, title, color]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        color:
+          type: [string, 'null']
+
+    TaskListItem:
+      type: object
+      required: [id, title, notes, status, when_date, high_priority, deadline, project_id, project_name, area_id, area_name, heading_id, sort_order_today, sort_order_project, sort_order_heading, completed_at, canceled_at, deleted_at, created_at, updated_at, tags, checklist_count, checklist_done, has_notes, has_links, has_files, has_repeat_rule, first_schedule_time, first_schedule_end_time]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        notes:
+          type: string
+        status:
+          type: string
+          enum: [open, completed, canceled, wont_do]
+        when_date:
+          type: [string, 'null']
+          description: 'YYYY-MM-DD or someday'
+        high_priority:
+          type: boolean
+        deadline:
+          type: [string, 'null']
+        project_id:
+          type: [string, 'null']
+        project_name:
+          type: [string, 'null']
+          description: Filled via join; null when the task has no project
+        area_id:
+          type: [string, 'null']
+        area_name:
+          type: [string, 'null']
+          description: Filled via join; null when the task has no area
+        heading_id:
+          type: [string, 'null']
+        sort_order_today:
+          type: number
+        sort_order_project:
+          type: number
+        sort_order_heading:
+          type: number
+        completed_at:
+          type: [string, 'null']
+        canceled_at:
+          type: [string, 'null']
+        deleted_at:
+          type: [string, 'null']
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/TagRef'
+        checklist_count:
+          type: integer
+        checklist_done:
+          type: integer
+        has_notes:
+          type: boolean
+        has_links:
+          type: boolean
+        has_files:
+          type: boolean
+        has_repeat_rule:
+          type: boolean
+        first_schedule_time:
+          type: [string, 'null']
+        first_schedule_end_time:
+          type: [string, 'null']
+
+    TasksList:
+      type: object
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+        next_cursor:
+          type: string
+          description: Present only when limit was given and more rows exist
+
+    ProjectRef:
+      type: object
+      required: [id, title]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+
+    ChecklistItem:
+      type: object
+      required: [id, title, completed, sort_order]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        completed:
+          type: boolean
+        sort_order:
+          type: number
+
+    ChecklistList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChecklistItem'
+
+    ChecklistCreate:
+      type: object
+      required: [title]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200
+        title:
+          type: string
+
+    ChecklistUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+        completed:
+          type: boolean
+        sort_order:
+          type: number
+
+    Attachment:
+      type: object
+      required: [id, type, title, url, mime_type, file_size, sort_order, created_at]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [file, link]
+        title:
+          type: string
+        url:
+          type: string
+        mime_type:
+          type: string
+        file_size:
+          type: integer
+        sort_order:
+          type: number
+        created_at:
+          type: string
+
+    AttachmentsList:
+      type: object
+      required: [attachments]
+      properties:
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+
+    AttachmentLinkCreate:
+      type: object
+      required: [url]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200
+        type:
+          type: string
+          enum: [link]
+          default: link
+        title:
+          type: string
+        url:
+          type: string
+          description: Required; javascript/data/vbscript/file schemes are rejected
+
+    AttachmentUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+        sort_order:
+          type: number
+
+    Schedule:
+      type: object
+      required: [id, task_id, when_date, start_time, end_time, sort_order, created_at]
+      properties:
+        id:
+          type: string
+        task_id:
+          type: string
+        when_date:
+          type: string
+          description: 'YYYY-MM-DD or someday (first entry only)'
+        start_time:
+          type: [string, 'null']
+          description: Zero-padded HH:MM 24h
+        end_time:
+          type: [string, 'null']
+        sort_order:
+          type: number
+        created_at:
+          type: string
+
+    SchedulesList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Schedule'
+
+    ScheduleCreate:
+      type: object
+      required: [when_date]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200
+        when_date:
+          type: string
+        start_time:
+          type: [string, 'null']
+        end_time:
+          type: [string, 'null']
+
+    ScheduleUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        when_date:
+          type: string
+        start_time:
+          type: [string, 'null']
+        end_time:
+          type: [string, 'null']
+        sort_order:
+          type: number
+
+    ScheduleReorderRequest:
+      type: array
+      minItems: 1
+      items:
+        type: object
+        required: [id, sort_order]
+        properties:
+          id:
+            type: string
+          sort_order:
+            type: number
+
+    Reminder:
+      type: object
+      required: [id, task_id, type, value, exact_at, created_at]
+      properties:
+        id:
+          type: string
+        task_id:
+          type: string
+        type:
+          type: string
+          enum: [at_start, on_day, minutes_before, hours_before, days_before, exact]
+        value:
+          type: integer
+          minimum: 0
+          maximum: 99
+        exact_at:
+          type: [string, 'null']
+          description: UTC RFC 3339 for exact reminders
+        created_at:
+          type: string
+
+    RemindersList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reminder'
+
+    ReminderCreate:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [at_start, on_day, minutes_before, hours_before, days_before, exact]
+        value:
+          type: integer
+          minimum: 0
+          maximum: 99
+        exact_at:
+          type: string
+          description: 'Required for exact; RFC 3339 with offset/Z, or naive YYYY-MM-DDTHH:MM[:SS] read in the server timezone'
+
+    RecurrencePattern:
+      type: object
+      required: [type, every, mode]
+      properties:
+        type:
+          type: string
+          enum: [daily, daily_weekday, daily_weekend, weekly, monthly_dom, monthly_dow, monthly_workday, yearly_date, yearly_dow]
+        every:
+          type: integer
+          minimum: 1
+        mode:
+          type: string
+          enum: [fixed, after_completion]
+        on:
+          type: array
+          description: weekly only; DayOfWeek values
+          items:
+            type: string
+            enum: [mon, tue, wed, thu, fri, sat, sun]
+        day:
+          type: [integer, 'null']
+          description: 'monthly_dom: 1-31, 0=last, negative=last-N, null=use when_date'
+        ordinal:
+          type: string
+          description: monthly_dow and yearly_dow
+          enum: [first, second, third, fourth, last]
+        weekday:
+          type: string
+          description: monthly_dow and yearly_dow (full weekday names)
+          enum: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]
+        workday_position:
+          type: string
+          description: monthly_workday
+          enum: [first, last]
+        month:
+          type: integer
+          minimum: 1
+          maximum: 12
+          description: yearly_date and yearly_dow
+
+    RepeatRule:
+      type: object
+      required: [id, pattern, frequency, interval_value, mode, day_constraints]
+      properties:
+        id:
+          type: string
+        pattern:
+          $ref: '#/components/schemas/RecurrencePattern'
+        frequency:
+          type: string
+          description: Deprecated flat mirror of the pattern
+          enum: [daily, weekly, monthly, yearly]
+        interval_value:
+          type: integer
+        mode:
+          type: string
+          enum: [fixed, after_completion]
+        day_constraints:
+          type: array
+          items:
+            type: string
+
+    RepeatRuleResponse:
+      type: object
+      required: [repeat_rule]
+      properties:
+        repeat_rule:
+          oneOf:
+            - $ref: '#/components/schemas/RepeatRule'
+            - type: 'null'
+
+    RepeatRuleUpsert:
+      type: object
+      properties:
+        pattern:
+          $ref: '#/components/schemas/RecurrencePattern'
+        frequency:
+          type: string
+          description: Legacy format, still accepted
+          enum: [daily, weekly, monthly, yearly]
+        interval_value:
+          type: integer
+        mode:
+          type: string
+          enum: [fixed, after_completion]
+        day_constraints:
+          type: array
+          items:
+            type: string
+
+    TaskCreateInput:
+      type: object
+      required: [title]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200 with the stored task
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: string
+        when_date:
+          type: [string, 'null']
+          description: 'YYYY-MM-DD or someday; also synced to the first schedule entry'
+        high_priority:
+          type: boolean
+        deadline:
+          type: [string, 'null']
+        project_id:
+          type: [string, 'null']
+        area_id:
+          type: [string, 'null']
+          description: Honored only on project-less tasks; otherwise derived from the project
+        heading_id:
+          type: [string, 'null']
+        tag_ids:
+          type: array
+          items:
+            type: string
+
+    TaskUpdateInput:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: [string, 'null']
+        when_date:
+          type: [string, 'null']
+        high_priority:
+          type: boolean
+        deadline:
+          type: [string, 'null']
+        project_id:
+          type: [string, 'null']
+        area_id:
+          type: [string, 'null']
+        heading_id:
+          type: [string, 'null']
+        tag_ids:
+          type: array
+          items:
+            type: string
+
+    TaskMoveInput:
+      type: object
+      minProperties: 1
+      properties:
+        project_id:
+          type: [string, 'null']
+        area_id:
+          type: [string, 'null']
+        heading_id:
+          type: [string, 'null']
+        when_date:
+          type: [string, 'null']
+
+    TaskDetail:
+      allOf:
+        - $ref: '#/components/schemas/TaskListItem'
+        - type: object
+          required: [project, area, heading, checklist, attachments, repeat_rule, schedules]
+          properties:
+            project:
+              oneOf:
+                - $ref: '#/components/schemas/ProjectRef'
+                - type: 'null'
+            area:
+              oneOf:
+                - $ref: '#/components/schemas/ProjectRef'
+                - type: 'null'
+            heading:
+              oneOf:
+                - $ref: '#/components/schemas/ProjectRef'
+                - type: 'null'
+            checklist:
+              type: array
+              items:
+                $ref: '#/components/schemas/ChecklistItem'
+            attachments:
+              type: array
+              items:
+                $ref: '#/components/schemas/Attachment'
+            repeat_rule:
+              oneOf:
+                - $ref: '#/components/schemas/RepeatRule'
+                - type: 'null'
+            schedules:
+              type: array
+              items:
+                $ref: '#/components/schemas/Schedule'
+
+    TaskReorderItem:
+      type: object
+      required: [id, sort_order]
+      properties:
+        id:
+          type: string
+        sort_field:
+          type: string
+          enum: [sort_order_today, sort_order_project, sort_order_heading]
+          description: Tasks reorder only
+        sort_order:
+          type: number
+
+    TaskReorderRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskReorderItem'
+
+    ReorderRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, sort_order]
+            properties:
+              id:
+                type: string
+              sort_order:
+                type: number
+
+    BulkActionRequest:
+      type: object
+      required: [task_ids, action]
+      properties:
+        task_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
+        action:
+          type: string
+          enum: [complete, cancel, wontdo, delete, set_when, set_deadline, set_priority, toggle_priority, move_project, add_tags, remove_tags, toggle_tags, mark_reviewed]
+        params:
+          type: object
+          description: 'set_when {when_date}; set_deadline {deadline}; set_priority {high_priority} or legacy {priority}; move_project {project_id, area_id}; add_tags/remove_tags/toggle_tags {tag_ids}; no params for the status actions, toggle_priority and mark_reviewed'
+
+    BulkActionResponse:
+      type: object
+      required: [ok, affected]
+      properties:
+        ok:
+          type: boolean
+        affected:
+          type: integer
+          description: Tasks that actually changed; unknown ids count 0
+
+    PushSubscribeRequest:
+      type: object
+      required: [endpoint, p256dh, auth]
+      properties:
+        endpoint:
+          type: string
+        p256dh:
+          type: string
+        auth:
+          type: string
+
+    PushUnsubscribeRequest:
+      type: object
+      required: [endpoint]
+      properties:
+        endpoint:
+          type: string
+
+    VapidKeyResponse:
+      type: object
+      required: [public_key]
+      properties:
+        public_key:
+          type: string
+          description: Base64url-encoded VAPID public key
+
+    Project:
+      type: object
+      required: [id, title, notes, area_id, area, status, when_date, deadline, sort_order, task_count, completed_task_count, tags, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        notes:
+          type: string
+        area_id:
+          type: string
+        area:
+          $ref: '#/components/schemas/ProjectRef'
+        status:
+          type: string
+          enum: [open, completed, canceled]
+        when_date:
+          type: [string, 'null']
+        deadline:
+          type: [string, 'null']
+        sort_order:
+          type: number
+        task_count:
+          type: integer
+        completed_task_count:
+          type: integer
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/TagRef'
+        created_at:
+          type: string
+        updated_at:
+          type: string
+
+    ProjectsList:
+      type: object
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/Project'
+
+    ProjectCreate:
+      type: object
+      required: [title, area_id]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: string
+        area_id:
+          type: string
+        when_date:
+          type: [string, 'null']
+        deadline:
+          type: [string, 'null']
+        tag_ids:
+          type: array
+          items:
+            type: string
+
+    ProjectUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: [string, 'null']
+        area_id:
+          type: [string, 'null']
+        status:
+          type: string
+          enum: [open, completed, canceled]
+        when_date:
+          type: [string, 'null']
+        deadline:
+          type: [string, 'null']
+        tag_ids:
+          type: array
+          items:
+            type: string
+
+    Heading:
+      type: object
+      required: [id, title, project_id, sort_order]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        project_id:
+          type: string
+        sort_order:
+          type: number
+
+    HeadingsList:
+      type: object
+      required: [headings]
+      properties:
+        headings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Heading'
+
+    HeadingCreate:
+      type: object
+      required: [title]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200
+        title:
+          type: string
+          minLength: 1
+
+    HeadingUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+        sort_order:
+          type: number
+
+    Area:
+      type: object
+      required: [id, title, sort_order, project_count, task_count, standalone_task_count, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        sort_order:
+          type: number
+        project_count:
+          type: integer
+        task_count:
+          type: integer
+        standalone_task_count:
+          type: integer
+        created_at:
+          type: string
+        updated_at:
+          type: string
+
+    AreasList:
+      type: object
+      required: [areas]
+      properties:
+        areas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Area'
+
+    AreaCreate:
+      type: object
+      required: [title]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200
+        title:
+          type: string
+          minLength: 1
+
+    AreaUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+        sort_order:
+          type: number
+
+    AreaDetail:
+      allOf:
+        - $ref: '#/components/schemas/Area'
+        - type: object
+          required: [projects, tasks, completed_tasks]
+          properties:
+            projects:
+              type: array
+              items:
+                $ref: '#/components/schemas/Project'
+            tasks:
+              type: array
+              description: Standalone (project-less) tasks in this area
+              items:
+                $ref: '#/components/schemas/TaskListItem'
+            completed_tasks:
+              type: array
+              items:
+                $ref: '#/components/schemas/TaskListItem'
+
+    ProjectDetail:
+      allOf:
+        - $ref: '#/components/schemas/Project'
+        - type: object
+          properties:
+            headings:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  title:
+                    type: string
+                  sort_order:
+                    type: number
+                  tasks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TaskListItem'
+            tasks_without_heading:
+              type: array
+              items:
+                $ref: '#/components/schemas/TaskListItem'
+            completed_tasks:
+              type: array
+              items:
+                $ref: '#/components/schemas/TaskListItem'
+
+    Tag:
+      type: object
+      required: [id, title, color, parent_tag_id, sort_order, task_count]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        color:
+          type: [string, 'null']
+        parent_tag_id:
+          type: [string, 'null']
+        sort_order:
+          type: number
+        task_count:
+          type: integer
+
+    TagsList:
+      type: object
+      required: [tags]
+      properties:
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+
+    TagCreate:
+      type: object
+      required: [title]
+      properties:
+        id:
+          type: string
+          description: Optional client-supplied id; a known id replays 200
+        title:
+          type: string
+          minLength: 1
+        parent_tag_id:
+          type: [string, 'null']
+
+    TagUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+        color:
+          type: [string, 'null']
+        parent_tag_id:
+          type: [string, 'null']
+        sort_order:
+          type: number
+
+    ViewInbox:
+      type: object
+      required: [tasks, review]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+        review:
+          type: array
+          description: Tasks not updated within review_after_days, excluding inbox tasks
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+
+    ProjectGroup:
+      type: object
+      required: [project, tasks]
+      properties:
+        project:
+          oneOf:
+            - $ref: '#/components/schemas/ProjectRef'
+            - type: 'null'
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+
+    ViewToday:
+      type: object
+      required: [sections, overdue, earlier, completed]
+      properties:
+        sections:
+          type: array
+          description: Today and This Evening sections
+          items:
+            type: object
+            required: [title, groups]
+            properties:
+              title:
+                type: string
+              groups:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProjectGroup'
+        overdue:
+          type: array
+          description: Open tasks with deadline < today
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+        earlier:
+          type: array
+          description: Open tasks with when_date < today, not someday
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+        completed:
+          type: array
+          description: Tasks finished during the local calendar day
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+
+    UpcomingTask:
+      allOf:
+        - $ref: '#/components/schemas/TaskListItem'
+        - type: object
+          required: [schedule_date]
+          properties:
+            schedule_date:
+              type: string
+              description: The date this entry appears under
+
+    ViewUpcoming:
+      type: object
+      required: [overdue, dates, earlier]
+      properties:
+        overdue:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+        dates:
+          type: array
+          items:
+            type: object
+            required: [date, tasks]
+            properties:
+              date:
+                type: string
+                format: date
+              tasks:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UpcomingTask'
+        earlier:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+
+    AreaGroup:
+      type: object
+      required: [area, projects, standalone_tasks]
+      properties:
+        area:
+          $ref: '#/components/schemas/ProjectRef'
+        projects:
+          type: array
+          items:
+            type: object
+            required: [project, tasks]
+            properties:
+              project:
+                $ref: '#/components/schemas/ProjectRef'
+              tasks:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TaskListItem'
+        standalone_tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+
+    ViewGrouped:
+      type: object
+      required: [areas, no_area]
+      properties:
+        areas:
+          type: array
+          items:
+            $ref: '#/components/schemas/AreaGroup'
+        no_area:
+          type: object
+          required: [projects, standalone_tasks]
+          properties:
+            projects:
+              type: array
+              items:
+                type: object
+                properties:
+                  project:
+                    $ref: '#/components/schemas/ProjectRef'
+                  tasks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TaskListItem'
+            standalone_tasks:
+              type: array
+              description: Empty for anytime; someday loose tasks land here
+              items:
+                $ref: '#/components/schemas/TaskListItem'
+
+    ViewPaged:
+      type: object
+      required: [groups, total]
+      properties:
+        groups:
+          type: array
+          items:
+            type: object
+            required: [date, tasks]
+            properties:
+              date:
+                type: string
+              tasks:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TaskListItem'
+        total:
+          type: integer
+
+    ViewCounts:
+      type: object
+      required: [inbox, today, overdue, review, anytime, someday, logbook, trash]
+      properties:
+        inbox:
+          type: integer
+        today:
+          type: integer
+        overdue:
+          type: integer
+        review:
+          type: integer
+        anytime:
+          type: integer
+        someday:
+          type: integer
+        logbook:
+          type: integer
+        trash:
+          type: integer
+
+    UserSettings:
+      type: object
+      required: [play_complete_sound, show_count_main, show_count_projects, show_count_tags, review_after_days, sort_areas, sort_tags, evening_starts_at, default_time_gap, show_time_badge, time_format, font_size, default_reminder_type, default_reminder_value, copy_reminders_to_recurring, notification_provider, ntfy_server_url, ntfy_topic, ntfy_access_token, base_url, privacy_mode, review_include_recurring]
+      properties:
+        play_complete_sound:
+          type: boolean
+        show_count_main:
+          type: boolean
+        show_count_projects:
+          type: boolean
+        show_count_tags:
+          type: boolean
+        review_after_days:
+          type: integer
+        sort_areas:
+          type: string
+          enum: [manual, a-z, z-a]
+        sort_tags:
+          type: string
+          enum: [manual, a-z, z-a]
+        evening_starts_at:
+          type: string
+          description: Zero-padded HH:MM 24h
+        default_time_gap:
+          type: integer
+        show_time_badge:
+          type: boolean
+        time_format:
+          type: string
+          enum: ['12h', '24h']
+        font_size:
+          type: integer
+          enum: [12, 14, 16, 18, 20]
+        default_reminder_type:
+          oneOf:
+            - type: 'null'
+            - type: string
+              enum: [at_start, on_day, minutes_before, hours_before, days_before]
+        default_reminder_value:
+          type: integer
+          minimum: 0
+          maximum: 99
+        copy_reminders_to_recurring:
+          type: boolean
+        notification_provider:
+          type: string
+          enum: [webpush, ntfy, none]
+        ntfy_server_url:
+          type: string
+        ntfy_topic:
+          type: string
+        ntfy_access_token:
+          type: string
+        base_url:
+          type: string
+        privacy_mode:
+          type: boolean
+        review_include_recurring:
+          type: boolean
+          description: Include recurring tasks in the Review section
+
+    UserSettingsUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        play_complete_sound:
+          type: boolean
+        show_count_main:
+          type: boolean
+        show_count_projects:
+          type: boolean
+        show_count_tags:
+          type: boolean
+        review_after_days:
+          type: integer
+        sort_areas:
+          type: string
+          enum: [manual, a-z, z-a]
+        sort_tags:
+          type: string
+          enum: [manual, a-z, z-a]
+        evening_starts_at:
+          type: string
+        default_time_gap:
+          type: integer
+        show_time_badge:
+          type: boolean
+        time_format:
+          type: string
+          enum: ['12h', '24h']
+        font_size:
+          type: integer
+          enum: [12, 14, 16, 18, 20]
+        default_reminder_type:
+          oneOf:
+            - type: 'null'
+            - type: string
+              enum: [at_start, on_day, minutes_before, hours_before, days_before]
+        default_reminder_value:
+          type: integer
+          minimum: 0
+          maximum: 99
+        copy_reminders_to_recurring:
+          type: boolean
+        notification_provider:
+          type: string
+          enum: [webpush, ntfy, none]
+        ntfy_server_url:
+          type: string
+        ntfy_topic:
+          type: string
+        ntfy_access_token:
+          type: string
+        base_url:
+          type: string
+        privacy_mode:
+          type: boolean
+        review_include_recurring:
+          type: boolean
+
+    SavedFilter:
+      type: object
+      required: [id, view, name, config, created_at]
+      properties:
+        id:
+          type: string
+        view:
+          type: string
+          enum: [today, upcoming, anytime, someday, logbook]
+        name:
+          type: string
+        config:
+          type: string
+          description: Filter configuration as a JSON-encoded string
+        created_at:
+          type: string
+
+    SavedFiltersList:
+      type: object
+      required: [saved_filters]
+      properties:
+        saved_filters:
+          type: array
+          items:
+            $ref: '#/components/schemas/SavedFilter'
+
+    SavedFilterCreate:
+      type: object
+      required: [view, name, config]
+      properties:
+        view:
+          type: string
+          enum: [today, upcoming, anytime, someday, logbook]
+        name:
+          type: string
+        config:
+          type: string
+          description: Filter configuration as a JSON-encoded string
+
+    SearchResult:
+      type: object
+      required: [task, title_snippet, notes_snippet, rank]
+      properties:
+        task:
+          $ref: '#/components/schemas/TaskListItem'
+        title_snippet:
+          type: string
+          description: May contain <mark> highlights
+        notes_snippet:
+          type: string
+        rank:
+          type: number
+
+    SearchResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchResult'
+        next_cursor:
+          type: string
+
+    ChangeLogEntry:
+      type: object
+      required: [seq, entity, entity_id, action, snapshot, created_at]
+      properties:
+        seq:
+          type: integer
+          format: int64
+        entity:
+          type: string
+          enum: [task, project, area, tag, heading, checklist_item, attachment, schedule, reminder, repeat_rule]
+        entity_id:
+          type: string
+        action:
+          type: string
+          enum: [create, update, delete]
+        fields:
+          type: [string, 'null']
+          description: JSON-encoded string array of changed fields (for updates); null for create/delete
+        snapshot:
+          type: string
+          description: Full entity state as a JSON string; empty for delete
+        user_id:
+          type: string
+        device_id:
+          type: string
+        created_at:
+          type: string
+
+    SyncPullResponse:
+      type: object
+      required: [changes, cursor, has_more]
+      properties:
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChangeLogEntry'
+        cursor:
+          type: integer
+          format: int64
+        has_more:
+          type: boolean
+
+    SyncPushChange:
+      type: object
+      required: [entity, entity_id, action, data]
+      properties:
+        entity:
+          type: string
+          enum: [task, project, area, tag, heading, checklistItem, attachment, schedule, reminder]
+        entity_id:
+          type: string
+        action:
+          type: string
+          enum: [create, update, delete]
+        data:
+          type: object
+        fields:
+          type: array
+          description: Fields to apply for an update; other data keys are ignored
+          items:
+            type: string
+        client_updated_at:
+          type: string
+          description: RFC 3339 or 'YYYY-MM-DD HH:MM:SS'; drives last-write-wins
+
+    SyncPushRequest:
+      type: object
+      required: [device_id, changes]
+      properties:
+        device_id:
+          type: string
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncPushChange'
+
+    SyncPushResult:
+      type: object
+      required: [entity, entity_id, status]
+      properties:
+        entity:
+          type: string
+        entity_id:
+          type: string
+        status:
+          type: string
+          enum: [applied, conflict_resolved, error]
+        seq:
+          type: integer
+          format: int64
+        error:
+          type: string
+
+    SyncPushResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncPushResult'
+
+    SyncFullResponse:
+      type: object
+      required: [tasks, projects, areas, tags, headings, checklist, attachments, schedules, reminders, repeat_rules, cursor]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/Project'
+        areas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Area'
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+        headings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Heading'
+        checklist:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChecklistItem'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+        schedules:
+          type: array
+          items:
+            $ref: '#/components/schemas/Schedule'
+        reminders:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reminder'
+        repeat_rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepeatRule'
+        cursor:
+          type: integer
+          format: int64

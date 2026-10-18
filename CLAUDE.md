@@ -32,5 +32,5 @@ Self-hosted Things 3-inspired task manager.
 - Infra agent: .devcontainer/*, Dockerfile, docker-compose.yml, .github/*
 - Shared (coordinate via lead): go.mod, CLAUDE.md, /docs/*
 
-## Current Phase: Phase 1 - Scaffolding
-- Reference: /implementation plan/01-phase-1-scaffolding.md
+## Current Phase
+- See docs/review-and-roadmap.md for the roadmap and current project status.
