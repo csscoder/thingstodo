@@ -1,3 +1,4 @@
+import type { Table } from 'dexie'
 import { localDb } from '../db/index'
 import type { SyncEntity, SyncQueueEntry } from '../db/schema'
 import { QUEUE_ENTITY_TABLE, restoreFromSkippedSnapshot } from './pull'
@@ -105,7 +106,8 @@ async function clearDrainedSnapshots(entries: SyncQueueEntry[]): Promise<void> {
  * create, the entity never reached the server — delete the local rows of
  * the entity and its discarded children plus their skipped snapshots.
  * Otherwise restore the entity from its skipped snapshot (the server
- * version). Then sync.
+ * version). All local writes run in one transaction, so a failure leaves
+ * no partial discard behind; the sync afterwards runs outside it.
  */
 export async function discardEntry(entryId: number): Promise<void> {
   const removed = await entriesRemovedByDiscard(entryId)
@@ -115,7 +117,6 @@ export async function discardEntry(entryId: number): Promise<void> {
   const ids = removed
     .map((entry) => entry.id)
     .filter((id): id is number => id !== undefined)
-  await localDb.syncQueue.bulkDelete(ids)
 
   const discardsCreate = removed.some(
     (entry) =>
@@ -124,16 +125,35 @@ export async function discardEntry(entryId: number): Promise<void> {
       entry.action === 'create',
   )
 
-  if (discardsCreate) {
-    for (const entry of removed) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const table = (localDb as any)[QUEUE_ENTITY_TABLE[entry.entity]]
-      if (table) await table.delete(entry.entityId)
-    }
-    await clearDrainedSnapshots(removed)
-  } else {
-    await restoreFromSkippedSnapshot(target.entity, target.entityId)
-  }
+  // Every table the discard may touch, so the whole thing commits or
+  // rolls back as one unit.
+  const entityTables: Table[] = [
+    ...new Set(removed.map((entry) => QUEUE_ENTITY_TABLE[entry.entity])),
+  ]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((name) => (localDb as any)[name] as Table | undefined)
+    .filter((table): table is Table => table !== undefined)
+
+  await localDb.transaction(
+    'rw',
+    [localDb.syncQueue, localDb.skippedSnapshots, ...entityTables],
+    async () => {
+      await localDb.syncQueue.bulkDelete(ids)
+
+      if (discardsCreate) {
+        for (const entry of removed) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const table = (localDb as any)[QUEUE_ENTITY_TABLE[entry.entity]]
+          if (table) await table.delete(entry.entityId)
+        }
+        await clearDrainedSnapshots(removed)
+      } else {
+        // Joins the ambient transaction: it only touches the entity's
+        // table and skippedSnapshots, both declared in the scope above.
+        await restoreFromSkippedSnapshot(target.entity, target.entityId)
+      }
+    },
+  )
 
   await syncNow()
 }

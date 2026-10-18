@@ -168,6 +168,48 @@ describe('queueActions', () => {
     expect(mockSyncNow).toHaveBeenCalledTimes(1)
   })
 
+  test('discard is atomic: a mid-discard failure rolls everything back', async () => {
+    await addQueueEntry({
+      entity: 'schedule',
+      entityId: 'sched-1',
+      action: 'create',
+      data: { task_id: 'task-9', when_date: '2026-01-01' },
+    })
+    const stuck = await addQueueEntry({
+      entityId: 'task-9',
+      action: 'create',
+      data: { title: 'New local task' },
+      state: 'stuck',
+      errorCode: 'VALIDATION',
+      errorMessage: 'invalid field title',
+    })
+    await localDb.tasks.put(seedTask({ id: 'task-9', title: 'New local task' }))
+    await localDb.schedules.put(seedSchedule({ id: 'sched-1', task_id: 'task-9' }))
+    await localDb.skippedSnapshots.put({
+      entity: 'task',
+      entityId: 'task-9',
+      action: 'delete',
+      snapshot: {},
+      seq: 5,
+    })
+
+    // The local-row delete for the task fails mid-discard, after the queue
+    // entries and the schedule row are already gone.
+    const deleteSpy = vi
+      .spyOn(localDb.tasks, 'delete')
+      .mockRejectedValueOnce(new Error('indexeddb is gone'))
+
+    await expect(discardEntry(stuck.id!)).rejects.toThrow('indexeddb is gone')
+    deleteSpy.mockRestore()
+
+    // Nothing was committed: queue, rows, and snapshot are all intact.
+    expect(await localDb.syncQueue.count()).toBe(2)
+    expect(await localDb.tasks.get('task-9')).toBeDefined()
+    expect(await localDb.schedules.get('sched-1')).toBeDefined()
+    expect(await localDb.skippedSnapshots.get(['task', 'task-9'])).toBeDefined()
+    expect(mockSyncNow).not.toHaveBeenCalled()
+  })
+
   test('retry clears the stuck state', async () => {
     const stuck = await addQueueEntry({
       entityId: 'task-3',
