@@ -1,4 +1,4 @@
-import Dexie, { type EntityTable } from 'dexie'
+import Dexie, { type EntityTable, type Table } from 'dexie'
 import type {
   LocalTask,
   LocalProject,
@@ -10,8 +10,10 @@ import type {
   LocalReminder,
   LocalRepeatRule,
   LocalHeading,
+  SyncEntity,
   SyncQueueEntry,
   SyncMetaRecord,
+  SkippedSnapshot,
 } from './schema'
 
 export interface CachedFile {
@@ -45,6 +47,7 @@ class ThingsToDoDb extends Dexie {
   syncMeta!: EntityTable<SyncMetaRecord, 'key'>
   cachedFiles!: EntityTable<CachedFile, 'attachmentId'>
   seenReminders!: EntityTable<SeenReminder, 'reminderId'>
+  skippedSnapshots!: Table<SkippedSnapshot, [SyncEntity, string]>
 
   constructor() {
     super('ThingsToDo')
@@ -95,6 +98,24 @@ class ThingsToDoDb extends Dexie {
       syncMeta: 'key',
       cachedFiles: 'attachmentId, lastAccessedAt, cachedAt',
       seenReminders: 'reminderId, taskId, firedAt',
+    })
+
+    this.version(4).stores({
+      tasks: 'id, status, when_date, deadline, project_id, area_id, heading_id, high_priority, deleted_at, _syncStatus, sort_order_today, sort_order_project',
+      projects: 'id, area_id, status, _syncStatus, sort_order',
+      areas: 'id, _syncStatus, sort_order',
+      tags: 'id, parent_tag_id, _syncStatus, sort_order',
+      checklistItems: 'id, task_id, _syncStatus, sort_order',
+      attachments: 'id, task_id, _syncStatus, sort_order',
+      schedules: 'id, task_id, when_date, _syncStatus, sort_order',
+      reminders: 'id, task_id, _syncStatus',
+      repeatRules: 'id, task_id, _syncStatus',
+      headings: 'id, project_id, _syncStatus, sort_order',
+      syncQueue: '++id, entity, entityId, createdAt',
+      syncMeta: 'key',
+      cachedFiles: 'attachmentId, lastAccessedAt, cachedAt',
+      seenReminders: 'reminderId, taskId, firedAt',
+      skippedSnapshots: '[entity+entityId]',
     })
   }
 }

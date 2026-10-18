@@ -44,6 +44,8 @@ export type SyncEntity =
   | 'repeatRule'
   | 'heading'
 
+export type SyncErrorCode = 'VALIDATION' | 'NOT_FOUND' | 'CONFLICT' | 'INTERNAL' | 'TOO_LARGE'
+
 export interface SyncQueueEntry {
   id?: number // auto-increment primary key
   entity: SyncEntity
@@ -55,6 +57,21 @@ export interface SyncQueueEntry {
   data: Record<string, unknown>
   clientUpdatedAt: string
   createdAt: string
+  /** undefined === 'pending' */
+  state?: 'pending' | 'stuck'
+  errorCode?: SyncErrorCode
+  errorMessage?: string
+  /** consecutive INTERNAL results */
+  internalFailures?: number
+}
+
+// Latest server snapshot skipped while a local change was pending (one per entity)
+export interface SkippedSnapshot {
+  entity: SyncEntity
+  entityId: string
+  action: SyncAction
+  snapshot: Record<string, unknown>
+  seq: number
 }
 
 // Key-value store for sync cursor and other metadata
