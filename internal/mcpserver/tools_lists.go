@@ -26,7 +26,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "get_project",
 		Description: "Get one project in detail: its headings and tasks.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in projectIDIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodGet, "/api/projects/"+in.ProjectID, nil)
+		body, err := d.callID(ctx, req, http.MethodGet, "/api/projects/", in.ProjectID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -48,7 +48,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "update_project",
 		Description: "Update a project (partial update). " + descDateFmt,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in updateProjectIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/projects/"+in.ID, in.body())
+		body, err := d.callID(ctx, req, http.MethodPatch, "/api/projects/", in.ID, "", in.body())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -59,7 +59,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_project",
 		Description: "Delete a project. Its tasks move to the project's area; blocked while headings remain.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in projectIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/projects/"+in.ProjectID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/projects/", in.ProjectID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -83,7 +83,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "get_area",
 		Description: "Get one area in detail: its projects and their tasks.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in areaIDIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodGet, "/api/areas/"+in.AreaID, nil)
+		body, err := d.callID(ctx, req, http.MethodGet, "/api/areas/", in.AreaID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -105,7 +105,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "update_area",
 		Description: "Rename an area.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in updateAreaIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/areas/"+in.ID, map[string]any{"title": in.Title})
+		body, err := d.callID(ctx, req, http.MethodPatch, "/api/areas/", in.ID, "", map[string]any{"title": in.Title})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -116,7 +116,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_area",
 		Description: "Delete an area. Blocked while it still contains projects.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in areaIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/areas/"+in.AreaID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/areas/", in.AreaID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -151,7 +151,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "update_tag",
 		Description: "Update a tag's title, color or parent.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in updateTagIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/tags/"+in.ID, in.body())
+		body, err := d.callID(ctx, req, http.MethodPatch, "/api/tags/", in.ID, "", in.body())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -162,7 +162,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_tag",
 		Description: "Delete a tag; it is removed from every task that carries it.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in tagIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/tags/"+in.TagID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/tags/", in.TagID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -175,7 +175,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "list_headings",
 		Description: "List the headings (sections) of a project, in display order.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in projectIDIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodGet, "/api/projects/"+in.ProjectID+"/headings", nil)
+		body, err := d.callID(ctx, req, http.MethodGet, "/api/projects/", in.ProjectID, "/headings", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -186,7 +186,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "create_heading",
 		Description: "Create a heading (section) inside a project. " + descRetry,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in createHeadingIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPost, "/api/projects/"+in.ProjectID+"/headings", map[string]any{"id": in.ID, "title": in.Title})
+		body, err := d.callID(ctx, req, http.MethodPost, "/api/projects/", in.ProjectID, "/headings", map[string]any{"id": in.ID, "title": in.Title})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -197,7 +197,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "update_heading",
 		Description: "Rename a heading.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in updateHeadingIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/headings/"+in.ID, map[string]any{"title": in.Title})
+		body, err := d.callID(ctx, req, http.MethodPatch, "/api/headings/", in.ID, "", map[string]any{"title": in.Title})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -208,7 +208,7 @@ func registerListTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_heading",
 		Description: "Delete a heading; its tasks move to the project without a heading.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in headingIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/headings/"+in.HeadingID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/headings/", in.HeadingID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}

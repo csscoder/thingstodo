@@ -18,7 +18,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		if in.ID != "" {
 			body["id"] = in.ID
 		}
-		out, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPost, "/api/tasks/"+in.TaskID+"/checklist", body)
+		out, err := d.callID(ctx, req, http.MethodPost, "/api/tasks/", in.TaskID, "/checklist", body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -36,7 +36,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		if in.Completed != nil {
 			body["completed"] = *in.Completed
 		}
-		out, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/checklist/"+in.ItemID, body)
+		out, err := d.callID(ctx, req, http.MethodPatch, "/api/checklist/", in.ItemID, "", body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -47,7 +47,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_checklist_item",
 		Description: "Delete a checklist item.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in itemIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/checklist/"+in.ItemID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/checklist/", in.ItemID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -67,7 +67,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		if in.Title != nil {
 			body["title"] = *in.Title
 		}
-		out, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPost, "/api/tasks/"+in.TaskID+"/attachments", body)
+		out, err := d.callID(ctx, req, http.MethodPost, "/api/tasks/", in.TaskID, "/attachments", body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -78,7 +78,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_attachment",
 		Description: "Delete an attachment (link or file) from a task.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in attachmentIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/attachments/"+in.AttachmentID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/attachments/", in.AttachmentID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -101,7 +101,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		if in.EndTime != nil {
 			body["end_time"] = *in.EndTime
 		}
-		out, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPost, "/api/tasks/"+in.TaskID+"/schedules", body)
+		out, err := d.callID(ctx, req, http.MethodPost, "/api/tasks/", in.TaskID, "/schedules", body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -122,7 +122,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		if in.EndTime != nil {
 			body["end_time"] = *in.EndTime
 		}
-		out, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/schedules/"+in.ScheduleID, body)
+		out, err := d.callID(ctx, req, http.MethodPatch, "/api/schedules/", in.ScheduleID, "", body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -133,7 +133,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_schedule",
 		Description: "Delete a schedule entry.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in scheduleIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/schedules/"+in.ScheduleID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/schedules/", in.ScheduleID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -146,7 +146,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "get_repeat_rule",
 		Description: "Get the repeat rule of a task, or a null repeat_rule when the task does not repeat.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in taskIDIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodGet, "/api/tasks/"+in.TaskID+"/repeat", nil)
+		body, err := d.callID(ctx, req, http.MethodGet, "/api/tasks/", in.TaskID, "/repeat", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -157,7 +157,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "set_repeat_rule",
 		Description: "Create or replace the repeat rule of a task. Completing a repeating task spawns exactly one next instance. Pattern: type is daily, daily_weekday, daily_weekend, weekly, monthly_dom, monthly_dow, monthly_workday, yearly_date or yearly_dow; every is the interval (at least 1); mode is fixed (next instance computed from the scheduled date) or after_completion (from the completion date). Weekly patterns list weekdays in on (mon..sun). Monthly/dom uses day, monthly/dow uses ordinal plus weekday, monthly_workday uses workday_position first|last, yearly patterns set month (and day for yearly_date). A task without a scheduled date gets its first occurrence assigned. " + descDateFmt,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in setRepeatRuleIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPut, "/api/tasks/"+in.TaskID+"/repeat", map[string]any{"pattern": in.Pattern})
+		body, err := d.callID(ctx, req, http.MethodPut, "/api/tasks/", in.TaskID, "/repeat", map[string]any{"pattern": in.Pattern})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -168,7 +168,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_repeat_rule",
 		Description: "Delete a task's repeat rule; the task itself is untouched.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in taskIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/tasks/"+in.TaskID+"/repeat", nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/tasks/", in.TaskID, "/repeat", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -181,7 +181,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "list_reminders",
 		Description: "List the reminders of a task.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in taskIDIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodGet, "/api/tasks/"+in.TaskID+"/reminders", nil)
+		body, err := d.callID(ctx, req, http.MethodGet, "/api/tasks/", in.TaskID, "/reminders", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -199,7 +199,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		if in.ExactAt != nil {
 			body["exact_at"] = *in.ExactAt
 		}
-		out, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPost, "/api/tasks/"+in.TaskID+"/reminders", body)
+		out, err := d.callID(ctx, req, http.MethodPost, "/api/tasks/", in.TaskID, "/reminders", body)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -210,7 +210,7 @@ func registerDetailTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "delete_reminder",
 		Description: "Delete a reminder.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in reminderIDIn) (*mcp.CallToolResult, any, error) {
-		_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/reminders/"+in.ReminderID, nil)
+		_, err := d.callID(ctx, req, http.MethodDelete, "/api/reminders/", in.ReminderID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}

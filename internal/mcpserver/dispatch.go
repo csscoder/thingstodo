@@ -8,11 +8,50 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// clientIDRE mirrors the REST boundary's client-id rule (handler.isClientID):
+// 8-21 characters of letters, digits, underscore or hyphen. Ids are the only
+// caller-supplied values interpolated into dispatch paths, and an id failing
+// this rule may contain "/" — which would add route segments and reach a
+// different endpoint (delete_task with id "x/purge" would dispatch
+// DELETE /api/tasks/x/purge and purge task "x" for good).
+var clientIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{8,21}$`)
+
+// idErrorEnvelope matches the API's error body so a rejected id surfaces
+// with the same shape whether the API or the dispatcher rejected it.
+type idErrorEnvelope struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+	Field string `json:"field,omitempty"`
+}
+
+// errMalformedID is the error every id-bearing dispatch returns for an id
+// that fails the client-id rule; it never builds a request.
+func errMalformedID() error {
+	body, _ := json.Marshal(idErrorEnvelope{
+		Error: "id must be 8-21 characters of A-Za-z0-9_-",
+		Code:  "VALIDATION",
+		Field: "id",
+	})
+	return fmt.Errorf("%s", body)
+}
+
+// callID is call for an endpoint addressed by a caller-supplied entity id:
+// it builds the path prefix+id+suffix and validates the id first, so a
+// malformed id (e.g. one containing "/") fails as a VALIDATION error
+// before any request is built and can never misroute the dispatch.
+func (d *dispatcher) callID(ctx context.Context, req *mcp.CallToolRequest, method, prefix, id, suffix string, body any) (json.RawMessage, error) {
+	if !clientIDRE.MatchString(id) {
+		return nil, errMalformedID()
+	}
+	return call(ctx, d.api, credentials(req, d.proxyHeader), method, prefix+id+suffix, body)
+}
 
 // dispatchTimeout bounds one in-process API dispatch from a tool call.
 const dispatchTimeout = 60 * time.Second

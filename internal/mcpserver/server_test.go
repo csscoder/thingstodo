@@ -309,6 +309,43 @@ func TestMCP_ValidationIsToolError(t *testing.T) {
 	}
 }
 
+// TestMCP_MalformedIDIsValidationError pins the dispatch path guard: an id
+// carrying path syntax (here a "/" that would turn delete_task into a purge
+// of a different task) must fail as a VALIDATION tool error before any
+// request is built, and the addressed task must survive untouched.
+func TestMCP_MalformedIDIsValidationError(t *testing.T) {
+	session := newTokenSession(t)
+
+	text, isErr := callTool(t, session, "create_task", map[string]any{
+		"id":    "mcpsafe01",
+		"title": "Survives malformed delete",
+	})
+	if isErr {
+		t.Fatalf("create_task returned tool error: %s", text)
+	}
+
+	text, isErr = callTool(t, session, "delete_task", map[string]any{"id": "mcpsafe01/purge"})
+	if !isErr {
+		t.Fatalf("delete_task with a path-bearing id should be a tool error, got result: %s", text)
+	}
+	if !strings.Contains(text, "VALIDATION") {
+		t.Errorf("tool error text must contain the API error code VALIDATION, got: %s", text)
+	}
+	if !strings.Contains(text, "id") {
+		t.Errorf("tool error text should name the failing field id, got: %s", text)
+	}
+
+	// The task must still exist: the malformed id must not have dispatched
+	// DELETE /api/tasks/mcpsafe01/purge and purged it.
+	text, isErr = callTool(t, session, "get_task", map[string]any{"id": "mcpsafe01"})
+	if isErr {
+		t.Fatalf("get_task after malformed delete returned tool error: %s", text)
+	}
+	if !strings.Contains(text, "Survives malformed delete") {
+		t.Errorf("task was lost to the malformed delete call: %s", text)
+	}
+}
+
 func TestMCP_CreateRetryWithSameID(t *testing.T) {
 	session := newTokenSession(t)
 

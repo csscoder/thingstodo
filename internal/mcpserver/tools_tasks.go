@@ -61,7 +61,7 @@ func registerTaskTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "get_task",
 		Description: "Get one task in full detail: all fields plus checklist, attachments, schedules and reminders.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in idIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodGet, "/api/tasks/"+in.ID, nil)
+		body, err := d.callID(ctx, req, http.MethodGet, "/api/tasks/", in.ID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -83,7 +83,7 @@ func registerTaskTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "update_task",
 		Description: "Update a task (partial update). " + descDateFmt + " " + descNull + " when_date, deadline, project_id, area_id and heading_id accept null to clear them (clearing when_date also removes the task's schedule entries).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in *updateTaskIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/tasks/"+in.ID, in.body())
+		body, err := d.callID(ctx, req, http.MethodPatch, "/api/tasks/", in.ID, "", in.body())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -92,7 +92,7 @@ func registerTaskTools(srv *mcp.Server, d *dispatcher) {
 
 	action := func(name, path, description string) {
 		mcp.AddTool(srv, &mcp.Tool{Name: name, Description: description}, func(ctx context.Context, req *mcp.CallToolRequest, in idIn) (*mcp.CallToolResult, any, error) {
-			body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/tasks/"+in.ID+path, nil)
+			body, err := d.callID(ctx, req, http.MethodPatch, "/api/tasks/", in.ID, path, nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -106,7 +106,7 @@ func registerTaskTools(srv *mcp.Server, d *dispatcher) {
 
 	remove := func(name, path, description string) {
 		mcp.AddTool(srv, &mcp.Tool{Name: name, Description: description}, func(ctx context.Context, req *mcp.CallToolRequest, in idIn) (*mcp.CallToolResult, any, error) {
-			_, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodDelete, "/api/tasks/"+in.ID+path, nil)
+			_, err := d.callID(ctx, req, http.MethodDelete, "/api/tasks/", in.ID, path, nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -120,7 +120,7 @@ func registerTaskTools(srv *mcp.Server, d *dispatcher) {
 		Name:        "restore_task",
 		Description: "Restore a soft-deleted task from the trash.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in idIn) (*mcp.CallToolResult, any, error) {
-		body, err := call(ctx, d.api, credentials(req, d.proxyHeader), http.MethodPatch, "/api/tasks/"+in.ID+"/restore", nil)
+		body, err := d.callID(ctx, req, http.MethodPatch, "/api/tasks/", in.ID, "/restore", nil)
 		if err != nil {
 			return nil, nil, err
 		}
