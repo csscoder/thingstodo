@@ -144,4 +144,36 @@ describe('useOwnerToday', () => {
     })
     expect(result.current).toBe('2026-10-19')
   })
+
+  it('stops the midnight chain at unmount', () => {
+    vi.useFakeTimers()
+    setOwnerTimeZone('Europe/Moscow')
+    vi.setSystemTime(new Date('2026-10-18T20:59:59Z'))
+    const { result, unmount } = renderHook(() => useOwnerToday())
+    act(() => {
+      vi.advanceTimersByTime(2000) // first midnight fire; the chain re-arms
+    })
+    expect(result.current).toBe('2026-10-19')
+    expect(vi.getTimerCount()).toBe(1) // re-armed for the next owner midnight
+    unmount()
+    expect(vi.getTimerCount()).toBe(0) // the live handle must be cleared
+    act(() => {
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000) // past the next midnight
+    })
+    expect(vi.getTimerCount()).toBe(0) // nothing re-armed on a dead chain
+  })
+
+  it('updates today immediately when the owner zone changes', () => {
+    vi.useFakeTimers()
+    setOwnerTimeZone('America/New_York')
+    // 22:30 UTC is still Oct 18 in New York but already Oct 19 in Moscow.
+    vi.setSystemTime(new Date('2026-10-18T22:30:00Z'))
+    const { result, rerender } = renderHook(() => useOwnerToday())
+    expect(result.current).toBe('2026-10-18')
+    act(() => {
+      setOwnerTimeZone('Europe/Moscow')
+      rerender()
+    })
+    expect(result.current).toBe('2026-10-19')
+  })
 })

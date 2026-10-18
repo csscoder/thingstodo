@@ -238,21 +238,32 @@ export async function loadOwnerTimeZone(): Promise<void> {
  * the owner zone changes.
  */
 export function useOwnerToday(): string {
-  const [today, setToday] = useState(() => ownerToday())
+  // The date is stored together with the zone it was computed in. When the
+  // owner zone changes between renders (e.g. adopting the server zone at
+  // boot), today is recomputed *during render* — an effect-body setState
+  // here would both lag a render and trip react-hooks/set-state-in-effect.
+  const [armed, setArmed] = useState(() => ({
+    zone: getOwnerTimeZone(),
+    today: ownerToday(),
+  }))
   const zone = getOwnerTimeZone()
+  const today = zone === armed.zone ? armed.today : ownerToday()
 
   useEffect(() => {
+    // Holds the *live* handle; schedule reassigns it on every arm, so the
+    // cleanup below always clears the current timer, not a fired one.
+    let timer: ReturnType<typeof setTimeout> | undefined
     const schedule = () => {
       const now = new Date()
       const { end } = ownerDayBoundsUtc(ownerToday(now))
       // +50ms buffer so the owner wall clock has certainly rolled over.
       const delay = Math.max(0, Date.parse(end) - now.getTime() + 50)
-      return setTimeout(() => {
-        setToday(ownerToday())
+      timer = setTimeout(() => {
+        setArmed({ zone: getOwnerTimeZone(), today: ownerToday() })
         schedule()
       }, delay)
     }
-    const timer = schedule()
+    schedule()
     return () => clearTimeout(timer)
   }, [zone])
 
