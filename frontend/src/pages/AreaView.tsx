@@ -15,6 +15,7 @@ export function AreaView() {
   const { data: settings } = useSettings()
   const deleteArea = useDeleteArea()
   const [showDelete, setShowDelete] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [projectsOpen, setProjectsOpen] = useState(() => localStorage.getItem(`area-projects-${id}`) !== 'false')
 
   useEffect(() => {
@@ -111,12 +112,15 @@ export function AreaView() {
         description={`"${area.title}" and its tasks will be permanently deleted.`}
         confirmLabel="Delete"
         destructive
+        error={deleteError}
         onConfirm={() => {
+          setDeleteError(null)
           deleteArea.mutate(id!, {
             onSuccess: () => navigate('/inbox'),
+            onError: (err) => setDeleteError(err.message),
           })
         }}
-        onCancel={() => setShowDelete(false)}
+        onCancel={() => { setDeleteError(null); setShowDelete(false) }}
       />
     </div>
   )

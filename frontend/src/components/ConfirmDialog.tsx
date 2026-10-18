@@ -6,6 +6,7 @@ interface ConfirmDialogProps {
   description: string
   confirmLabel: string
   destructive?: boolean
+  error?: string | null
   onConfirm: () => void
   onCancel: () => void
 }
@@ -16,6 +17,7 @@ export function ConfirmDialog({
   description,
   confirmLabel,
   destructive,
+  error,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -51,6 +53,9 @@ export function ConfirmDialog({
           <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400 whitespace-pre-line">
             {description}
           </p>
+          {error && (
+            <p className="mt-2 text-sm text-red-500">{error}</p>
+          )}
         </div>
         <div className="flex items-center justify-between border-t border-neutral-200 px-4 py-2 dark:border-neutral-700">
           <span className="hidden text-xs text-neutral-400 md:block dark:text-neutral-500">

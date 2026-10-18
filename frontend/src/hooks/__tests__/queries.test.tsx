@@ -2,10 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { useInbox, useCreateTask, useCompleteTask, useUpdateTaskSchedule, useLogout } from '../queries'
+import { useInbox, useCreateTask, useCompleteTask, useUpdateTaskSchedule, useLogout, useDeleteArea, useDeleteTag } from '../queries'
+import { applyTaskReorder } from '../../components/AppDndContext'
 import { localDb } from '../../db'
 import { server } from '../../test/mocks/server'
 import { http, HttpResponse } from 'msw'
+import type { Task } from '../../api/types'
 
 // Mock audio to avoid AudioContext errors in jsdom
 vi.mock('../../lib/sounds', () => ({
@@ -284,6 +286,161 @@ describe('useUpdateTaskSchedule', () => {
     expect(schedules).toHaveLength(0)
     const queue = await localDb.syncQueue.toArray()
     expect(queue).toHaveLength(0)
+  })
+})
+
+const localAreaBase = {
+  title: 'Work',
+  sort_order: 0,
+  project_count: 1,
+  task_count: 0,
+  standalone_task_count: 0,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+  _syncStatus: 'synced' as const,
+  _localUpdatedAt: '2026-01-01T00:00:00Z',
+}
+
+describe('useDeleteArea', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await localDb.areas.clear()
+  })
+
+  it('delete area keeps the local row when the server returns 409', async () => {
+    server.use(
+      http.delete('/api/areas/:id', () =>
+        HttpResponse.json({ error: 'area still has projects', code: 'HAS_PROJECTS' }, { status: 409 })),
+    )
+    await localDb.areas.put({ ...localAreaBase, id: 'area-409' })
+
+    const { Wrapper } = createWrapper()
+    const { result } = renderHook(() => useDeleteArea(), { wrapper: Wrapper })
+
+    await act(async () => {
+      result.current.mutate('area-409')
+    })
+
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true)
+    })
+    expect(result.current.error).toEqual(new Error("Move or delete this area's projects first"))
+
+    // Dexie was never touched
+    const area = await localDb.areas.get('area-409')
+    expect(area?.title).toBe('Work')
+  })
+})
+
+describe('useDeleteTag', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await localDb.tags.clear()
+  })
+
+  it('delete tag offline leaves the tag and reports "This needs a connection"', async () => {
+    await localDb.tags.put({
+      id: 'tag-1',
+      title: 'urgent',
+      color: null,
+      parent_tag_id: null,
+      sort_order: 0,
+      task_count: 2,
+      _syncStatus: 'synced',
+      _localUpdatedAt: '2026-01-01T00:00:00Z',
+    })
+
+    const onLineDesc = Object.getOwnPropertyDescriptor(Navigator.prototype, 'onLine')
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false })
+    try {
+      const { Wrapper } = createWrapper()
+      const { result } = renderHook(() => useDeleteTag(), { wrapper: Wrapper })
+
+      await act(async () => {
+        result.current.mutate('tag-1')
+      })
+
+      await waitFor(() => {
+        expect(result.current.isError).toBe(true)
+      })
+      expect(result.current.error).toEqual(new Error('This needs a connection'))
+
+      // Dexie was never touched
+      const tag = await localDb.tags.get('tag-1')
+      expect(tag?.title).toBe('urgent')
+    } finally {
+      // Remove the instance-level stub so Navigator.prototype's real getter applies again
+      delete (navigator as { onLine?: boolean }).onLine
+      if (onLineDesc) Object.defineProperty(Navigator.prototype, 'onLine', onLineDesc)
+    }
+  })
+})
+
+describe('applyTaskReorder', () => {
+  const reorderTaskBase = {
+    title: 'Reorder task',
+    status: 'open',
+    notes: '',
+    when_date: null,
+    high_priority: false,
+    deadline: null,
+    project_id: null,
+    area_id: null,
+    heading_id: null,
+    sort_order_today: 0,
+    sort_order_project: 0,
+    sort_order_heading: 0,
+    completed_at: null,
+    canceled_at: null,
+    deleted_at: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    tags: [],
+    checklist_count: 0,
+    checklist_done: 0,
+    has_notes: false,
+    has_links: false,
+    has_files: false,
+    has_repeat_rule: false,
+    has_reminders: false,
+    first_reminder_type: null,
+    first_reminder_value: null,
+    first_reminder_exact_at: null,
+    project_name: null,
+    area_name: null,
+    first_schedule_time: null,
+    first_schedule_end_time: null,
+    first_schedule_completed: undefined,
+    schedule_entry_id: null,
+    past_schedule_count: undefined,
+    has_actionable_schedules: undefined,
+    all_today_schedules_completed: undefined,
+    _syncStatus: 'synced' as const,
+    _localUpdatedAt: '2026-01-01T00:00:00Z',
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await localDb.tasks.clear()
+  })
+
+  it('task reorder failure keeps the previous order', async () => {
+    server.use(
+      http.patch('/api/tasks/reorder', () => new HttpResponse(null, { status: 500 })),
+    )
+    await localDb.tasks.put({ ...reorderTaskBase, id: 'first', title: 'First', sort_order_today: 0 })
+    await localDb.tasks.put({ ...reorderTaskBase, id: 'second', title: 'Second', sort_order_today: 1024 })
+    const tasks = (await localDb.tasks.toArray()) as unknown as Task[]
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    // Move 'second' above 'first'
+    await applyTaskReorder(queryClient, tasks, 'sort_order_today', 'second', 'first')
+
+    // Server rejected the reorder: local order is unchanged
+    const second = await localDb.tasks.get('second')
+    expect(second?.sort_order_today).toBe(1024)
+    const first = await localDb.tasks.get('first')
+    expect(first?.sort_order_today).toBe(0)
   })
 })
 

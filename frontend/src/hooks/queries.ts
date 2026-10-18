@@ -19,6 +19,7 @@ import * as localMutations from '../db/mutations'
 import { localDb } from '../db/index'
 import { clearLocalData } from '../sync/clearLocalData'
 import { playCompleteSound, playReviewSound } from '../lib/sounds'
+import { ApiError } from '../api/client'
 import type {
   Task,
   CreateTaskRequest,
@@ -467,6 +468,12 @@ export function useReviewTask() {
   })
 }
 
+/** Online-only mutations (delete/reorder of projects, areas, tags and task
+ *  reorders) are REST-first: reject before touching Dexie when offline. */
+function requireOnline(): void {
+  if (!navigator.onLine) throw new Error('This needs a connection')
+}
+
 // --- Project Hooks ---
 
 export function useProjects(params?: { area_id?: string; status?: ProjectStatus }) {
@@ -512,11 +519,11 @@ export function useReorderProjects() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (items: SimpleReorderItem[]) => {
+      requireOnline()
+      await projectsApi.reorderProjects(items)
       await Promise.all(items.map((item) => localDb.projects.update(item.id, { sort_order: item.sort_order })))
-      return projectsApi.reorderProjects(items)
     },
-    onMutate: async (items) => {
-      // Cancel in-flight project fetches so they don't overwrite optimistic area_id changes
+    onSuccess: async (_result, items) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.projects.all })
       const orderMap = new Map(items.map((i) => [i.id, i.sort_order]))
       queryClient.setQueriesData<{ projects: Project[] }>(
@@ -577,8 +584,16 @@ export function useDeleteArea() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (id: string) => {
+      requireOnline()
+      try {
+        await areasApi.deleteArea(id)
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409 && err.message.includes('HAS_PROJECTS')) {
+          throw new Error("Move or delete this area's projects first")
+        }
+        throw err
+      }
       await localDb.areas.delete(id)
-      return areasApi.deleteArea(id)
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.areas.all })
@@ -591,8 +606,9 @@ export function useReorderAreas() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (items: SimpleReorderItem[]) => {
+      requireOnline()
+      await areasApi.reorderAreas(items)
       await Promise.all(items.map((item) => localDb.areas.update(item.id, { sort_order: item.sort_order })))
-      return areasApi.reorderAreas(items)
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.areas.all })
@@ -639,8 +655,9 @@ export function useDeleteTag() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (id: string) => {
+      requireOnline()
+      await tagsApi.deleteTag(id)
       await localDb.tags.delete(id)
-      return tagsApi.deleteTag(id)
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tags.all })
@@ -653,8 +670,9 @@ export function useReorderTags() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (items: SimpleReorderItem[]) => {
+      requireOnline()
+      await tagsApi.reorderTags(items)
       await Promise.all(items.map((item) => localDb.tags.update(item.id, { sort_order: item.sort_order })))
-      return tagsApi.reorderTags(items)
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tags.all })

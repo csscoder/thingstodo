@@ -20,12 +20,17 @@ export function TrashView() {
     if (!hasTasks) return
     setShowConfirm(false)
     setPurging(true)
-    await Promise.all(allTasks.map(async (t) => {
-      await purgeTask(t.id)
-      await localDb.tasks.delete(t.id)
-      await localDb.syncQueue.where('entityId').equals(t.id).delete()
-    }))
-    setPurging(false)
+    try {
+      await Promise.all(allTasks.map(async (t) => {
+        await purgeTask(t.id)
+        await localDb.tasks.delete(t.id)
+        await localDb.syncQueue.where('entityId').equals(t.id).delete()
+      }))
+    } catch (err) {
+      console.error('Empty trash failed:', err)
+    } finally {
+      setPurging(false)
+    }
   }
 
   if (isLoading) {

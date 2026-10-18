@@ -16,6 +16,7 @@ export function TagView() {
   const { data: settings } = useSettings()
   const deleteTag = useDeleteTag()
   const [showDelete, setShowDelete] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const tag = tags?.find((t) => t.id === id)
 
@@ -61,12 +62,15 @@ export function TagView() {
           description={`"${tag.title}" will be removed from all tasks. Tasks will not be deleted.`}
           confirmLabel="Delete"
           destructive
+          error={deleteError}
           onConfirm={() => {
+            setDeleteError(null)
             deleteTag.mutate(id!, {
               onSuccess: () => navigate('/inbox'),
+              onError: (err) => setDeleteError(err.message),
             })
           }}
-          onCancel={() => setShowDelete(false)}
+          onCancel={() => { setDeleteError(null); setShowDelete(false) }}
         />
       )}
     </div>

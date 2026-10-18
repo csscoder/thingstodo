@@ -173,6 +173,51 @@ export async function applySidebarDrop(target: SidebarDropTarget, taskIds: strin
   }
 }
 
+/** Same-list task reorder, REST-first: the server is asked first and Dexie and
+ *  the query cache adopt the new position only after it accepts. A failure
+ *  (or being offline) keeps the previous order; the error message is the
+ *  standard 'This needs a connection' when offline. */
+// eslint-disable-next-line react-refresh/only-export-components -- extracted for testability; moves with the reorder handler
+export async function applyTaskReorder(
+  queryClient: ReturnType<typeof useQueryClient>,
+  tasks: Task[],
+  sortField: SortField,
+  activeId: string,
+  overId: string,
+): Promise<void> {
+  // Sortable IDs may be schedule_entry_id, so match by composite key
+  const sortableKey = (t: Task) => t.schedule_entry_id ?? t.id
+  const oldIndex = tasks.findIndex((t) => sortableKey(t) === activeId)
+  const newIndex = tasks.findIndex((t) => sortableKey(t) === overId)
+  if (oldIndex === -1 || newIndex === -1) return
+
+  const movedTask = tasks[oldIndex]
+  const newPosition = calculatePosition(
+    tasks.filter((t) => sortableKey(t) !== activeId),
+    newIndex,
+    sortField,
+  )
+  if (!navigator.onLine) throw new Error('This needs a connection')
+  try {
+    await reorderTasks([
+      { id: movedTask.id, sort_field: sortField, sort_order: newPosition },
+    ])
+  } catch (err) {
+    // Server rejected the reorder: keep the previous order and resync the cache
+    console.error('Task reorder failed:', err)
+    queryClient.invalidateQueries({ queryKey: ['views'] })
+    queryClient.invalidateQueries({ queryKey: ['projects'] })
+    queryClient.invalidateQueries({ queryKey: ['areas'] })
+    return
+  }
+  reorderTaskInCache(queryClient, movedTask.id, sortField, newPosition)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await localDb.tasks.update(movedTask.id, { [sortField]: newPosition } as any)
+  queryClient.invalidateQueries({ queryKey: ['views'] })
+  queryClient.invalidateQueries({ queryKey: ['projects'] })
+  queryClient.invalidateQueries({ queryKey: ['areas'] })
+}
+
 // Prefer sidebar droppables when the pointer is over them, fall back to closestCenter for sortable reorder.
 // When multiple sidebar targets match (e.g. project inside area), prefer the most specific one.
 const sidebarFirstCollision: CollisionDetection = (args) => {
@@ -612,30 +657,9 @@ function AppDndContextInner({ children }: AppDndContextProps) {
       const targetList = registry.getListForTask(overId)
       if (sourceList && targetList && sourceList.listId === targetList.listId) {
         const { tasks, sortField } = sourceList
-        // Sortable IDs may be schedule_entry_id, so match by composite key
-        const sortableKey = (t: Task) => t.schedule_entry_id ?? t.id
-        const oldIndex = tasks.findIndex((t) => sortableKey(t) === activeId)
-        const newIndex = tasks.findIndex((t) => sortableKey(t) === overId)
-        if (oldIndex === -1 || newIndex === -1) return
-
-        const movedTask = tasks[oldIndex]
-        const newPosition = calculatePosition(
-          tasks.filter((t) => sortableKey(t) !== activeId),
-          newIndex,
-          sortField,
-        )
-        // Optimistic: reorder the task array in cache immediately
-        reorderTaskInCache(queryClient, movedTask.id, sortField, newPosition)
-        // Update local IndexedDB immediately
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        localDb.tasks.update(movedTask.id, { [sortField]: newPosition } as any).catch(() => {})
-        // Persist to backend, then reconcile
-        reorderTasks([
-          { id: movedTask.id, sort_field: sortField, sort_order: newPosition },
-        ]).then(() => {
-          queryClient.invalidateQueries({ queryKey: ['views'] })
-          queryClient.invalidateQueries({ queryKey: ['projects'] })
-          queryClient.invalidateQueries({ queryKey: ['areas'] })
+        // REST-first: failure (or offline) keeps the previous order
+        applyTaskReorder(queryClient, tasks, sortField, activeId, overId).catch(() => {
+          // Offline: nothing was moved locally, the previous order stands
         })
       }
     },
