@@ -970,8 +970,12 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
   return useLiveQuery(async () => {
     const today = todayString()
     // Read the whole task table once so the badge query reruns on any task
-    // mutation, including changes only visible through JS filters.
-    const tasks = await localDb.tasks.toArray()
+    // mutation, including changes only visible through JS filters. The
+    // schedule rows join the same way for the today badge.
+    const [tasks, schedules] = await Promise.all([
+      localDb.tasks.toArray(),
+      localDb.schedules.toArray(),
+    ])
     const openTasks = tasks.filter((t) => t.status === 'open' && !t.deleted_at)
     const inboxTasks = openTasks.filter((t) => !t.project_id && !t.area_id && !t.when_date)
 
@@ -984,12 +988,30 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
     ).length
     const trashCount = tasks.filter((t) => !!t.deleted_at).length
 
-    // today: open, (when_date = today OR deadline = today), not deleted
-    const todayCount = openTasks.filter(
-      (t) =>
-        (t.when_date === today || t.deadline === today) &&
-        (t.deadline === null || t.deadline === undefined || t.deadline >= today),
-    ).length
+    // Today mirrors the server's today view (view_predicates.go
+    // listCondition "today"): the union of the Today/This Evening sections
+    // (deadline today, an uncompleted schedule row today, or a rowless task
+    // dated today), Overdue (deadline < today) and Earlier (when_date <
+    // today, not someday, regardless of schedule rows). The documented
+    // exception — dated today with every schedule row completed — appears
+    // in no list and does not count.
+    const rowsByTask = new Map<string, LocalSchedule[]>()
+    for (const s of schedules) {
+      const rows = rowsByTask.get(s.task_id)
+      if (rows) rows.push(s)
+      else rowsByTask.set(s.task_id, [s])
+    }
+    const inTodayView = (t: LocalTask): boolean => {
+      const rows = rowsByTask.get(t.id) ?? []
+      const todaySection =
+        t.deadline === today ||
+        rows.some((s) => s.when_date === today && !s.completed) ||
+        (t.when_date === today && rows.length === 0)
+      const overdue = !!t.deadline && t.deadline < today
+      const earlier = !!t.when_date && t.when_date !== 'someday' && t.when_date < today
+      return todaySection || overdue || earlier
+    }
+    const todayCount = openTasks.filter(inTodayView).length
 
     // anytime: open, no when_date, owned by a project or an area, not deleted
     const anytimeCount = openTasks.filter(
@@ -1017,7 +1039,7 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
 
     return {
       inbox: inboxCount,
-      today: todayCount + overdueCount,
+      today: todayCount,
       overdue: overdueCount,
       review: reviewCount,
       anytime: anytimeCount,

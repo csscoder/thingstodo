@@ -181,10 +181,12 @@ describe('useLocalUpcoming', () => {
 describe('useLocalViewCounts', () => {
   beforeEach(async () => {
     await localDb.tasks.clear()
+    await localDb.schedules.clear()
   })
 
   afterEach(async () => {
     await localDb.tasks.clear()
+    await localDb.schedules.clear()
   })
 
   it('reacts to review and overdue changes driven by non-indexed fields', async () => {
@@ -239,5 +241,43 @@ describe('useLocalViewCounts', () => {
         logbook: 1,
       })
     })
+  })
+
+  // Mirrors the server's today view (view_predicates.go listCondition
+  // "today"): the union of the Today/This Evening sections, Overdue and
+  // Earlier — each task counted once.
+  it('TestTodayCount_MatchesServerRules', async () => {
+    const today = formatLocalDate(new Date())
+    const yesterday = formatLocalDate(addDays(new Date(), -1))
+    const tomorrow = formatLocalDate(addDays(new Date(), 1))
+
+    // Earlier: open, when_date < today, not someday — in the Today view.
+    await localDb.tasks.put(makeTask({ id: 'earlier-task', when_date: yesterday }))
+    // Multi-schedule: the primary when_date is tomorrow, but an
+    // uncompleted schedule row lands today — Today section via the row.
+    await localDb.tasks.put(makeTask({ id: 'multi-today', when_date: tomorrow }))
+    await localDb.schedules.put(
+      makeSchedule({ id: 'sch-multi-today', task_id: 'multi-today', when_date: today }),
+    )
+    await localDb.schedules.put(
+      makeSchedule({ id: 'sch-multi-tomorrow', task_id: 'multi-today', when_date: tomorrow }),
+    )
+    // No-list exception: dated today, its only schedule row completed —
+    // open, but the server puts it in no list, so the badge skips it.
+    await localDb.tasks.put(makeTask({ id: 'no-list-exception', when_date: today }))
+    await localDb.schedules.put(
+      makeSchedule({ id: 'sch-done-today', task_id: 'no-list-exception', when_date: today, completed: true }),
+    )
+    // Overdue belongs to the Today union too.
+    await localDb.tasks.put(makeTask({ id: 'overdue-task', deadline: yesterday }))
+
+    const { result } = renderHook(() => useLocalViewCounts())
+
+    await waitFor(() => {
+      expect(result.current).toBeDefined()
+    })
+
+    expect(result.current!.today).toBe(3) // earlier + multi-schedule-today + overdue
+    expect(result.current!.overdue).toBe(1)
   })
 })
