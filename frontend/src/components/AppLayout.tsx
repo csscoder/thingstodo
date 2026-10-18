@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Outlet, Navigate, useLocation } from 'react-router'
 import { Menu, Plus, RefreshCw } from 'lucide-react'
 import { Sidebar } from './Sidebar'
@@ -35,6 +35,8 @@ export function AppLayout() {
   const { pullDistance, isRefreshing } = usePullToRefresh(mainRef)
   const { data: settings } = useSettings()
   const [initialSyncing, setInitialSyncing] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const retryInitRef = useRef<() => void>(() => {})
   useGlobalShortcuts()
   useTaskShortcuts()
   useTheme()
@@ -48,18 +50,38 @@ export function AppLayout() {
       const taskCount = await localDb.tasks.count()
       if (taskCount === 0 && mounted) {
         setInitialSyncing(true)
-        await fullSync()
-        if (mounted) setInitialSyncing(false)
+        setSyncError(null)
+        try {
+          await fullSync()
+          if (mounted) setInitialSyncing(false)
+        } catch (err) {
+          if (mounted) {
+            setSyncError(err instanceof Error ? err.message : String(err))
+            setInitialSyncing(false)
+            // Nothing locally to show — stay on the error screen, don't start the engine
+            return
+          }
+        }
       }
       if (mounted) {
         startSyncEngine()
       }
     }
-    init()
+    retryInitRef.current = () => {
+      setSyncError(null)
+      void init()
+    }
+    void init()
     return () => {
       mounted = false
       stopSyncEngine()
     }
+  }, [])
+
+  // Clear the error and re-run the first-sync flow
+  const retryInit = useCallback(() => {
+    setSyncError(null)
+    retryInitRef.current()
   }, [])
 
   // Apply font size setting to document root
@@ -99,7 +121,7 @@ export function AppLayout() {
 
   return (
     <AppDndContext>
-      <SyncingOverlay show={initialSyncing} />
+      <SyncingOverlay show={initialSyncing || syncError !== null} error={syncError} onRetry={retryInit} />
       <div className="flex h-screen flex-col bg-white text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100">
         <OfflineBanner />
         <div className="flex min-h-0 flex-1">
