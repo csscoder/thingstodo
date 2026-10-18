@@ -226,7 +226,8 @@ func (r *ProjectRepository) Create(input model.CreateProjectInput) (*model.Proje
 	}
 	project, err := r.GetByID(id)
 	if err == nil && project != nil {
-		logChange(r.changeLog, "project", id, "create", nil, project, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "project", id, "create", nil, project, "", "")
 	}
 	return project, err
 }
@@ -371,7 +372,8 @@ func (r *ProjectRepository) Update(id string, input model.UpdateProjectInput) (*
 func (r *ProjectRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM projects WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "project", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "project", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }
@@ -484,7 +486,8 @@ func (r *ProjectRepository) Complete(id string) (*model.ProjectDetail, error) {
 	}
 	project, err := r.GetByID(id)
 	if err == nil && project != nil {
-		logChange(r.changeLog, "project", id, "update", []string{"status"}, project, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "project", id, "update", []string{"status"}, project, "", "")
 	}
 	return project, err
 }
@@ -505,7 +508,8 @@ func (r *ProjectRepository) Reorder(items []model.SimpleReorderItem) error {
 	for _, item := range items {
 		p, err := r.GetByID(item.ID)
 		if err == nil && p != nil {
-			logChange(r.changeLog, "project", item.ID, "update", []string{"sort_order"}, p, "", "")
+			// Best-effort log: the reorder already committed.
+			_ = logChange(r.changeLog, "project", item.ID, "update", []string{"sort_order"}, p, "", "")
 		}
 	}
 	return nil

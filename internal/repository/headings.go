@@ -100,7 +100,8 @@ func (r *HeadingRepository) Create(projectID string, input model.CreateHeadingIn
 	var h model.Heading
 	_ = r.db.QueryRow("SELECT id, title, project_id, sort_order FROM headings WHERE id = ?", id).
 		Scan(&h.ID, &h.Title, &h.ProjectID, &h.SortOrder)
-	logChange(r.changeLog, "heading", id, "create", nil, &h, "", "")
+	// Best-effort log: the write already committed.
+	_ = logChange(r.changeLog, "heading", id, "create", nil, &h, "", "")
 	return &h, nil
 }
 
@@ -123,7 +124,8 @@ func (r *HeadingRepository) Update(id string, input model.UpdateHeadingInput) (*
 		return nil, nil
 	}
 	if err == nil {
-		logChange(r.changeLog, "heading", id, "update", nil, &h, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "heading", id, "update", nil, &h, "", "")
 	}
 	return &h, err
 }
@@ -131,7 +133,8 @@ func (r *HeadingRepository) Update(id string, input model.UpdateHeadingInput) (*
 func (r *HeadingRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM headings WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "heading", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "heading", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }
@@ -157,7 +160,8 @@ func (r *HeadingRepository) Reorder(items []model.SimpleReorderItem) error {
 		var h model.Heading
 		_ = r.db.QueryRow("SELECT id, title, project_id, sort_order FROM headings WHERE id = ?", item.ID).
 			Scan(&h.ID, &h.Title, &h.ProjectID, &h.SortOrder)
-		logChange(r.changeLog, "heading", item.ID, "update", []string{"sort_order"}, &h, "", "")
+		// Best-effort log: the reorder already committed.
+		_ = logChange(r.changeLog, "heading", item.ID, "update", []string{"sort_order"}, &h, "", "")
 	}
 	return nil
 }

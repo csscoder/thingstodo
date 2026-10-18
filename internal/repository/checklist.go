@@ -37,14 +37,6 @@ func (r *ChecklistRepository) WithTx(tx *sql.Tx) *ChecklistRepository {
 	return &cp
 }
 
-// inTx runs fn inside a single transaction: the bound one when the repository
-// is a WithTx copy, otherwise a new transaction owned by this call.
-func (r *ChecklistRepository) inTx(fn func(db DBTX) error) error {
-	if r.tx != nil {
-		return fn(r.tx)
-	}
-	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
-}
 
 func (r *ChecklistRepository) ListByTask(taskID string) ([]model.ChecklistItem, error) {
 	rows, err := r.db.Query(
@@ -132,7 +124,8 @@ func (r *ChecklistRepository) Create(taskID string, input model.CreateChecklistI
 	_ = r.db.QueryRow("SELECT id, task_id, title, completed, sort_order FROM checklist_items WHERE id = ?", id).
 		Scan(&c.ID, &c.TaskID, &c.Title, &completed, &c.SortOrder)
 	c.Completed = completed == 1
-	logChange(r.changeLog, "checklist_item", id, "create", nil, &c, "", "")
+	// Best-effort log: the write already committed.
+	_ = logChange(r.changeLog, "checklist_item", id, "create", nil, &c, "", "")
 	return &c, nil
 }
 
@@ -156,7 +149,8 @@ func (r *ChecklistRepository) Update(id string, input model.UpdateChecklistInput
 	}
 	c.Completed = completed == 1
 	if err == nil {
-		logChange(r.changeLog, "checklist_item", id, "update", nil, &c, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "checklist_item", id, "update", nil, &c, "", "")
 	}
 	return &c, err
 }
@@ -164,7 +158,8 @@ func (r *ChecklistRepository) Update(id string, input model.UpdateChecklistInput
 func (r *ChecklistRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM checklist_items WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "checklist_item", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "checklist_item", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }

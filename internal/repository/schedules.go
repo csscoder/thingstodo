@@ -159,7 +159,9 @@ func (r *ScheduleRepository) create(taskID string, input model.CreateTaskSchedul
 	var s model.TaskSchedule
 	_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id).
 		Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
-	logChange(r.changeLog, "schedule", id, "create", nil, &s, "", "")
+	if err := logChange(r.changeLog, "schedule", id, "create", nil, &s, "", ""); err != nil {
+		return nil, fmt.Errorf("log schedule create: %w", err)
+	}
 	return &s, nil
 }
 
@@ -220,7 +222,9 @@ func (r *ScheduleRepository) update(id string, input model.UpdateTaskScheduleInp
 		return nil, nil
 	}
 	if err == nil {
-		logChange(r.changeLog, "schedule", id, "update", nil, &s, "", "")
+		if logErr := logChange(r.changeLog, "schedule", id, "update", nil, &s, "", ""); logErr != nil {
+			return nil, fmt.Errorf("log schedule update: %w", logErr)
+		}
 	}
 	return &s, err
 }
@@ -238,7 +242,9 @@ func (r *ScheduleRepository) Delete(id string) error {
 		if _, err := db.Exec("DELETE FROM task_schedules WHERE id = ?", id); err != nil {
 			return err
 		}
-		logChange(tr.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", "")
+		if err := logChange(tr.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", ""); err != nil {
+			return fmt.Errorf("log schedule delete: %w", err)
+		}
 		if !taskID.Valid {
 			return nil
 		}
@@ -392,7 +398,8 @@ func (r *ScheduleRepository) CreateFirstEntry(taskID, date string) error {
 		var s model.TaskSchedule
 		_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id).
 			Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
-		logChange(r.changeLog, "schedule", id, "create", nil, &s, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "schedule", id, "create", nil, &s, "", "")
 	}
 	return err
 }
@@ -453,13 +460,15 @@ func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
 			if err := completedRows.Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder); err != nil {
 				break
 			}
-			logChange(r.changeLog, "schedule", s.ID, "update", []string{"completed"}, &s, "", "")
+			// Best-effort log: the transaction already committed.
+			_ = logChange(r.changeLog, "schedule", s.ID, "update", []string{"completed"}, &s, "", "")
 		}
 	}
 
 	// Log deleted entries
 	for _, id := range deletedIDs {
-		logChange(r.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the transaction already committed.
+		_ = logChange(r.changeLog, "schedule", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 
 	return nil

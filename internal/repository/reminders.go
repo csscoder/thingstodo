@@ -37,14 +37,6 @@ func (r *ReminderRepository) WithTx(tx *sql.Tx) *ReminderRepository {
 	return &cp
 }
 
-// inTx runs fn inside a single transaction: the bound one when the repository
-// is a WithTx copy, otherwise a new transaction owned by this call.
-func (r *ReminderRepository) inTx(fn func(db DBTX) error) error {
-	if r.tx != nil {
-		return fn(r.tx)
-	}
-	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
-}
 
 func (r *ReminderRepository) ListByTask(taskID string) ([]model.Reminder, error) {
 	rows, err := r.db.Query(
@@ -126,14 +118,16 @@ func (r *ReminderRepository) Create(taskID string, input model.CreateReminderInp
 	if err != nil {
 		return nil, fmt.Errorf("read back reminder: %w", err)
 	}
-	logChange(r.changeLog, "reminder", id, "create", nil, &rm, "", "")
+	// Best-effort log: the write already committed.
+	_ = logChange(r.changeLog, "reminder", id, "create", nil, &rm, "", "")
 	return &rm, nil
 }
 
 func (r *ReminderRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM reminders WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "reminder", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "reminder", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }
@@ -158,7 +152,8 @@ func (r *ReminderRepository) DeleteAllByTask(taskID string) error {
 	}
 
 	for _, id := range ids {
-		logChange(r.changeLog, "reminder", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the delete already committed.
+		_ = logChange(r.changeLog, "reminder", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return nil
 }

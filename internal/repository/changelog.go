@@ -38,14 +38,6 @@ func (r *ChangeLogRepository) WithTx(tx *sql.Tx) *ChangeLogRepository {
 	return &cp
 }
 
-// inTx runs fn inside a single transaction: the bound one when the repository
-// is a WithTx copy, otherwise a new transaction owned by this call.
-func (r *ChangeLogRepository) inTx(fn func(db DBTX) error) error {
-	if r.tx != nil {
-		return fn(r.tx)
-	}
-	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
-}
 
 // AppendChange inserts a new entry into the change log and returns its seq.
 func (r *ChangeLogRepository) AppendChange(entity, entityID, action string, fields *string, snapshot, userID, deviceID string) (int64, error) {

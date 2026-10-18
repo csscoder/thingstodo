@@ -122,7 +122,8 @@ func (r *AttachmentRepository) Create(taskID string, input model.CreateAttachmen
 
 	attachment, err := r.GetByID(id)
 	if err == nil && attachment != nil {
-		logChange(r.changeLog, "attachment", id, "create", nil, attachment, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "attachment", id, "create", nil, attachment, "", "")
 	}
 	return attachment, err
 }
@@ -140,7 +141,8 @@ func (r *AttachmentRepository) Update(id string, input model.UpdateAttachmentInp
 	}
 	attachment, err := r.GetByID(id)
 	if err == nil && attachment != nil {
-		logChange(r.changeLog, "attachment", id, "update", nil, attachment, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "attachment", id, "update", nil, attachment, "", "")
 	}
 	return attachment, err
 }
@@ -148,7 +150,8 @@ func (r *AttachmentRepository) Update(id string, input model.UpdateAttachmentInp
 func (r *AttachmentRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM attachments WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "attachment", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "attachment", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }

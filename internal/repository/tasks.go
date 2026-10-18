@@ -763,9 +763,10 @@ func (r *TaskRepository) Delete(id string) error {
 		// Log the full task snapshot so the pull client sees deleted_at and soft-deletes
 		task, getErr := r.GetByID(id)
 		if getErr == nil && task != nil {
-			logChange(r.changeLog, "task", id, "delete", nil, task, "", "")
+			// Best-effort log: the delete already committed.
+			_ = logChange(r.changeLog, "task", id, "delete", nil, task, "", "")
 		} else {
-			logChange(r.changeLog, "task", id, "delete", nil, map[string]string{"id": id}, "", "")
+			_ = logChange(r.changeLog, "task", id, "delete", nil, map[string]string{"id": id}, "", "")
 		}
 	}
 	return err
@@ -778,7 +779,8 @@ func (r *TaskRepository) Restore(id string) (*model.TaskDetail, error) {
 	}
 	task, err := r.GetByID(id)
 	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "update", []string{"deleted_at"}, task, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "task", id, "update", []string{"deleted_at"}, task, "", "")
 	}
 	return task, err
 }
@@ -786,7 +788,8 @@ func (r *TaskRepository) Restore(id string) (*model.TaskDetail, error) {
 func (r *TaskRepository) PermanentDelete(id string) error {
 	_, err := r.db.Exec("DELETE FROM tasks WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "task", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "task", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }
@@ -837,7 +840,8 @@ func (r *TaskRepository) Reopen(id string) (*model.TaskDetail, error) {
 	}
 	task, err := r.GetByID(id)
 	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "update", []string{"status", "completed_at", "canceled_at"}, task, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "task", id, "update", []string{"status", "completed_at", "canceled_at"}, task, "", "")
 	}
 	return task, err
 }
@@ -849,7 +853,8 @@ func (r *TaskRepository) MarkReviewed(id string) (*model.TaskDetail, error) {
 	}
 	task, err := r.GetByID(id)
 	if err == nil && task != nil {
-		logChange(r.changeLog, "task", id, "update", []string{"updated_at"}, task, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "task", id, "update", []string{"updated_at"}, task, "", "")
 	}
 	return task, err
 }
@@ -874,7 +879,8 @@ func (r *TaskRepository) Reorder(items []model.ReorderItem) error {
 	for _, item := range items {
 		task, err := r.GetByID(item.ID)
 		if err == nil && task != nil {
-			logChange(r.changeLog, "task", item.ID, "update", []string{item.SortField}, task, "", "")
+			// Best-effort log: the reorder already committed.
+			_ = logChange(r.changeLog, "task", item.ID, "update", []string{item.SortField}, task, "", "")
 		}
 	}
 
@@ -1029,7 +1035,8 @@ func (r *TaskRepository) BulkAction(input model.BulkActionInput) (int, error) {
 	for _, id := range input.TaskIDs {
 		task, err := r.GetByID(id)
 		if err == nil && task != nil {
-			logChange(r.changeLog, "task", id, "update", nil, task, "", "")
+			// Best-effort log: the bulk transaction already committed.
+			_ = logChange(r.changeLog, "task", id, "update", nil, task, "", "")
 		}
 	}
 
@@ -1242,7 +1249,9 @@ func (r *TaskRepository) syncFirstScheduleDate(taskID string, whenDate *string) 
 			for rows.Next() {
 				var sid string
 				_ = rows.Scan(&sid)
-				logChange(r.changeLog, "schedule", sid, "delete", nil, map[string]string{"id": sid}, "", "")
+				if err := logChange(r.changeLog, "schedule", sid, "delete", nil, map[string]string{"id": sid}, "", ""); err != nil {
+					return fmt.Errorf("log schedule delete: %w", err)
+				}
 			}
 		}
 		// Clear all schedule entries
@@ -1266,7 +1275,9 @@ func (r *TaskRepository) syncFirstScheduleDate(taskID string, whenDate *string) 
 			var s model.TaskSchedule
 			_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id).
 				Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
-			logChange(r.changeLog, "schedule", id, "create", nil, &s, "", "")
+			if logErr := logChange(r.changeLog, "schedule", id, "create", nil, &s, "", ""); logErr != nil {
+				return fmt.Errorf("log schedule create: %w", logErr)
+			}
 		}
 		return err
 	} else if err != nil {
@@ -1289,7 +1300,9 @@ func (r *TaskRepository) syncFirstScheduleDate(taskID string, whenDate *string) 
 		var s model.TaskSchedule
 		_ = r.db.QueryRow("SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", existingID).
 			Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
-		logChange(r.changeLog, "schedule", existingID, "update", []string{"when_date"}, &s, "", "")
+		if logErr := logChange(r.changeLog, "schedule", existingID, "update", []string{"when_date"}, &s, "", ""); logErr != nil {
+			return fmt.Errorf("log schedule update: %w", logErr)
+		}
 	}
 	return err
 }

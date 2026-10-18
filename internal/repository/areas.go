@@ -217,7 +217,8 @@ func (r *AreaRepository) Create(input model.CreateAreaInput) (*model.AreaDetail,
 	// idempotent replay of this create responds with an identical body.
 	area, err := r.GetByID(id)
 	if err == nil && area != nil {
-		logChange(r.changeLog, "area", id, "create", nil, area, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "area", id, "create", nil, area, "", "")
 	}
 	return area, err
 }
@@ -242,7 +243,8 @@ func (r *AreaRepository) Update(id string, input model.UpdateAreaInput) (*model.
 		return nil, nil
 	}
 	if err == nil {
-		logChange(r.changeLog, "area", id, "update", nil, &a, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "area", id, "update", nil, &a, "", "")
 	}
 	return &a, err
 }
@@ -250,7 +252,8 @@ func (r *AreaRepository) Update(id string, input model.UpdateAreaInput) (*model.
 func (r *AreaRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM areas WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "area", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "area", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }
@@ -273,7 +276,8 @@ func (r *AreaRepository) Reorder(items []model.SimpleReorderItem) error {
 		err := r.db.QueryRow("SELECT id, title, sort_order, created_at, updated_at FROM areas WHERE id = ?", item.ID).
 			Scan(&a.ID, &a.Title, &a.SortOrder, &a.CreatedAt, &a.UpdatedAt)
 		if err == nil {
-			logChange(r.changeLog, "area", item.ID, "update", []string{"sort_order"}, &a, "", "")
+			// Best-effort log: the reorder already committed.
+			_ = logChange(r.changeLog, "area", item.ID, "update", []string{"sort_order"}, &a, "", "")
 		}
 	}
 	return nil

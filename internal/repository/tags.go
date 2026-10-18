@@ -94,7 +94,8 @@ func (r *TagRepository) Create(input model.CreateTagInput) (*model.Tag, error) {
 	var t model.Tag
 	_ = r.db.QueryRow("SELECT id, title, color, parent_tag_id, sort_order FROM tags WHERE id = ?", id).
 		Scan(&t.ID, &t.Title, &t.Color, &t.ParentTagID, &t.SortOrder)
-	logChange(r.changeLog, "tag", id, "create", nil, &t, "", "")
+	// Best-effort log: the write already committed.
+	_ = logChange(r.changeLog, "tag", id, "create", nil, &t, "", "")
 	return &t, nil
 }
 
@@ -131,7 +132,8 @@ func (r *TagRepository) Update(id string, input model.UpdateTagInput) (*model.Ta
 		return nil, nil
 	}
 	if err == nil {
-		logChange(r.changeLog, "tag", id, "update", nil, &t, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "tag", id, "update", nil, &t, "", "")
 	}
 	return &t, err
 }
@@ -158,7 +160,8 @@ func (r *TagRepository) Reorder(items []model.SimpleReorderItem) error {
 		err := r.db.QueryRow("SELECT id, title, color, parent_tag_id, sort_order FROM tags WHERE id = ?", item.ID).
 			Scan(&t.ID, &t.Title, &t.Color, &t.ParentTagID, &t.SortOrder)
 		if err == nil {
-			logChange(r.changeLog, "tag", item.ID, "update", []string{"sort_order"}, &t, "", "")
+			// Best-effort log: the reorder already committed.
+			_ = logChange(r.changeLog, "tag", item.ID, "update", []string{"sort_order"}, &t, "", "")
 		}
 	}
 	return nil
@@ -167,7 +170,8 @@ func (r *TagRepository) Reorder(items []model.SimpleReorderItem) error {
 func (r *TagRepository) Delete(id string) error {
 	_, err := r.db.Exec("DELETE FROM tags WHERE id = ?", id)
 	if err == nil {
-		logChange(r.changeLog, "tag", id, "delete", nil, map[string]string{"id": id}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "tag", id, "delete", nil, map[string]string{"id": id}, "", "")
 	}
 	return err
 }

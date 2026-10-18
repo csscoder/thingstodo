@@ -32,14 +32,6 @@ func (r *RepeatRuleRepository) WithTx(tx *sql.Tx) *RepeatRuleRepository {
 	return &cp
 }
 
-// inTx runs fn inside a single transaction: the bound one when the repository
-// is a WithTx copy, otherwise a new transaction owned by this call.
-func (r *RepeatRuleRepository) inTx(fn func(db DBTX) error) error {
-	if r.tx != nil {
-		return fn(r.tx)
-	}
-	return InTx(r.conn, func(tx *sql.Tx) error { return fn(tx) })
-}
 
 func (r *RepeatRuleRepository) GetByTask(taskID string) (*model.RepeatRule, error) {
 	var rr model.RepeatRule
@@ -88,7 +80,8 @@ func (r *RepeatRuleRepository) Upsert(taskID string, input model.CreateRepeatRul
 	}
 	rule, err := r.GetByTask(taskID)
 	if err == nil && rule != nil {
-		logChange(r.changeLog, "repeat_rule", rule.ID, "upsert", nil, rule, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "repeat_rule", rule.ID, "upsert", nil, rule, "", "")
 	}
 	return rule, err
 }
@@ -99,7 +92,8 @@ func (r *RepeatRuleRepository) DeleteByTask(taskID string) error {
 	_ = r.db.QueryRow("SELECT id FROM repeat_rules WHERE task_id = ?", taskID).Scan(&ruleID)
 	_, err := r.db.Exec("DELETE FROM repeat_rules WHERE task_id = ?", taskID)
 	if err == nil && ruleID != "" {
-		logChange(r.changeLog, "repeat_rule", ruleID, "delete", nil, map[string]string{"id": ruleID, "task_id": taskID}, "", "")
+		// Best-effort log: the write already committed.
+		_ = logChange(r.changeLog, "repeat_rule", ruleID, "delete", nil, map[string]string{"id": ruleID, "task_id": taskID}, "", "")
 	}
 	return err
 }
