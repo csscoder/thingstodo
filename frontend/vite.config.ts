@@ -43,7 +43,7 @@ export default defineConfig({
   ],
   server: {
     proxy: {
-      '/api': 'http://localhost:2999',
+      '/api': { target: 'http://localhost:2999', changeOrigin: false },
     },
   },
   build: {

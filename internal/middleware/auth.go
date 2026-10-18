@@ -158,9 +158,25 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 }
 
 // crossOriginSession reports whether r names an origin other than the
-// one it was sent to: it carries an Origin header whose host — name and,
-// with default ports (80 for http, 443 for https) stripped on both
-// sides, port — differs from the request Host.
+// one it was sent to. When the browser sets Sec-Fetch-Site it decides
+// outright: "same-origin" and "none" (user-initiated navigation) count
+// as same-origin, any other value ("cross-site", "same-site") as
+// cross-origin. Only when the header is absent does the Origin header
+// decide: a request whose Origin host — name and, with default ports
+// (80 for http, 443 for https) stripped on both sides, port — differs
+// from the request Host is cross-origin.
+//
+// Browsers set Sec-Fetch-Site on every request and scripts cannot set
+// or override it (forbidden header name), so a proxy that rewrites Host
+// (Vite changeOrigin, nginx $proxy_host) can no longer make a
+// same-origin request look foreign. Go's own
+// net/http.CrossOriginProtection detects cross-origin requests the same
+// way: "with the Sec-Fetch-Site header, available in all browsers since
+// 2023, or by comparing the hostname of the Origin header with the Host
+// header" (go doc net/http.CrossOriginProtection, go1.27.0, read
+// 2026-10-18). We keep this guard instead of adopting that handler
+// because it always allows GET/HEAD/OPTIONS, while ours rejects
+// cross-origin sessions on every method.
 //
 // This is the cross-origin session guard of spec A2. Browsers attach
 // Origin to every cross-origin request and scripts cannot suppress it,
@@ -172,6 +188,9 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 // it. Bearer-authenticated requests (master key or named token) are
 // exempt — cross-origin use is exactly what tokens are for.
 func crossOriginSession(r *http.Request) bool {
+	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+		return sfs != "same-origin" && sfs != "none"
+	}
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
 		return false

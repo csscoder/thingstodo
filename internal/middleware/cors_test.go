@@ -80,3 +80,25 @@ func TestAuth_CrossOriginSessionForbidden(t *testing.T) {
 	rec = runAuth(cookieCfg, firstUserStub, userExistsStub, nil, nil, same)
 	assertStatusBody(t, rec, http.StatusOK, "u1")
 }
+
+func TestAuth_CrossOriginSession_SecFetchSite(t *testing.T) {
+	proxyCfg := config.Config{AuthMode: "proxy", AuthProxyHeader: "Remote-User", APIKey: "k"}
+
+	// Host rewritten by a proxy (Vite changeOrigin, nginx $proxy_host):
+	// Origin names :5173, Host is localhost:2999, browser says same-origin.
+	r := guardRequest("http://localhost:5173")
+	r.Host = "localhost:2999"
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	assertStatusBody(t, runAuth(proxyCfg, firstUserStub, userExistsStub, nil, nil, r), http.StatusOK, "proxyuser")
+
+	r = guardRequest("")
+	r.Header.Set("Sec-Fetch-Site", "none")
+	assertStatusBody(t, runAuth(proxyCfg, firstUserStub, userExistsStub, nil, nil, r), http.StatusOK, "proxyuser")
+
+	// cross-site wins over matching Host
+	for _, v := range []string{"cross-site", "same-site"} {
+		r = guardRequest("https://app.example")
+		r.Header.Set("Sec-Fetch-Site", v)
+		assertStatusBody(t, runAuth(proxyCfg, firstUserStub, userExistsStub, nil, nil, r), http.StatusForbidden, crossOriginForbiddenEnvelope)
+	}
+}

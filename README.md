@@ -90,6 +90,8 @@ For use behind an authenticating reverse proxy (Authelia, Authentik, etc.).
 |---|---|---|
 | `AUTH_PROXY_HEADER` | `Remote-User` | Header containing the authenticated username |
 
+Any reverse proxy works with current browsers (the server trusts `Sec-Fetch-Site`); preserving `Host` is still recommended.
+
 ### OIDC Auth
 
 Log in via any OpenID Connect provider (Google, Keycloak, Authelia, etc.). Only the single email configured in `OIDC_ALLOWED_EMAIL` may log in, and the provider must assert it with `email_verified: true`; any other account is rejected with `403`. On first login the existing user is automatically linked to this email.
