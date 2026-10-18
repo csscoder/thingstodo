@@ -1594,7 +1594,7 @@ Response (410 Gone): Cursor has been purged, perform a full sync
 | `entity_id` | ID of the entity that changed |
 | `action` | Type of change: create, update, or delete |
 | `fields` | JSON-encoded string array of the fields that changed (for updates), e.g. `["title","notes"]`; null for create/delete |
-| `snapshot` | Full entity state as JSON string (always populated for create/update, empty string for delete) |
+| `snapshot` | Full entity state as JSON string, always populated: the complete entity for create and update, and for soft deletes (trash) the entity as of deletion; hard deletes and purges log `{"id": "..."}` (a repeat-rule delete also carries `task_id`) |
 | `user_id` | User ID (omitted if empty) |
 | `device_id` | Device ID of origin (omitted if empty) |
 | `created_at` | ISO 8601 timestamp when change was recorded |

@@ -16,6 +16,9 @@ export default defineConfig({
   ],
   use: {
     baseURL: dev ? 'http://localhost:5199' : 'http://localhost:3999',
+    // Match the server's TZ=Europe/Moscow so datetime-local input and
+    // exact_at/deadline assertions are runner-location independent.
+    timezoneId: 'Europe/Moscow',
     trace: 'retain-on-failure',
   },
   projects: [{ name: 'chromium' }],
