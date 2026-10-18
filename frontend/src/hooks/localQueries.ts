@@ -60,6 +60,16 @@ function todayString(): string {
   return `${y}-${m}-${day}`
 }
 
+/** Returns tomorrow's date as a YYYY-MM-DD string in local time. */
+function tomorrowString(): string {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 /** Strip sync metadata fields so callers get plain server-shaped types. */
 function stripSyncMeta<T extends object>(
   obj: T,
@@ -345,8 +355,8 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
     const seenIds = new Set<string>()
     const candidates: LocalTask[] = []
 
-    // 1) when_date = today — only if task has no schedules for today,
-    //    or has at least one uncompleted schedule for today
+    // 1) when_date = today — only if the task has no schedule rows at all
+    //    (the synthetic entry of E3), or an uncompleted schedule for today
     const byWhenDate = await localDb.tasks
       .where('when_date')
       .equals(today)
@@ -354,12 +364,16 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
       .toArray()
     for (const t of byWhenDate) {
       if (seenIds.has(t.id)) continue
+      const scheduleCount = await localDb.schedules
+        .where('task_id')
+        .equals(t.id)
+        .count()
       const todayScheds = await localDb.schedules
         .where('task_id')
         .equals(t.id)
-        .filter((s) => s.when_date === today)
+        .filter((s) => s.when_date === today && !s.completed)
         .toArray()
-      if (todayScheds.length === 0 || todayScheds.some((s) => !s.completed)) {
+      if (scheduleCount === 0 || todayScheds.length > 0) {
         seenIds.add(t.id); candidates.push(t)
       }
     }
@@ -430,10 +444,10 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
       .toArray()
     overdueTasks.sort((a, b) => (a.deadline ?? '').localeCompare(b.deadline ?? ''))
 
-    // Earlier: open tasks with when_date < today, not someday,
-    // not overdue (deadline >= today or no deadline),
-    // AND has at least one uncompleted past schedule entry
-    const earlierCandidates = await localDb.tasks
+    // Earlier: open tasks with when_date < today, not someday, regardless
+    // of schedule rows (E3); a task with a passed deadline may appear here
+    // and in Overdue at once.
+    const earlierTasks = await localDb.tasks
       .where('when_date')
       .below(today)
       .filter(
@@ -441,19 +455,9 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
           t.status === 'open' &&
           !t.deleted_at &&
           !!t.when_date &&
-          t.when_date !== 'someday' &&
-          (t.deadline === null || t.deadline === undefined || t.deadline >= today),
+          t.when_date !== 'someday',
       )
       .toArray()
-    const earlierTasks: LocalTask[] = []
-    for (const t of earlierCandidates) {
-      const pastCount = await localDb.schedules
-        .where('task_id')
-        .equals(t.id)
-        .filter((s) => !s.completed && s.when_date < today && s.when_date !== 'someday')
-        .count()
-      if (pastCount > 0) earlierTasks.push(t)
-    }
     earlierTasks.sort((a, b) =>
       (a.when_date ?? '').localeCompare(b.when_date ?? '') ||
       (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0),
@@ -489,20 +493,24 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
 }
 
 /**
- * Upcoming: open tasks where when_date >= today (includes today),
- * not deleted, sorted by when_date then sort_order_today.
- * Also includes overdue (deadline < today) and earlier (when_date < today
- * with uncompleted past schedules).
+ * Upcoming: mirrors the server rules in internal/repository/view_predicates.go.
+ * Date groups start TOMORROW (the server's default from) — a today-task lives
+ * in the Today view. A task appears once per uncompleted schedule entry dated
+ * on or after tomorrow (never someday); a task with a when_date and NO
+ * schedule rows counts as one uncompleted schedule on that when_date (the
+ * synthetic entry of E3). Overdue (deadline < today) and Earlier (when_date
+ * < today, not someday, regardless of schedule rows) are both relative to
+ * today, never to tomorrow.
  */
 export function useLocalUpcoming(): UpcomingView | undefined {
   return useLiveQuery(async () => {
     const today = todayString()
+    const tomorrow = tomorrowString()
 
-    // Server uses INNER JOIN on task_schedules — only tasks with schedule entries appear.
-    // Expand per uncompleted schedule entry (task with N entries appears N times).
+    // Date groups: one entry per uncompleted schedule on or after tomorrow.
     const allSchedules = await localDb.schedules
       .where('when_date')
-      .aboveOrEqual(today)
+      .aboveOrEqual(tomorrow)
       .filter((s) => !s.completed && s.when_date !== 'someday')
       .toArray()
 
@@ -529,10 +537,31 @@ export function useLocalUpcoming(): UpcomingView | undefined {
       dateMap.get(d)!.push(enriched)
     }
 
-    // Sort tasks within each date
+    // Synthetic entry (E3): a task with a when_date and no schedule rows at
+    // all appears once under its when_date. A task whose rows all exist and
+    // are completed matches nothing here.
+    const rowlessCandidates = await localDb.tasks
+      .where('when_date')
+      .aboveOrEqual(tomorrow)
+      .filter((t) => t.status === 'open' && !t.deleted_at && t.when_date !== 'someday')
+      .toArray()
+    for (const t of rowlessCandidates) {
+      const scheduleCount = await localDb.schedules
+        .where('task_id')
+        .equals(t.id)
+        .count()
+      if (scheduleCount > 0) continue
+
+      const d = t.when_date!
+      if (!dateMap.has(d)) { dateMap.set(d, []); dateOrder.push(d) }
+      dateMap.get(d)!.push(await enrichTask(t))
+    }
+
+    // Sort tasks within each date, and dates chronologically
     for (const tasks of dateMap.values()) {
       sortTasks(tasks)
     }
+    dateOrder.sort()
 
     const dates: UpcomingViewDate[] = dateOrder.map((date) => ({
       date,
@@ -547,10 +576,10 @@ export function useLocalUpcoming(): UpcomingView | undefined {
       .toArray()
     overdueTasks.sort((a, b) => (a.deadline ?? '').localeCompare(b.deadline ?? ''))
 
-    // Earlier: open tasks with when_date < today, not someday,
-    // not overdue (deadline >= today or no deadline),
-    // AND has at least one uncompleted past schedule entry
-    const earlierCandidates = await localDb.tasks
+    // Earlier: open tasks with when_date < today, not someday, regardless
+    // of schedule rows (E3); a task with a passed deadline may appear here
+    // and in Overdue at once.
+    const earlierTasks = await localDb.tasks
       .where('when_date')
       .below(today)
       .filter(
@@ -558,19 +587,9 @@ export function useLocalUpcoming(): UpcomingView | undefined {
           t.status === 'open' &&
           !t.deleted_at &&
           !!t.when_date &&
-          t.when_date !== 'someday' &&
-          (t.deadline === null || t.deadline === undefined || t.deadline >= today),
+          t.when_date !== 'someday',
       )
       .toArray()
-    const earlierTasks: LocalTask[] = []
-    for (const t of earlierCandidates) {
-      const pastCount = await localDb.schedules
-        .where('task_id')
-        .equals(t.id)
-        .filter((s) => !s.completed && s.when_date < today && s.when_date !== 'someday')
-        .count()
-      if (pastCount > 0) earlierTasks.push(t)
-    }
     earlierTasks.sort((a, b) =>
       (a.when_date ?? '').localeCompare(b.when_date ?? '') ||
       (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0),
@@ -585,8 +604,8 @@ export function useLocalUpcoming(): UpcomingView | undefined {
 }
 
 /**
- * Anytime: open tasks with no when_date but has project_id or area_id,
- * not deleted.
+ * Anytime: open tasks with no when_date owned by a project or an area
+ * (a deadline-only loose task is Inbox, never Anytime), not deleted.
  * Returns an AnytimeView grouped by area → project.
  */
 export function useLocalAnytime(): AnytimeView | undefined {
@@ -598,7 +617,7 @@ export function useLocalAnytime(): AnytimeView | undefined {
         (t) =>
           !t.when_date &&
           !t.deleted_at &&
-          (!!t.project_id || !!t.area_id || !!t.deadline),
+          (!!t.project_id || !!t.area_id),
       )
       .toArray()
 
@@ -972,9 +991,9 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
         (t.deadline === null || t.deadline === undefined || t.deadline >= today),
     ).length
 
-    // anytime: open, no when_date, (has project or area or deadline), not deleted
+    // anytime: open, no when_date, owned by a project or an area, not deleted
     const anytimeCount = openTasks.filter(
-      (t) => !t.when_date && (!!t.project_id || !!t.area_id || !!t.deadline),
+      (t) => !t.when_date && (!!t.project_id || !!t.area_id),
     ).length
 
     // Overdue: open tasks with deadline < today, not deleted

@@ -1,14 +1,20 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { useLocalViewCounts } from '../localQueries'
+import { useLocalUpcoming, useLocalViewCounts } from '../localQueries'
 import { localDb } from '../../db'
-import type { LocalTask } from '../../db/schema'
+import type { LocalSchedule, LocalTask } from '../../db/schema'
 
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function addDays(date: Date, days: number): Date {
+  const d = new Date(date)
+  d.setDate(d.getDate() + days)
+  return d
 }
 
 function makeTask(overrides: Partial<LocalTask> = {}): LocalTask {
@@ -57,6 +63,120 @@ function makeTask(overrides: Partial<LocalTask> = {}): LocalTask {
     ...overrides,
   }
 }
+
+function makeSchedule(overrides: Partial<LocalSchedule> = {}): LocalSchedule {
+  const now = new Date().toISOString()
+  return {
+    id: 'schedule-1',
+    task_id: 'task-1',
+    when_date: '2024-01-01',
+    start_time: null,
+    end_time: null,
+    completed: false,
+    sort_order: 0,
+    created_at: now,
+    _syncStatus: 'synced',
+    _localUpdatedAt: now,
+    ...overrides,
+  }
+}
+
+describe('useLocalUpcoming', () => {
+  beforeEach(async () => {
+    await localDb.tasks.clear()
+    await localDb.schedules.clear()
+  })
+
+  afterEach(async () => {
+    await localDb.tasks.clear()
+    await localDb.schedules.clear()
+  })
+
+  it('TestUpcomingLocal_DatesStartTomorrow', async () => {
+    const today = formatLocalDate(new Date())
+    const tomorrow = formatLocalDate(addDays(new Date(), 1))
+
+    // Both tasks have an uncompleted schedule entry on their date; the
+    // today-task belongs to the Today view, never to Upcoming dates.
+    await localDb.tasks.put(makeTask({ id: 'today-task', when_date: today }))
+    await localDb.tasks.put(makeTask({ id: 'tomorrow-task', when_date: tomorrow }))
+    await localDb.schedules.put(makeSchedule({ id: 'sch-today', task_id: 'today-task', when_date: today }))
+    await localDb.schedules.put(makeSchedule({ id: 'sch-tomorrow', task_id: 'tomorrow-task', when_date: tomorrow }))
+
+    const { result } = renderHook(() => useLocalUpcoming())
+
+    await waitFor(() => {
+      expect(result.current).toBeDefined()
+    })
+
+    const dateStrings = result.current!.dates.map((d) => d.date)
+    expect(dateStrings).not.toContain(today)
+    expect(dateStrings).toContain(tomorrow)
+    expect(
+      result.current!.dates.find((d) => d.date === tomorrow)?.tasks.map((t) => t.id),
+    ).toEqual(['tomorrow-task'])
+  })
+
+  it('TestUpcomingLocal_WhenDateWithoutScheduleAppears', async () => {
+    const tomorrow = formatLocalDate(addDays(new Date(), 1))
+
+    // A rowless task dated tomorrow appears once under tomorrow (E3).
+    await localDb.tasks.put(makeTask({ id: 'rowless-task', when_date: tomorrow }))
+    // A task whose only schedule row is completed has no synthetic entry
+    // and no uncompleted entry, so it appears nowhere in dates.
+    await localDb.tasks.put(makeTask({ id: 'completed-row-task', when_date: tomorrow }))
+    await localDb.schedules.put(makeSchedule({
+      id: 'sch-done',
+      task_id: 'completed-row-task',
+      when_date: tomorrow,
+      completed: true,
+    }))
+
+    const { result } = renderHook(() => useLocalUpcoming())
+
+    await waitFor(() => {
+      expect(result.current).toBeDefined()
+    })
+
+    expect(result.current!.dates).toHaveLength(1)
+    expect(result.current!.dates[0].date).toBe(tomorrow)
+    expect(result.current!.dates[0].tasks.map((t) => t.id)).toEqual(['rowless-task'])
+  })
+
+  it('TestUpcomingLocal_EarlierIgnoresSchedules', async () => {
+    const yesterday = formatLocalDate(addDays(new Date(), -1))
+
+    // Rowless past task, all-completed past rows, and a passed deadline:
+    // all three are Earlier regardless of schedules.
+    await localDb.tasks.put(makeTask({ id: 'rowless-earlier', when_date: yesterday }))
+    await localDb.tasks.put(makeTask({ id: 'all-completed-earlier', when_date: yesterday }))
+    await localDb.schedules.put(makeSchedule({
+      id: 'sch-past-done',
+      task_id: 'all-completed-earlier',
+      when_date: yesterday,
+      completed: true,
+    }))
+    await localDb.tasks.put(makeTask({ id: 'overdue-earlier', when_date: yesterday, deadline: yesterday }))
+    // Someday never counts as a past date.
+    await localDb.tasks.put(makeTask({ id: 'someday-task', when_date: 'someday' }))
+
+    const { result } = renderHook(() => useLocalUpcoming())
+
+    await waitFor(() => {
+      expect(result.current).toBeDefined()
+    })
+
+    const earlierIds = result.current!.earlier.map((t) => t.id)
+    expect(earlierIds).toContain('rowless-earlier')
+    expect(earlierIds).toContain('all-completed-earlier')
+    expect(earlierIds).toContain('overdue-earlier')
+    expect(earlierIds).not.toContain('someday-task')
+    // The overdue task appears in both Overdue and Earlier.
+    expect(result.current!.overdue.map((t) => t.id)).toContain('overdue-earlier')
+    // Dates stay empty: nothing is scheduled from tomorrow on.
+    expect(result.current!.dates).toEqual([])
+  })
+})
 
 describe('useLocalViewCounts', () => {
   beforeEach(async () => {
