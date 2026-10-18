@@ -1,6 +1,6 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useLocalLogbook, useLocalToday, useLocalUpcoming, useLocalViewCounts } from '../localQueries'
+import { useLocalLogbook, useLocalProjectTasks, useLocalToday, useLocalUpcoming, useLocalViewCounts } from '../localQueries'
 import { localDb } from '../../db'
 import type { LocalSchedule, LocalTask } from '../../db/schema'
 import { setOwnerTimeZone } from '../../lib/owner-time'
@@ -326,6 +326,37 @@ describe('owner-timezone date grouping', () => {
       expect(result.current).toBeDefined()
     })
     expect(result.current!.completed.map((t) => t.id)).toEqual(['done-today'])
+  })
+
+  it('schedule flags refresh at owner midnight without a table mutation', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // 23:59:30 Moscow: Oct 18 is still today, so the Oct 18 row is not past
+    vi.setSystemTime(new Date('2026-10-18T20:59:30Z'))
+    setOwnerTimeZone('Europe/Moscow')
+    await localDb.tasks.put(makeTask({ id: 'flag-task' }))
+    await localDb.schedules.put(makeSchedule({
+      id: 'sch-flag',
+      task_id: 'flag-task',
+      when_date: '2026-10-18',
+      completed: false,
+    }))
+
+    const { result } = renderHook(() => useLocalProjectTasks('project-1'))
+
+    await waitFor(() => {
+      expect(result.current?.[0]?.past_schedule_count).toBe(0)
+    })
+    expect(result.current?.[0]?.has_actionable_schedules).toBe(false)
+
+    // Cross Moscow midnight (21:00Z): Oct 18 becomes past with no DB change
+    act(() => {
+      vi.advanceTimersByTime(60_000)
+    })
+
+    await waitFor(() => {
+      expect(result.current?.[0]?.past_schedule_count).toBe(1)
+    })
+    expect(result.current?.[0]?.has_actionable_schedules).toBe(true)
   })
 
   it('logbook groups by owner date', async () => {

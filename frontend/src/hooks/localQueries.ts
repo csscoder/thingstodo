@@ -82,8 +82,7 @@ function taskToPlain(t: LocalTask): Task {
  * Compute schedule flags on a plain Task from its local schedule entries.
  * Mirrors the server's populateActionableScheduleFlags / populatePastScheduleCounts.
  */
-async function computeScheduleFlags(plain: Task): Promise<void> {
-  const today = todayString()
+async function computeScheduleFlags(plain: Task, today: string = todayString()): Promise<void> {
   const allSchedules = await localDb.schedules
     .where('task_id')
     .equals(plain.id)
@@ -120,7 +119,7 @@ async function computeScheduleFlags(plain: Task): Promise<void> {
  * Enrich a task with denormalized project_name, area_name, schedule time, and flags.
  * The server does this via SQL JOINs; we do it by looking up related entities.
  */
-async function enrichTask(t: LocalTask): Promise<Task> {
+async function enrichTask(t: LocalTask, today: string = todayString()): Promise<Task> {
   const plain = taskToPlain(t)
 
   // Resolve project/area names
@@ -171,14 +170,14 @@ async function enrichTask(t: LocalTask): Promise<Task> {
   plain.checklist_count = checklistItems.length
   plain.checklist_done = checklistItems.filter((c) => c.completed).length
 
-  await computeScheduleFlags(plain)
+  await computeScheduleFlags(plain, today)
   return plain
 }
 
 /**
  * Batch-enrich tasks, caching project/area lookups.
  */
-async function enrichTasks(tasks: LocalTask[]): Promise<Task[]> {
+async function enrichTasks(tasks: LocalTask[], today: string = todayString()): Promise<Task[]> {
   // Collect unique project/area IDs
   const projectIds = new Set<string>()
   const areaIds = new Set<string>()
@@ -241,7 +240,7 @@ async function enrichTasks(tasks: LocalTask[]): Promise<Task[]> {
     const checklistItems = await localDb.checklistItems.where('task_id').equals(t.id).toArray()
     plain.checklist_count = checklistItems.length
     plain.checklist_done = checklistItems.filter((c) => c.completed).length
-    await computeScheduleFlags(plain)
+    await computeScheduleFlags(plain, today)
     result.push(plain)
   }
   return result
@@ -303,11 +302,11 @@ export function useLocalInbox(reviewAfterDays?: number | null, reviewIncludeRecu
         .toArray()
 
       stale.sort((a, b) => (a.updated_at ?? '').localeCompare(b.updated_at ?? ''))
-      review = await enrichTasks(stale)
+      review = await enrichTasks(stale, today)
     }
 
     return {
-      tasks: await enrichTasks(tasks),
+      tasks: await enrichTasks(tasks, today),
       review,
     } satisfies InboxView
   }, [reviewAfterDays, reviewIncludeRecurring, today])
@@ -326,8 +325,8 @@ function sortTasks(tasks: Task[]): Task[] {
 }
 
 /** Enrich tasks and return as a single flat group. */
-async function tasksToGroups(tasks: LocalTask[]): Promise<TodayViewGroup[]> {
-  const enriched = await enrichTasks(tasks)
+async function tasksToGroups(tasks: LocalTask[], today: string): Promise<TodayViewGroup[]> {
+  const enriched = await enrichTasks(tasks, today)
   return [{ project: null, tasks: enriched }]
 }
 
@@ -471,15 +470,15 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
     })
 
     const sections: TodayViewSection[] = [
-      { title: 'Today', groups: await tasksToGroups(sortedTodayTasks) },
-      { title: 'This Evening', groups: await tasksToGroups(sortedEveningTasks) },
+      { title: 'Today', groups: await tasksToGroups(sortedTodayTasks, today) },
+      { title: 'This Evening', groups: await tasksToGroups(sortedEveningTasks, today) },
     ]
 
     return {
       sections,
-      overdue: await enrichTasks(overdueTasks),
-      earlier: await enrichTasks(earlierTasks),
-      completed: await enrichTasks(completedTasks),
+      overdue: await enrichTasks(overdueTasks, today),
+      earlier: await enrichTasks(earlierTasks, today),
+      completed: await enrichTasks(completedTasks, today),
     } satisfies TodayView
   }, [eveningStartsAt, today])
 }
@@ -523,7 +522,7 @@ export function useLocalUpcoming(): UpcomingView | undefined {
 
       const d = s.when_date
       if (!dateMap.has(d)) { dateMap.set(d, []); dateOrder.push(d) }
-      const enriched = await enrichTask(t)
+      const enriched = await enrichTask(t, today)
       enriched.first_schedule_time = s.start_time ?? null
       enriched.first_schedule_end_time = s.end_time ?? null
       enriched.schedule_entry_id = s.id
@@ -547,7 +546,7 @@ export function useLocalUpcoming(): UpcomingView | undefined {
 
       const d = t.when_date!
       if (!dateMap.has(d)) { dateMap.set(d, []); dateOrder.push(d) }
-      dateMap.get(d)!.push(await enrichTask(t))
+      dateMap.get(d)!.push(await enrichTask(t, today))
     }
 
     // Sort tasks within each date, and dates chronologically
@@ -589,9 +588,9 @@ export function useLocalUpcoming(): UpcomingView | undefined {
     )
 
     return {
-      overdue: await enrichTasks(overdueTasks),
+      overdue: await enrichTasks(overdueTasks, today),
       dates,
-      earlier: await enrichTasks(earlierTasks),
+      earlier: await enrichTasks(earlierTasks, today),
     } satisfies UpcomingView
   }, [today])
 }
@@ -602,6 +601,8 @@ export function useLocalUpcoming(): UpcomingView | undefined {
  * Returns an AnytimeView grouped by area → project.
  */
 export function useLocalAnytime(): AnytimeView | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     const tasks = await localDb.tasks
       .where('status')
@@ -614,8 +615,8 @@ export function useLocalAnytime(): AnytimeView | undefined {
       )
       .toArray()
 
-    return await buildAnytimeShape(tasks) as AnytimeView
-  })
+    return await buildAnytimeShape(tasks, today) as AnytimeView
+  }, [today])
 }
 
 /**
@@ -623,6 +624,8 @@ export function useLocalAnytime(): AnytimeView | undefined {
  * Returns a SomedayView grouped by area → project (same shape as AnytimeView).
  */
 export function useLocalSomeday(): SomedayView | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     const tasks = await localDb.tasks
       .where('when_date')
@@ -630,8 +633,8 @@ export function useLocalSomeday(): SomedayView | undefined {
       .filter((t) => t.status === 'open' && !t.deleted_at)
       .toArray()
 
-    return await buildAnytimeShape(tasks) as unknown as SomedayView
-  })
+    return await buildAnytimeShape(tasks, today) as unknown as SomedayView
+  }, [today])
 }
 
 /**
@@ -642,6 +645,7 @@ export function useLocalSomeday(): SomedayView | undefined {
  */
 async function buildAnytimeShape(
   rawTasks: LocalTask[],
+  today: string,
 ): Promise<AnytimeView> {
   // Sort tasks by sort_order_today within groups
   rawTasks.sort((a, b) => (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0))
@@ -701,11 +705,11 @@ async function buildAnytimeShape(
       const projName = projectRecords.get(pId)?.title ?? pId
       projects.push({
         project: { id: pId, title: projName },
-        tasks: await enrichTasks(ptasks),
+        tasks: await enrichTasks(ptasks, today),
       })
     }
 
-    const standaloneTasks = await enrichTasks(pMap.get(null) ?? [])
+    const standaloneTasks = await enrichTasks(pMap.get(null) ?? [], today)
 
     areas.push({
       area: { id: aId, title: areaName },
@@ -728,12 +732,12 @@ async function buildAnytimeShape(
       const projName = projectRecords.get(pId)?.title ?? pId
       noAreaProjects.push({
         project: { id: pId, title: projName },
-        tasks: await enrichTasks(ptasks),
+        tasks: await enrichTasks(ptasks, today),
       })
     }
     const standalone = noAreaProjectMap.get(null)
     if (standalone) {
-      noAreaStandalone.push(...await enrichTasks(standalone))
+      noAreaStandalone.push(...await enrichTasks(standalone, today))
     }
   }
 
@@ -750,6 +754,8 @@ async function buildAnytimeShape(
  * Returns a LogbookView grouped by date.
  */
 export function useLocalLogbook(): LogbookView | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     const allDone = await localDb.tasks
       .filter(
@@ -767,7 +773,7 @@ export function useLocalLogbook(): LogbookView | undefined {
     })
 
     // Group by owner-zone calendar date of completion
-    const enriched = await enrichTasks(allDone)
+    const enriched = await enrichTasks(allDone, today)
     const dateMap = new Map<string, Task[]>()
     for (const t of enriched) {
       const ts = t.completed_at ?? t.canceled_at ?? t.updated_at ?? ''
@@ -779,7 +785,7 @@ export function useLocalLogbook(): LogbookView | undefined {
     const groups = [...dateMap.entries()].map(([date, groupTasks]) => ({ date, tasks: groupTasks }))
 
     return { groups, total: allDone.length } satisfies LogbookView
-  })
+  }, [today])
 }
 
 /**
@@ -787,6 +793,8 @@ export function useLocalLogbook(): LogbookView | undefined {
  * Returns a TrashView (same shape as LogbookView).
  */
 export function useLocalTrash(): TrashView | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     const deleted = await localDb.tasks
       .filter((t) => !!t.deleted_at)
@@ -794,7 +802,7 @@ export function useLocalTrash(): TrashView | undefined {
 
     deleted.sort((a, b) => (b.deleted_at ?? '').localeCompare(a.deleted_at ?? ''))
 
-    const enriched = await enrichTasks(deleted)
+    const enriched = await enrichTasks(deleted, today)
     const dateMap = new Map<string, Task[]>()
     for (const t of enriched) {
       const dateKey = ownerDateOf(t.deleted_at ?? '')
@@ -805,7 +813,7 @@ export function useLocalTrash(): TrashView | undefined {
     const groups = [...dateMap.entries()].map(([date, groupTasks]) => ({ date, tasks: groupTasks }))
 
     return { groups, total: deleted.length } satisfies LogbookView
-  })
+  }, [today])
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1058,8 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
  * Open tasks for a specific project, sorted by sort_order_project.
  */
 export function useLocalProjectTasks(projectId: string): Task[] | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     if (!projectId) return []
 
@@ -1059,14 +1069,16 @@ export function useLocalProjectTasks(projectId: string): Task[] | undefined {
       .filter((t) => t.status === 'open' && !t.deleted_at)
       .toArray()
 
-    return sortTasks(await enrichTasks(tasks))
-  }, [projectId])
+    return sortTasks(await enrichTasks(tasks, today))
+  }, [projectId, today])
 }
 
 /**
  * Open tasks for a specific area.
  */
 export function useLocalAreaTasks(areaId: string): Task[] | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     if (!areaId) return []
 
@@ -1076,8 +1088,8 @@ export function useLocalAreaTasks(areaId: string): Task[] | undefined {
       .filter((t) => t.status === 'open' && !t.deleted_at)
       .toArray()
 
-    return sortTasks(await enrichTasks(tasks))
-  }, [areaId])
+    return sortTasks(await enrichTasks(tasks, today))
+  }, [areaId, today])
 }
 
 /**
@@ -1087,6 +1099,8 @@ export function useLocalAreaTasks(areaId: string): Task[] | undefined {
  * filter by tag id match.
  */
 export function useLocalTagTasks(tagId: string): Task[] | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     if (!tagId) return []
 
@@ -1101,8 +1115,8 @@ export function useLocalTagTasks(tagId: string): Task[] | undefined {
       )
       .toArray()
 
-    return sortTasks(await enrichTasks(tasks))
-  }, [tagId])
+    return sortTasks(await enrichTasks(tasks, today))
+  }, [tagId, today])
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,6 +1128,8 @@ export function useLocalTagTasks(tagId: string): Task[] | undefined {
  * Mirrors the ProjectDetail shape from the server API.
  */
 export function useLocalProjectDetail(projectId: string): ProjectDetail | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     if (!projectId) return undefined
 
@@ -1140,6 +1156,7 @@ export function useLocalProjectDetail(projectId: string): ProjectDetail | undefi
     // Split open tasks by heading
     const tasksWithoutHeading = sortTasks(await enrichTasks(
       openTasks.filter((t: LocalTask) => !t.heading_id),
+      today,
     ))
 
     const headingsWithTasks: HeadingWithTasks[] = []
@@ -1147,7 +1164,7 @@ export function useLocalProjectDetail(projectId: string): ProjectDetail | undefi
       const hTasks = openTasks.filter((t: LocalTask) => t.heading_id === h.id)
       headingsWithTasks.push({
         ...stripSyncMeta(h),
-        tasks: sortTasks(await enrichTasks(hTasks)),
+        tasks: sortTasks(await enrichTasks(hTasks, today)),
       })
     }
 
@@ -1163,9 +1180,9 @@ export function useLocalProjectDetail(projectId: string): ProjectDetail | undefi
       completed_task_count: completedTasks.length,
       headings: headingsWithTasks,
       tasks_without_heading: tasksWithoutHeading,
-      completed_tasks: await enrichTasks(completedTasks),
+      completed_tasks: await enrichTasks(completedTasks, today),
     } as ProjectDetail
-  }, [projectId])
+  }, [projectId, today])
 }
 
 /**
@@ -1173,6 +1190,8 @@ export function useLocalProjectDetail(projectId: string): ProjectDetail | undefi
  * Mirrors the AreaDetail shape from the server API.
  */
 export function useLocalAreaDetail(areaId: string): AreaDetail | undefined {
+  // Owner-zone today: schedule flags re-derive at owner midnight
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     if (!areaId) return undefined
 
@@ -1222,8 +1241,8 @@ export function useLocalAreaDetail(areaId: string): AreaDetail | undefined {
       task_count: openTasks.length + completedTasks.length,
       standalone_task_count: openTasks.length,
       projects: projectsWithCounts,
-      tasks: sortTasks(await enrichTasks(openTasks)),
-      completed_tasks: await enrichTasks(completedTasks),
+      tasks: sortTasks(await enrichTasks(openTasks, today)),
+      completed_tasks: await enrichTasks(completedTasks, today),
     } as AreaDetail
-  }, [areaId])
+  }, [areaId, today])
 }
