@@ -3,16 +3,38 @@ import { localDb } from '../../db/index'
 import { formatPushFailures, pushChanges } from '../push'
 import type { SyncQueueEntry } from '../../db/schema'
 
-// Mock the API client
-vi.mock('../../api/client', () => ({
-  api: {
-    post: vi.fn(),
-  },
-}))
+// Mock the API client. ApiError is mocked too because push.ts detects
+// 413 responses with instanceof.
+vi.mock('../../api/client', () => {
+  class ApiError extends Error {
+    status: number
 
-import { api } from '../../api/client'
+    constructor(status: number, message: string) {
+      super(message)
+      this.name = 'ApiError'
+      this.status = status
+    }
+  }
+  return {
+    ApiError,
+    api: {
+      post: vi.fn(),
+    },
+  }
+})
+
+import { ApiError, api } from '../../api/client'
 
 const mockPost = vi.mocked(api.post)
+
+// Resolve a push request with one 'applied' result per sent change.
+const appliedFor = (body: unknown) => {
+  const changes = (body as { changes: Array<{ entity_id: string }> }).changes
+  return { results: changes.map((change) => ({ entity_id: change.entity_id, status: 'applied' })) }
+}
+
+const sizesOfCalls = () =>
+  mockPost.mock.calls.map((call) => (call[1] as { changes: unknown[] }).changes.length)
 
 async function clearDb() {
   await Promise.all(localDb.tables.map((t) => t.clear()))
@@ -37,6 +59,7 @@ describe('pushChanges', () => {
   beforeEach(async () => {
     await clearDb()
     vi.clearAllMocks()
+    mockPost.mockReset()
   })
 
   test('returns 0 and does not call API when queue is empty', async () => {
@@ -277,5 +300,166 @@ describe('pushChanges', () => {
     // Snapshots of other entities are untouched.
     expect(await localDb.skippedSnapshots.get(['task', 'task-other'])).toBeDefined()
     expect(await localDb.syncQueue.count()).toBe(0)
+  })
+
+  test('sends at most 100 changes per request', async () => {
+    for (let i = 1; i <= 250; i++) {
+      await addQueueEntry({ entityId: `task-${i}` })
+    }
+    mockPost.mockImplementation(async (_path: string, body: unknown) => appliedFor(body))
+
+    const summary = await pushChanges('device-1')
+
+    expect(summary.processedCount).toBe(250)
+    expect(mockPost).toHaveBeenCalledTimes(3)
+    expect(sizesOfCalls()).toEqual([100, 100, 50])
+
+    const first = (mockPost.mock.calls[0][1] as { changes: Array<{ entity_id: string }> }).changes
+    const second = (mockPost.mock.calls[1][1] as { changes: Array<{ entity_id: string }> }).changes
+    const third = (mockPost.mock.calls[2][1] as { changes: Array<{ entity_id: string }> }).changes
+    expect(first[0].entity_id).toBe('task-1')
+    expect(first[99].entity_id).toBe('task-100')
+    expect(second[0].entity_id).toBe('task-101')
+    expect(third[49].entity_id).toBe('task-250')
+    expect(await localDb.syncQueue.count()).toBe(0)
+  })
+
+  test('halves the batch on 413', async () => {
+    for (let i = 1; i <= 100; i++) {
+      await addQueueEntry({ entityId: `task-${i}` })
+    }
+    mockPost
+      .mockRejectedValueOnce(new ApiError(413, 'request entity too large'))
+      .mockImplementation(async (_path: string, body: unknown) => appliedFor(body))
+
+    const summary = await pushChanges('device-1')
+
+    expect(mockPost).toHaveBeenCalledTimes(3)
+    expect(sizesOfCalls()).toEqual([100, 50, 50])
+    expect(summary.processedCount).toBe(100)
+    expect(await localDb.syncQueue.count()).toBe(0)
+  })
+
+  test('marks a single oversized change TOO_LARGE', async () => {
+    await addQueueEntry({ entityId: 'task-huge' })
+    await addQueueEntry({ entityId: 'task-small' })
+    mockPost
+      .mockRejectedValueOnce(new ApiError(413, 'request entity too large'))
+      .mockRejectedValueOnce(new ApiError(413, 'request entity too large'))
+      .mockImplementation(async (_path: string, body: unknown) => appliedFor(body))
+
+    const summary = await pushChanges('device-1')
+
+    expect(mockPost).toHaveBeenCalledTimes(3)
+    expect(sizesOfCalls()).toEqual([2, 1, 1])
+    expect(summary.processedCount).toBe(1)
+    expect(summary.stuckCount).toBe(1)
+
+    const remaining = await localDb.syncQueue.toArray()
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0].entityId).toBe('task-huge')
+    expect(remaining[0].state).toBe('stuck')
+    expect(remaining[0].errorCode).toBe('TOO_LARGE')
+    expect(remaining[0].errorMessage).toBe('change is larger than the 10 MiB request limit')
+  })
+
+  test('holds later changes of a stuck entity', async () => {
+    await addQueueEntry({
+      entityId: 'task-a',
+      state: 'stuck',
+      errorCode: 'VALIDATION',
+      errorMessage: 'invalid field title',
+    })
+    await addQueueEntry({ entityId: 'task-a', action: 'update', data: { title: 'A2' } })
+    await addQueueEntry({ entityId: 'task-b' })
+    mockPost.mockImplementation(async (_path: string, body: unknown) => appliedFor(body))
+
+    const summary = await pushChanges('device-1')
+
+    expect(mockPost).toHaveBeenCalledTimes(1)
+    const body = mockPost.mock.calls[0][1] as { changes: Array<{ entity_id: string }> }
+    expect(body.changes.map((change) => change.entity_id)).toEqual(['task-b'])
+    expect(summary.processedCount).toBe(1)
+
+    const remaining = await localDb.syncQueue.toArray()
+    expect(remaining.map((entry) => entry.entityId).sort()).toEqual(['task-a', 'task-a'])
+  })
+
+  test('holds a child behind a stuck parent create', async () => {
+    await addQueueEntry({
+      entityId: 'task-t',
+      entity: 'task',
+      action: 'create',
+      state: 'stuck',
+      errorCode: 'VALIDATION',
+      errorMessage: 'invalid field title',
+    })
+    await addQueueEntry({
+      entityId: 'sched-s',
+      entity: 'schedule',
+      action: 'create',
+      data: { task_id: 'task-t' },
+    })
+
+    const first = await pushChanges('device-1')
+    expect(mockPost).not.toHaveBeenCalled()
+    expect(first.processedCount).toBe(0)
+    expect(await localDb.syncQueue.count()).toBe(2)
+
+    // The create is repaired and applied by a later push; the child follows it.
+    const tEntry = (await localDb.syncQueue.toArray()).find((entry) => entry.entityId === 'task-t')
+    if (tEntry?.id === undefined) throw new Error('task-t entry missing')
+    await localDb.syncQueue.update(tEntry.id, { state: 'pending' })
+
+    mockPost.mockImplementation(async (_path: string, body: unknown) => appliedFor(body))
+    const second = await pushChanges('device-1')
+
+    expect(mockPost).toHaveBeenCalledTimes(1)
+    const body = mockPost.mock.calls[0][1] as { changes: Array<{ entity_id: string }> }
+    expect(body.changes.map((change) => change.entity_id)).toEqual(['task-t', 'sched-s'])
+    expect(second.processedCount).toBe(2)
+    expect(await localDb.syncQueue.count()).toBe(0)
+  })
+
+  test('sends parent create and child in one request in order', async () => {
+    // The child has the older createdAt, but the create entered the queue
+    // first (lower id): queue order wins and the create is sent first.
+    await addQueueEntry({
+      entityId: 'task-t',
+      entity: 'task',
+      action: 'create',
+      createdAt: '2024-01-02T00:00:00.000Z',
+    })
+    await addQueueEntry({
+      entityId: 'sched-s',
+      entity: 'schedule',
+      action: 'create',
+      data: { task_id: 'task-t' },
+      createdAt: '2024-01-01T00:00:00.000Z',
+    })
+    mockPost.mockImplementation(async (_path: string, body: unknown) => appliedFor(body))
+
+    const summary = await pushChanges('device-1')
+
+    expect(mockPost).toHaveBeenCalledTimes(1)
+    const body = mockPost.mock.calls[0][1] as { changes: Array<{ entity_id: string }> }
+    expect(body.changes.map((change) => change.entity_id)).toEqual(['task-t', 'sched-s'])
+    expect(summary.processedCount).toBe(2)
+    expect(await localDb.syncQueue.count()).toBe(0)
+  })
+
+  test('stops the push on a non-413 error and keeps later entries pending', async () => {
+    for (let i = 1; i <= 150; i++) {
+      await addQueueEntry({ entityId: `task-${i}` })
+    }
+    mockPost.mockRejectedValueOnce(new ApiError(401, 'unauthorized'))
+
+    await expect(pushChanges('device-1')).rejects.toMatchObject({ status: 401 })
+
+    expect(mockPost).toHaveBeenCalledTimes(1)
+    expect(sizesOfCalls()).toEqual([100])
+    const remaining = await localDb.syncQueue.toArray()
+    expect(remaining).toHaveLength(150)
+    expect(remaining.every((entry) => entry.state === undefined || entry.state === 'pending')).toBe(true)
   })
 })

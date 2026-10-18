@@ -1,4 +1,4 @@
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import { localDb } from '../db/index'
 import type { SyncEntity, SyncErrorCode, SyncQueueEntry } from '../db/schema'
 
@@ -50,6 +50,9 @@ export function isPermanent(code: SyncErrorCode | undefined): boolean {
 /** Consecutive INTERNAL failures after which an entry becomes visible as stuck. */
 export const INTERNAL_STUCK_THRESHOLD = 5
 
+/** Maximum number of changes sent in one push request. */
+export const PUSH_BATCH_SIZE = 100
+
 function isSuccess(result: PushResult): boolean {
   return result.status === 'applied' || result.status === 'conflict_resolved'
 }
@@ -62,8 +65,110 @@ function isPermanentlyStuck(entry: SyncQueueEntry): boolean {
   return entry.state === 'stuck' && isPermanent(entry.errorCode)
 }
 
+/** A stuck entry of any code except INTERNAL blocks later entries of its entity. */
+function blocksLaterEntries(entry: SyncQueueEntry): boolean {
+  return entry.state === 'stuck' && entry.errorCode !== 'INTERNAL'
+}
+
 async function countStuckEntries(): Promise<number> {
   return localDb.syncQueue.filter((entry) => entry.state === 'stuck').count()
+}
+
+function queueEntryKey(entity: SyncEntity, entityId: string): string {
+  return `${entity}+${entityId}`
+}
+
+/** Entities whose creates live under a parent task. */
+const TASK_CHILD_ENTITIES: ReadonlySet<SyncEntity> = new Set([
+  'schedule',
+  'reminder',
+  'checklistItem',
+  'attachment',
+  'repeatRule',
+])
+
+interface ParentRef {
+  entity: 'task' | 'project'
+  entityId: string
+}
+
+/** The parent whose create must be pushed before this child entry. */
+function parentRefOf(entry: SyncQueueEntry): ParentRef | null {
+  const data = entry.data ?? {}
+  if (entry.entity === 'heading') {
+    const projectId = data.project_id
+    return typeof projectId === 'string' ? { entity: 'project', entityId: projectId } : null
+  }
+  if (TASK_CHILD_ENTITIES.has(entry.entity)) {
+    const taskId = data.task_id
+    return typeof taskId === 'string' ? { entity: 'task', entityId: taskId } : null
+  }
+  return null
+}
+
+/**
+ * The child may be pushed when some queued create of its parent is healthy
+ * and has been selected earlier in this selection (lower id, already picked).
+ * A stuck create (permanently or via INTERNAL) holds all of its children.
+ */
+function parentCreateSelected(
+  parent: ParentRef,
+  child: SyncQueueEntry,
+  createsByEntity: Map<string, SyncQueueEntry[]>,
+  selectedIds: Set<number>,
+): boolean {
+  const creates = createsByEntity.get(queueEntryKey(parent.entity, parent.entityId))
+  // No queued create: the parent already exists on the server.
+  if (!creates || creates.length === 0) return true
+
+  return creates.some(
+    (create) =>
+      create.state !== 'stuck' &&
+      create.id !== undefined &&
+      child.id !== undefined &&
+      create.id < child.id &&
+      selectedIds.has(create.id),
+  )
+}
+
+/**
+ * Pick the entries that may be pushed now, preserving queue order (input is
+ * id ascending):
+ * - permanently stuck entries are never resent;
+ * - a later entry of an entity with an earlier stuck (non-INTERNAL) entry
+ *   waits, so a stuck change is never overtaken by a later change of the
+ *   same entity;
+ * - a child waits until its parent's queued create is selected before it.
+ */
+export function selectPushable(entries: SyncQueueEntry[]): SyncQueueEntry[] {
+  const createsByEntity = new Map<string, SyncQueueEntry[]>()
+  for (const entry of entries) {
+    if (entry.action !== 'create') continue
+    const key = queueEntryKey(entry.entity, entry.entityId)
+    const list = createsByEntity.get(key)
+    if (list) list.push(entry)
+    else createsByEntity.set(key, [entry])
+  }
+
+  const selected: SyncQueueEntry[] = []
+  const selectedIds = new Set<number>()
+  const blockedEntities = new Set<string>()
+
+  for (const entry of entries) {
+    const key = queueEntryKey(entry.entity, entry.entityId)
+
+    if (blocksLaterEntries(entry)) blockedEntities.add(key)
+    if (isPermanentlyStuck(entry)) continue
+    if (blockedEntities.has(key)) continue
+
+    const parent = parentRefOf(entry)
+    if (parent && !parentCreateSelected(parent, entry, createsByEntity, selectedIds)) continue
+
+    selected.push(entry)
+    if (entry.id !== undefined) selectedIds.add(entry.id)
+  }
+
+  return selected
 }
 
 function summarizeFailures(results: PushResult[]): PushFailure[] {
@@ -125,7 +230,7 @@ async function clearDrainedSnapshots(
   for (const entry of allEntries) {
     if (entry.id === undefined || !removed.has(entry.id)) continue
 
-    const key = `${entry.entity}+${entry.entityId}`
+    const key = queueEntryKey(entry.entity, entry.entityId)
     if (checked.has(key)) continue
     checked.add(key)
 
@@ -146,9 +251,20 @@ async function clearDrainedSnapshots(
   }
 }
 
+function toClientChange(entry: SyncQueueEntry): ClientChange {
+  return {
+    entity: entry.entity,
+    entity_id: entry.entityId,
+    action: entry.action,
+    fields: entry.fields,
+    data: entry.data,
+    client_updated_at: entry.clientUpdatedAt,
+  }
+}
+
 export async function pushChanges(deviceId: string): Promise<PushSummary> {
-  const allEntries = await localDb.syncQueue.orderBy('createdAt').toArray()
-  const entries = allEntries.filter((entry) => !isPermanentlyStuck(entry))
+  const allEntries = await localDb.syncQueue.orderBy('id').toArray()
+  const entries = selectPushable(allEntries)
 
   if (entries.length === 0) {
     return {
@@ -158,72 +274,110 @@ export async function pushChanges(deviceId: string): Promise<PushSummary> {
     }
   }
 
-  const changes: ClientChange[] = entries.map((entry: SyncQueueEntry) => ({
-    entity: entry.entity,
-    entity_id: entry.entityId,
-    action: entry.action,
-    fields: entry.fields,
-    data: entry.data,
-    client_updated_at: entry.clientUpdatedAt,
-  }))
-
-  const response = await api.post<PushResponse>('/sync/push', {
-    device_id: deviceId,
-    changes,
-  })
+  let processedCount = 0
+  const failures: PushFailure[] = []
+  const removedIds: number[] = []
 
   // The server returns one result per sent change, in request order:
   // result i belongs to sent entry i.
-  const idsToRemove: number[] = []
-  const entryUpdates: Array<{ id: number; update: Partial<SyncQueueEntry> }> = []
+  const applyResults = async (batch: SyncQueueEntry[], response: PushResponse): Promise<void> => {
+    const idsToRemove: number[] = []
+    const entryUpdates: Array<{ id: number; update: Partial<SyncQueueEntry> }> = []
 
-  for (const [index, entry] of entries.entries()) {
-    const result: PushResult | undefined = response.results[index]
-    if (entry.id === undefined || result === undefined) continue
+    for (const [index, entry] of batch.entries()) {
+      const result: PushResult | undefined = response.results[index]
+      if (entry.id === undefined || result === undefined) continue
 
-    if (isSuccess(result)) {
-      idsToRemove.push(entry.id)
-      continue
+      if (isSuccess(result)) {
+        idsToRemove.push(entry.id)
+        continue
+      }
+
+      if (result.status !== 'error') continue
+
+      if (isPermanent(result.code)) {
+        // Retrying the same change can never succeed: keep it, but make the
+        // problem visible instead of silently retrying forever.
+        entryUpdates.push({
+          id: entry.id,
+          update: {
+            state: 'stuck',
+            errorCode: result.code,
+            errorMessage: result.error ?? 'Unknown sync error',
+          },
+        })
+        continue
+      }
+
+      // INTERNAL or missing code: transient, keep auto-retrying but count it.
+      const internalFailures = (entry.internalFailures ?? 0) + 1
+      const update: Partial<SyncQueueEntry> = {
+        internalFailures,
+        state: internalFailures >= INTERNAL_STUCK_THRESHOLD ? 'stuck' : 'pending',
+        errorMessage: result.error ?? 'Unknown sync error',
+      }
+      if (result.code) update.errorCode = result.code
+      entryUpdates.push({ id: entry.id, update })
     }
 
-    if (result.status !== 'error') continue
+    if (idsToRemove.length > 0) {
+      await localDb.syncQueue.bulkDelete(idsToRemove)
+    }
+    for (const { id, update } of entryUpdates) {
+      await localDb.syncQueue.update(id, update)
+    }
 
-    if (isPermanent(result.code)) {
-      // Retrying the same change can never succeed: keep it, but make the
-      // problem visible instead of silently retrying forever.
-      entryUpdates.push({
-        id: entry.id,
-        update: {
-          state: 'stuck',
-          errorCode: result.code,
-          errorMessage: result.error ?? 'Unknown sync error',
-        },
+    processedCount += idsToRemove.length
+    removedIds.push(...idsToRemove)
+    failures.push(...summarizeFailures(response.results))
+  }
+
+  // Send one batch per request. On 413, retry the same entries in halves;
+  // a single entry that still overflows is permanently stuck. Any other
+  // failure stops the whole push: remaining entries stay pending.
+  const sendBatch = async (batch: SyncQueueEntry[]): Promise<void> => {
+    let response: PushResponse
+    try {
+      response = await api.post<PushResponse>('/sync/push', {
+        device_id: deviceId,
+        changes: batch.map(toClientChange),
       })
-      continue
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 413) {
+        if (batch.length === 1) {
+          const entry = batch[0]
+          if (entry.id !== undefined) {
+            await localDb.syncQueue.update(entry.id, {
+              state: 'stuck',
+              errorCode: 'TOO_LARGE',
+              errorMessage: 'change is larger than the 10 MiB request limit',
+            })
+          }
+          return
+        }
+        const half = Math.max(1, Math.floor(batch.length / 2))
+        for (let start = 0; start < batch.length; start += half) {
+          await sendBatch(batch.slice(start, start + half))
+        }
+        return
+      }
+      throw error
     }
 
-    // INTERNAL or missing code: transient, keep auto-retrying but count it.
-    const internalFailures = (entry.internalFailures ?? 0) + 1
-    const update: Partial<SyncQueueEntry> = {
-      internalFailures,
-      state: internalFailures >= INTERNAL_STUCK_THRESHOLD ? 'stuck' : 'pending',
-      errorMessage: result.error ?? 'Unknown sync error',
-    }
-    if (result.code) update.errorCode = result.code
-    entryUpdates.push({ id: entry.id, update })
+    await applyResults(batch, response)
   }
 
-  if (idsToRemove.length > 0) {
-    await localDb.syncQueue.bulkDelete(idsToRemove)
+  try {
+    for (let start = 0; start < entries.length; start += PUSH_BATCH_SIZE) {
+      await sendBatch(entries.slice(start, start + PUSH_BATCH_SIZE))
+    }
+  } finally {
+    await clearDrainedSnapshots(allEntries, removedIds)
   }
-  for (const { id, update } of entryUpdates) {
-    await localDb.syncQueue.update(id, update)
-  }
-  await clearDrainedSnapshots(allEntries, idsToRemove)
 
   return {
-    processedCount: idsToRemove.length,
-    failures: summarizeFailures(response.results),
+    processedCount,
+    failures,
     stuckCount: await countStuckEntries(),
   }
 }
