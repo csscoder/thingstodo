@@ -231,11 +231,11 @@ Three projects, in order. Each goes through brainstorming → spec → plan → 
 | 2 | Generic 5xx bodies, sanitized sync errors | done — `8a33208` |
 | 3 | Recover middleware, checked type assertions in sync | done — `d9fdb7c` |
 | 4 | 10 MiB request body limit (413) | done — `843ed3c` |
-| 5 | JWT: `HS256` only, `exp` and `sub` required; auth middleware tests | pending |
-| 6 | OIDC: `OIDC_ALLOWED_EMAIL`, `email_verified`, userinfo `sub` match, state token type; fake-IdP tests | pending |
-| 7 | `Secure` cookies; per-IP login limiter (10 failures / 15 min → 429) | pending |
-| 8 | Attachments: links only over JSON/sync, `os.Root` file access, script-scheme URL denylist | pending |
-| 9 | README/`.env.example`/CHANGELOG; replay audit attacks on a local server | pending |
+| 5 | JWT: `HS256` only, `exp` and `sub` required; auth middleware tests | done — `6a01bdc`, `99f4a64` |
+| 6 | OIDC: `OIDC_ALLOWED_EMAIL`, `email_verified`, userinfo `sub` match, state token type; fake-IdP tests | done — `a889ac5` |
+| 7 | `Secure` cookies; per-IP login limiter (10 failures / 15 min → 429) | done — `db26a5b` |
+| 8 | Attachments: links only over JSON/sync, `os.Root` file access, script-scheme URL denylist | done — `e335c4c`, `9458dbb` |
+| 9 | README/`.env.example`/CHANGELOG; replay audit attacks on a local server | done — `6187e86` |
 
 Verified on 2026-10-16 at `843ed3c`: `go test ./...` passes from this tree without a built frontend; `go vet ./...` clean. Frontend `npm test`: 71/71 at plan time.
 
@@ -287,7 +287,9 @@ To do:
 12. **Docs:** reconcile `docs/api.md` with code (section 3.6).
 13. **Tests:** handler tests per endpoint for validation and error shapes; MCP tool tests against a test server.
 
-### Project 3 — Built-in UI bugs and frontend tests
+### Project 3 — Built-in UI bugs and frontend tests (IN DESIGN)
+
+- **Spec:** `docs/superpowers/specs/2026-10-18-web-ui-sync-correctness-design.md` (draft). A re-check on 2026-10-18 found the UI also breaks on server changes from Project 2 (403 under the Vite proxy, stuck sync entries, Trash lost on full sync); the spec covers those server fixes and the sync-push items Project 2 deferred here.
 
 Goal: the secondary UI is correct and stops diverging from the server.
 
