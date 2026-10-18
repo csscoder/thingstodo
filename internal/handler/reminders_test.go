@@ -168,3 +168,24 @@ func TestReminderCreate_Validates(t *testing.T) {
 		t.Errorf("sync reminder rem44444 missing from list: %+v", body2.Items)
 	}
 }
+
+// TestReminderCreate_ReplayWithOtherTaskIs409 pins the parent check of the
+// idempotent replay: the same client id replayed against the same task
+// returns the stored reminder (200), but against another task it is 409
+// CONFLICT, never another task's reminder.
+func TestReminderCreate_ReplayWithOtherTaskIs409(t *testing.T) {
+	client := setupReminderRouter(t)
+	taskA := createTaskForReminders(t, client)
+	taskB := createTaskForReminders(t, client)
+
+	body := map[string]interface{}{"id": "xparRemind01", "type": "at_start", "value": 0}
+	first := client.Post("/api/tasks/"+taskA+"/reminders", body)
+	testutil.AssertStatus(t, first, http.StatusCreated)
+
+	replay := client.Post("/api/tasks/"+taskA+"/reminders", body)
+	testutil.AssertStatus(t, replay, http.StatusOK)
+
+	conflict := client.Post("/api/tasks/"+taskB+"/reminders", body)
+	testutil.AssertStatus(t, conflict, http.StatusConflict)
+	testutil.AssertJSONField(t, conflict, "code", "CONFLICT")
+}

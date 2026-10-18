@@ -48,6 +48,8 @@ func (h *ChecklistHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	// Idempotent create: a client-supplied id that already exists replays
 	// the stored entity with 200 — no write, no broadcast, no change log.
+	// The replay must target the same task: the same id under another
+	// task's URL is a 409 CONFLICT, never another task's entity.
 	if input.ID != "" {
 		existing, err := h.repo.GetByID(input.ID)
 		if err != nil {
@@ -55,6 +57,10 @@ func (h *ChecklistHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if existing != nil {
+			if existing.TaskID != taskID {
+				writeError(w, http.StatusConflict, "id already exists for another task", "CONFLICT")
+				return
+			}
 			writeJSON(w, http.StatusOK, existing)
 			return
 		}

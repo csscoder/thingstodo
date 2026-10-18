@@ -217,3 +217,24 @@ func TestChecklistCreate_UnknownTaskIs422(t *testing.T) {
 	testutil.AssertJSONField(t, resp, "code", "VALIDATION")
 	testutil.AssertJSONField(t, resp, "field", "task_id")
 }
+
+// TestScheduleCreate_ReplayWithOtherTaskIs409 pins the parent check of the
+// idempotent replay: the same client id replayed against the same task
+// returns the stored entry (200), but against another task it is 409
+// CONFLICT, never another task's entry.
+func TestScheduleCreate_ReplayWithOtherTaskIs409(t *testing.T) {
+	client := setupScheduleRouter(t)
+	taskA := createTaskForSchedule(t, client)
+	taskB := createTaskForSchedule(t, client)
+
+	body := map[string]interface{}{"id": "xparSched001", "when_date": "2031-06-01"}
+	first := client.Post("/api/tasks/"+taskA+"/schedules", body)
+	testutil.AssertStatus(t, first, http.StatusCreated)
+
+	replay := client.Post("/api/tasks/"+taskA+"/schedules", body)
+	testutil.AssertStatus(t, replay, http.StatusOK)
+
+	conflict := client.Post("/api/tasks/"+taskB+"/schedules", body)
+	testutil.AssertStatus(t, conflict, http.StatusConflict)
+	testutil.AssertJSONField(t, conflict, "code", "CONFLICT")
+}

@@ -69,6 +69,7 @@ func setupSyncRouterWithDB(t *testing.T) (*testutil.TestClient, *repository.Chan
 	client := testutil.NewTestClient(t, r)
 	return client, changeLogRepo, taskRepo, db
 }
+
 // --- Schedule <-> when_date consistency (Task 13) ---
 
 // syncPushSchedule pushes a single schedule change through /api/sync/push
@@ -847,6 +848,124 @@ func TestSyncPushCreateProjectIsIdempotent(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected exactly one project row after replay, count=%d", count)
+	}
+}
+
+// pushChildCreate pushes one child-entity create change through
+// /api/sync/push and returns its per-change result.
+func pushChildCreate(t *testing.T, client *testutil.TestClient, entity, entityID string, data map[string]interface{}) handler.SyncPushResult {
+	t.Helper()
+	body := map[string]interface{}{
+		"device_id": "dev1",
+		"changes": []map[string]interface{}{{
+			"entity":            entity,
+			"entity_id":         entityID,
+			"action":            "create",
+			"data":              data,
+			"fields":            []string{},
+			"client_updated_at": "2026-01-01T00:00:00Z",
+		}},
+	}
+	resp := client.Post("/api/sync/push", body)
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	if len(result.Results) != 1 {
+		t.Fatalf("push %s create %s: expected 1 result, got %d", entity, entityID, len(result.Results))
+	}
+	return result.Results[0]
+}
+
+// childCreateCases is the table shared by the child-create idempotency and
+// cross-parent-conflict tests: one case per child entity a client can
+// create through sync push.
+func childCreateCases() []struct {
+	name   string
+	entity string
+	id     string
+	table  string
+	data   func(taskID string) map[string]interface{}
+} {
+	return []struct {
+		name   string
+		entity string
+		id     string
+		table  string
+		data   func(taskID string) map[string]interface{}
+	}{
+		{"schedule", "schedule", "childSched01", "task_schedules", func(taskID string) map[string]interface{} {
+			return map[string]interface{}{"task_id": taskID, "when_date": "2031-06-01"}
+		}},
+		{"checklistItem", "checklistItem", "childCheck01", "checklist_items", func(taskID string) map[string]interface{} {
+			return map[string]interface{}{"task_id": taskID, "title": "Child item"}
+		}},
+		{"attachment", "attachment", "childAtt0001", "attachments", func(taskID string) map[string]interface{} {
+			return map[string]interface{}{"task_id": taskID, "type": "link", "url": "https://example.com"}
+		}},
+		{"reminder", "reminder", "childRemind1", "reminders", func(taskID string) map[string]interface{} {
+			return map[string]interface{}{"task_id": taskID, "type": "at_start", "value": 0}
+		}},
+	}
+}
+
+// TestSyncPushChildCreateIsIdempotent pins that a lost push response is
+// recovered by re-sending a child create with the same id and parent task:
+// both pushes report applied and exactly one row exists.
+func TestSyncPushChildCreateIsIdempotent(t *testing.T) {
+	for _, tc := range childCreateCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _, _, db := setupSyncRouterWithDB(t)
+			taskID := createSyncTask(t, client, "Child create idempotency", "")
+
+			first := pushChildCreate(t, client, tc.entity, tc.id, tc.data(taskID))
+			if first.Status != "applied" {
+				t.Fatalf("first create: expected status 'applied', got %q (error: %s)", first.Status, first.Error)
+			}
+
+			second := pushChildCreate(t, client, tc.entity, tc.id, tc.data(taskID))
+			if second.Status != "applied" {
+				t.Fatalf("second create: expected status 'applied', got %q (error: %s)", second.Status, second.Error)
+			}
+			if second.Error != "" {
+				t.Errorf("second create: expected no error, got %q", second.Error)
+			}
+
+			var rows int
+			if err := db.QueryRow("SELECT COUNT(*) FROM "+tc.table+" WHERE id = ?", tc.id).Scan(&rows); err != nil {
+				t.Fatalf("count %s rows: %v", tc.table, err)
+			}
+			if rows != 1 {
+				t.Errorf("expected exactly 1 row in %s for id %s, got %d", tc.table, tc.id, rows)
+			}
+		})
+	}
+}
+
+// TestSyncPushChildCreateOtherParentConflicts pins the other half of the
+// rule: the same id re-pushed under a different task is a conflict error,
+// not an applied no-op and not an internal error.
+func TestSyncPushChildCreateOtherParentConflicts(t *testing.T) {
+	for _, tc := range childCreateCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _, _, _ := setupSyncRouterWithDB(t)
+			taskA := createSyncTask(t, client, "First parent", "")
+			taskB := createSyncTask(t, client, "Second parent", "")
+
+			first := pushChildCreate(t, client, tc.entity, tc.id, tc.data(taskA))
+			if first.Status != "applied" {
+				t.Fatalf("first create: expected status 'applied', got %q (error: %s)", first.Status, first.Error)
+			}
+
+			second := pushChildCreate(t, client, tc.entity, tc.id, tc.data(taskB))
+			if second.Status != "error" {
+				t.Fatalf("cross-parent create: expected status 'error', got %q", second.Status)
+			}
+			// Task 5 adds a code field to results; then also assert
+			// code == "CONFLICT". Until then the message is the contract.
+			if !strings.Contains(second.Error, "already exists") {
+				t.Errorf("cross-parent create: expected error mentioning 'already exists', got %q", second.Error)
+			}
+		})
 	}
 }
 

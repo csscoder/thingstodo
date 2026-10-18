@@ -80,7 +80,9 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Idempotent create: a client-supplied id that already exists replays
-	// the stored entry with 200 — no write, no broadcast, no change log. It
+	// the stored entry with 200 — no write, no broadcast, no change log.
+	// The replay must target the same task: the same id under another
+	// task's URL is a 409 CONFLICT, never another task's entry. The check
 	// runs after the field validation above but before the entry-count
 	// checks below: those decide whether a NEW entry may be added, and a
 	// replayed create already happened (a retry of the 12th entry or of the
@@ -93,6 +95,10 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if existing != nil {
+			if existing.TaskID != taskID {
+				writeError(w, http.StatusConflict, "id already exists for another task", "CONFLICT")
+				return
+			}
 			writeJSON(w, http.StatusOK, existing)
 			return
 		}

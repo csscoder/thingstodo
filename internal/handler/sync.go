@@ -1163,6 +1163,17 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
 			return syncFieldError(result, field, msg)
 		}
+		// Idempotency — the client may re-push a create whose response
+		// was lost: same id under the same task is an applied no-op,
+		// same id under another task is a conflict.
+		existing, _ := h.schedules.GetByID(change.EntityID)
+		if existing != nil {
+			if existing.TaskID != taskID {
+				return syncFieldError(result, "id", "already exists for another task")
+			}
+			result.Status = "applied"
+			return result
+		}
 		if !isWhenDate(input.WhenDate) {
 			return syncFieldError(result, "when_date", "must be YYYY-MM-DD or 'someday'")
 		}
@@ -1285,6 +1296,17 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
 			return syncFieldError(result, field, msg)
 		}
+		// Idempotency — the client may re-push a create whose response
+		// was lost: same id under the same task is an applied no-op,
+		// same id under another task is a conflict.
+		existing, _ := h.checklist.GetByID(change.EntityID)
+		if existing != nil {
+			if existing.TaskID != taskID {
+				return syncFieldError(result, "id", "already exists for another task")
+			}
+			result.Status = "applied"
+			return result
+		}
 		if input.Title == "" {
 			return syncFieldError(result, "title", "title is required")
 		}
@@ -1372,6 +1394,17 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
 			return syncFieldError(result, field, msg)
 		}
+		// Idempotency — the client may re-push a create whose response
+		// was lost: same id under the same task is an applied no-op,
+		// same id under another task is a conflict.
+		existing, _ := h.attachments.GetByID(change.EntityID)
+		if existing != nil {
+			if existing.TaskID != taskID {
+				return syncFieldError(result, "id", "already exists for another task")
+			}
+			result.Status = "applied"
+			return result
+		}
 		if err := normalizeLinkInput(&input); err != nil {
 			result.Status = "error"
 			result.Error = err.Error()
@@ -1442,6 +1475,17 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 		}
 		if field, msg, ok := refFound(h.tasks.Conn(), "tasks", "task_id", "task not found", taskID); !ok {
 			return syncFieldError(result, field, msg)
+		}
+		// Idempotency — the client may re-push a create whose response
+		// was lost: same id under the same task is an applied no-op,
+		// same id under another task is a conflict.
+		existing, _ := h.reminders.GetByID(change.EntityID)
+		if existing != nil {
+			if existing.TaskID != taskID {
+				return syncFieldError(result, "id", "already exists for another task")
+			}
+			result.Status = "applied"
+			return result
 		}
 		if field, msg, ok := validateReminderCreate(&input, h.loc); !ok {
 			return syncFieldError(result, field, msg)

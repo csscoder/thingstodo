@@ -36,6 +36,7 @@ Error codes:
 | `RESERVED` | 403 | Reserved tag name |
 | `DUPLICATE_NAME` | 409 | Project/area/tag title or API token name already exists |
 | `HAS_PROJECTS` | 409 | Area still contains projects |
+| `CONFLICT` | 409 | Client-supplied `id` already stored under another parent task (child-entity creates) |
 | `CURSOR_EXPIRED` | 410 | Sync cursor purged; perform a full sync |
 | `BODY_TOO_LARGE` | 413 | Request body over the size cap |
 | `LIMIT_REACHED` | 422 | Per-view saved filter cap reached |
@@ -58,6 +59,8 @@ Exception: the route `POST /api/tasks/:id/attachments` is exempt from this middl
 
 ### Idempotent Creates
 Every create endpoint that accepts a body `id` — tasks, projects, areas, tags, headings, checklist items, schedules, reminders and link attachments — is idempotent by that id. Validation runs first; if it passes and the `id` already exists in the target table, the endpoint returns **200** with the stored entity (the same shape a GET of that entity returns). Nothing is modified on the replay: no row is written, no SSE event is broadcast and no change-log entry is recorded, so retried creates from agents, widgets or shortcuts never duplicate. A body `id` that does not exist yet is created normally with **201**.
+
+For the four task children (checklist items, schedules, reminders and link attachments) the replay must also target the same task: a stored `id` posted under a different task in the URL returns **409 Conflict** with code `CONFLICT` instead of the stored row.
 
 For schedules, the replay check runs after the field validation but before the per-task entry limits (max 12 entries, only-first-`someday`, duplicate timeless date): a retried create of an entry that already exists replays 200 even when the task is now at those limits.
 
@@ -1108,7 +1111,7 @@ Validation:
 - `start_time` requires `end_time`
 - `when_date` must be `YYYY-MM-DD` or `someday` (400 `when_date`); `start_time`/`end_time` must be `HH:MM` 24h (400 `start_time`/`end_time`); `end_time` must be after `start_time` (400 `end_time`)
 - Unknown `task_id` → 422 `VALIDATION` `task_id`
-- A create whose `id` already exists replays 200 before the entry limits above are applied (see Idempotent Creates)
+- A create whose `id` already exists replays 200 before the entry limits above are applied (see Idempotent Creates); a replay under a different task in the URL returns 409 `CONFLICT`
 
 SSE: broadcasts `task_updated`
 
@@ -1622,6 +1625,8 @@ Response (200):
 Applies changes from a client device to the server. Uses last-write-wins (LWW) conflict resolution per entity based on `updated_at` timestamps. A task update pushing `status` to `completed`, `canceled` or `wont_do` runs the same guarded finishing path as the single-task endpoints: idempotent on re-push, one repeat instance per task.
 
 Project and area `delete` changes run the same delete-to-Trash semantics as `DELETE /api/projects/:id` and `DELETE /api/areas/:id`: child/standalone tasks are trashed with a change-log entry each. An area delete that still has projects produces a per-change result with `status: "error"` and an error containing `HAS_PROJECTS`, and nothing is deleted.
+
+Child-entity creates (checklistItem, attachment, schedule, reminder) are idempotent by id: a re-pushed create with the same id and the same `task_id` reports `applied` without writing; the same id under a different `task_id` is a per-change error containing `already exists`.
 
 Request:
 ```json

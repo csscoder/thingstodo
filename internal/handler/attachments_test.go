@@ -182,6 +182,27 @@ func TestCreateAttachment_AppLinksAllowed(t *testing.T) {
 	}
 }
 
+// TestCreateAttachment_ReplayWithOtherTaskIs409 pins the parent check of
+// the idempotent replay: the same client id replayed against the same task
+// returns the stored attachment (200), but against another task it is 409
+// CONFLICT, never another task's attachment.
+func TestCreateAttachment_ReplayWithOtherTaskIs409(t *testing.T) {
+	client, _, _ := setupAttachmentsRouter(t)
+	taskA := createTaskForAttachment(t, client)
+	taskB := createTaskForAttachment(t, client)
+
+	body := map[string]interface{}{"id": "xparAtt00001", "type": "link", "title": "Spec", "url": "https://example.com"}
+	first := client.Post("/api/tasks/"+taskA+"/attachments", body)
+	testutil.AssertStatus(t, first, http.StatusCreated)
+
+	replay := client.Post("/api/tasks/"+taskA+"/attachments", body)
+	testutil.AssertStatus(t, replay, http.StatusOK)
+
+	conflict := client.Post("/api/tasks/"+taskB+"/attachments", body)
+	testutil.AssertStatus(t, conflict, http.StatusConflict)
+	testutil.AssertJSONField(t, conflict, "code", "CONFLICT")
+}
+
 func TestDownloadAttachment_TraversalBlocked(t *testing.T) {
 	client, attachmentRepo, attachmentsPath := setupAttachmentsRouter(t)
 	writeSecretDB(t, attachmentsPath)
