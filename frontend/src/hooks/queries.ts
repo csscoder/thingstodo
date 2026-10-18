@@ -874,9 +874,16 @@ export function useUpdateTaskSchedule(taskId: string) {
     mutationFn: async ({ id, data }: { id: string; data: UpdateTaskScheduleRequest }) => {
       if (id.startsWith('synth-')) {
         // Synthesized schedule — create a real one and update the task's when_date
+        const task = await localDb.tasks.get(taskId)
+        // The synth entry stands in for the task's when_date; a time without a
+        // date is a payload the server rejects, so block it before queueing.
+        const whenDate = data.when_date || task?.when_date || ''
+        if (data.start_time && !whenDate) {
+          throw new Error('Pick a date before setting a time')
+        }
         const newId = await localMutations.createSchedule({
           task_id: taskId,
-          when_date: data.when_date ?? '',
+          when_date: whenDate,
           start_time: data.start_time ?? null,
           end_time: data.end_time ?? null,
           completed: data.completed ?? false,

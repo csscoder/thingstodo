@@ -26,12 +26,15 @@ interface ScheduleEditorProps {
   onComplete?: (selectedValue: string | null) => void
 }
 
-function addMinutes(time: string, minutes: number): string {
-  const [h, m] = time.split(':').map(Number)
-  const total = h * 60 + m + minutes
-  const nh = Math.min(Math.floor(total / 60), 23)
-  const nm = total % 60
-  return `${String(nh).padStart(2, '0')}:${String(nm).padStart(2, '0')}`
+/** Default end time for a start time plus the default gap.
+ *  Returns null when the end would fall on the next day (past 23:59),
+ *  so callers skip setting an end time instead of clamping it before the start. */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper tested directly
+export function defaultEndTime(start: string, gapMinutes: number): string | null {
+  const [h, m] = start.split(':').map(Number)
+  const total = h * 60 + m + gapMinutes
+  if (total > 23 * 60 + 59) return null
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
 }
 
 export function ScheduleEditor({
@@ -212,12 +215,12 @@ export function ScheduleEditor({
     if (time) {
       // If existing end time is now <= new start time, apply default gap
       const clearEnd = entry.end_time && entry.end_time <= time
-      const endTime = clearEnd ? addMinutes(time, defaultTimeGap) : undefined
+      const endTime = clearEnd ? defaultEndTime(time, defaultTimeGap) : undefined
       updateSchedule.mutate({
         id: entry.id,
         data: clearEnd
           ? { start_time: time, end_time: endTime }
-          : { start_time: time, end_time: entry.end_time ?? addMinutes(time, defaultTimeGap) },
+          : { start_time: time, end_time: entry.end_time ?? defaultEndTime(time, defaultTimeGap) },
       })
       // Jump to end time input
       endTimeRefs.current[entry.id]?.focus()
@@ -245,7 +248,9 @@ export function ScheduleEditor({
   /** User left end-time empty → apply default gap from start */
   function handleEndTimeBlurEmpty(entry: TaskSchedule) {
     if (entry.start_time && !entry.end_time) {
-      const endTime = addMinutes(entry.start_time, defaultTimeGap)
+      const endTime = defaultEndTime(entry.start_time, defaultTimeGap)
+      // End would fall on the next day — leave it unset instead of clamping
+      if (endTime === null) return
       updateSchedule.mutate({
         id: entry.id,
         data: { end_time: endTime },

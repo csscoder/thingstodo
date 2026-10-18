@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { useInbox, useCreateTask, useCompleteTask } from '../queries'
+import { useInbox, useCreateTask, useCompleteTask, useUpdateTaskSchedule } from '../queries'
 import { localDb } from '../../db'
 
 // Mock audio to avoid AudioContext errors in jsdom
@@ -206,5 +206,80 @@ describe('useCompleteTask', () => {
     expect(entry).toBeDefined()
     expect(entry?.entity).toBe('task')
     expect(entry?.action).toBe('update')
+  })
+})
+
+describe('useUpdateTaskSchedule', () => {
+  const localTaskBase = {
+    title: 'Schedule task',
+    status: 'open',
+    notes: '',
+    when_date: null,
+    high_priority: false,
+    deadline: null,
+    project_id: null,
+    area_id: null,
+    heading_id: null,
+    sort_order_today: 0,
+    sort_order_project: 0,
+    sort_order_heading: 0,
+    completed_at: null,
+    canceled_at: null,
+    deleted_at: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    tags: [],
+    checklist_count: 0,
+    checklist_done: 0,
+    has_notes: false,
+    has_links: false,
+    has_files: false,
+    has_repeat_rule: false,
+    has_reminders: false,
+    first_reminder_type: null,
+    first_reminder_value: null,
+    first_reminder_exact_at: null,
+    project_name: null,
+    area_name: null,
+    first_schedule_time: null,
+    first_schedule_end_time: null,
+    first_schedule_completed: undefined,
+    schedule_entry_id: null,
+    past_schedule_count: undefined,
+    has_actionable_schedules: undefined,
+    all_today_schedules_completed: undefined,
+    _syncStatus: 'synced',
+    _localUpdatedAt: '2026-01-01T00:00:00Z',
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await localDb.tasks.clear()
+    await localDb.syncQueue.clear()
+    await localDb.schedules.clear()
+  })
+
+  it('does not create a synthetic schedule without a date', async () => {
+    const { Wrapper } = createWrapper()
+
+    // Task with no when_date and no schedule rows
+    await localDb.tasks.put({ ...localTaskBase, id: 'task-3' })
+
+    const { result } = renderHook(() => useUpdateTaskSchedule('task-3'), { wrapper: Wrapper })
+
+    await act(async () => {
+      result.current.mutate({ id: 'synth-task-3', data: { start_time: '09:00' } })
+    })
+
+    await waitFor(() => {
+      expect(result.current.isError).toBe(true)
+    })
+    expect(result.current.error).toEqual(new Error('Pick a date before setting a time'))
+
+    // Nothing may be written or queued
+    const schedules = await localDb.schedules.toArray()
+    expect(schedules).toHaveLength(0)
+    const queue = await localDb.syncQueue.toArray()
+    expect(queue).toHaveLength(0)
   })
 })

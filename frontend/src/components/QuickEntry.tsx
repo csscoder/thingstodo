@@ -24,6 +24,7 @@ export function QuickEntry() {
   const [showNotes, setShowNotes] = useState(false)
   const [showWhen, setShowWhen] = useState(false)
   const [showDeadline, setShowDeadline] = useState(false)
+  const [dateError, setDateError] = useState<string | null>(null)
 
   // Tag and area/project fields
   const [tagIds, setTagIds] = useState<string[]>([])
@@ -57,6 +58,7 @@ export function QuickEntry() {
     setShowNotes(false)
     setShowWhen(false)
     setShowDeadline(false)
+    setDateError(null)
     setTagIds([])
     setProjectId(null)
     setAreaId(null)
@@ -101,6 +103,12 @@ export function QuickEntry() {
   const handleSubmit = useCallback(async () => {
     const raw = title.trim()
     if (!raw) return
+
+    // The server rejects a deadline earlier than the when date — block it here
+    if (whenDate && deadline && deadline < whenDate) {
+      setDateError("Deadline can't be before the start date")
+      return
+    }
 
     const { title: parsedTitle, tagIds: parsedTagIds, projectId: parsedProjectId, areaId: parsedAreaId } = await resolveTags(raw)
     if (!parsedTitle) return
@@ -175,11 +183,13 @@ export function QuickEntry() {
           whenDate={whenDate}
           onWhenDateChange={(date) => {
             setWhenDate(date ?? '')
+            setDateError(null)
             if (!date) setShowWhen(false)
           }}
           deadline={deadline}
           onDeadlineChange={(date) => {
             setDeadline(date ?? '')
+            setDateError(null)
             if (!date) setShowDeadline(false)
           }}
           highPriority={highPriority}
@@ -202,6 +212,11 @@ export function QuickEntry() {
           onToggleArea={setShowArea}
         />
       </div>
+      {dateError && (
+        <p className="border-t border-neutral-200 px-4 py-2 pl-[48px] text-xs text-red-500 dark:border-neutral-700">
+          {dateError}
+        </p>
+      )}
     </div>
   )
 }
