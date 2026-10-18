@@ -170,6 +170,16 @@ export const handlers = [
     return HttpResponse.json({ user: { id: 'user-1', username: 'testuser' } })
   }),
 
+  // Auth config (no timezone: tests keep the browser zone)
+  http.get('/api/auth/config', () => {
+    return HttpResponse.json({ auth_mode: 'builtin' })
+  }),
+
+  // Saved filters
+  http.get('/api/saved-filters', () => {
+    return HttpResponse.json({ saved_filters: [] })
+  }),
+
   // SSE (return empty to avoid connection errors in tests)
   http.get('/api/events', () => {
     return new HttpResponse(null, { status: 200 })
