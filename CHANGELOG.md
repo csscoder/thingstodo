@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- **MCP server served from the Go binary** — `/mcp` now speaks Streamable HTTP (stateless) with the same tokens as the REST API; every tool call dispatches in-process to the REST router, so validation, recurring-task behavior and error codes are identical. Adds `query_tasks` (full filter, sort and pagination set), repeat-rule, reminder, settings and counts tools — 54 tools in total
+
+### Removed
+- **TypeScript MCP server** — the standalone `mcp/` npm package is gone; point Hermes and other MCP clients at `https://<host>/mcp` by URL instead
+
 ### Security
 
 - **Attachment path traversal** — attachment creates over JSON and sync accept only `link`; files are attached solely via multipart upload, and download/delete resolve paths through `os.Root` so `../` names cannot escape the attachments directory

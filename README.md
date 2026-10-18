@@ -150,47 +150,25 @@ No env vars required — ntfy is configured entirely from the Settings UI:
 
 Use the **Send Test** button to verify your setup.
 
-## MCP Server (Claude Code Integration)
+## MCP Server (Agent Integration)
 
-ThingsToDo includes an MCP (Model Context Protocol) server that lets you manage tasks directly from Claude Code or any MCP-compatible client. The server exposes 40+ tools covering views, tasks, projects, areas, tags, headings, checklists, attachments, and schedules.
+ThingsToDo serves an MCP (Model Context Protocol) server directly from the Go binary at `/mcp`, over Streamable HTTP. It exposes 54 tools covering views, task queries, tasks, projects, areas, tags, headings, checklists, attachments, schedules, repeat rules, reminders, settings, and counts. Authentication is shared with the REST API: pass a named API token or the `API_KEY` as a Bearer token.
 
-### Setup
+### Hermes Agent config
 
-1. Set an `API_KEY` in your ThingsToDo environment
-2. Build the MCP server:
-   ```sh
-   cd mcp && npm install && npm run build
-   ```
-3. Add to your Claude Code MCP config (e.g. `~/.claude/settings.json`):
-   ```json
-   {
-     "mcpServers": {
-       "thingstodo": {
-         "command": "node",
-         "args": ["/path/to/thingstodo/mcp/dist/index.js"],
-         "env": {
-           "THINGSTODO_URL": "http://localhost:2999",
-           "THINGSTODO_API_KEY": "your-api-key"
-         }
-       }
-     }
-   }
-   ```
+```yaml
+mcp_servers:
+  thingstodo:
+    url: https://<host>/mcp
+    headers:
+      Authorization: "Bearer ttd_…"
+```
 
-### Available Tools
+### Other MCP clients
 
-| Domain | Tools | Description |
-|---|---|---|
-| Views | `get_today`, `get_upcoming`, `get_inbox`, `get_anytime`, `get_someday`, `get_logbook` | Read task views |
-| Tasks | `search_tasks`, `get_task`, `create_task`, `update_task`, `complete_task`, `cancel_task`, `wontdo_task`, `reopen_task`, `delete_task`, `purge_task`, `restore_task` | Full task CRUD |
-| Bulk | `bulk_action` | Apply actions to multiple tasks |
-| Projects | `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project` | Manage projects |
-| Areas | `list_areas`, `get_area`, `create_area`, `update_area`, `delete_area` | Manage areas |
-| Tags | `list_tags`, `create_tag`, `update_tag`, `delete_tag` | Manage tags |
-| Headings | `list_headings`, `create_heading`, `update_heading`, `delete_heading` | Project sub-sections |
-| Checklists | `add_checklist_item`, `update_checklist_item`, `delete_checklist_item` | Task sub-items |
-| Attachments | `add_link`, `delete_attachment` | Link management |
-| Schedules | `add_schedule`, `update_schedule`, `delete_schedule` | Multi-date scheduling |
+Any MCP client that speaks Streamable HTTP can connect to `https://<host>/mcp` with an `Authorization: Bearer <token>` header. The server is stateless: no session setup is required. Every tool call runs through the same code path as the REST API, so validation, recurring-task behavior and error codes are identical.
+
+Tool groups: views (`get_today`, `get_upcoming`, `get_inbox`, `get_anytime`, `get_someday`, `get_logbook`, `get_counts`), queries (`search_tasks`, `query_tasks`), tasks (`get_task`, `create_task`, `update_task`, `complete_task`, `cancel_task`, `wontdo_task`, `reopen_task`, `delete_task`, `purge_task`, `restore_task`, `bulk_action`), projects, areas, tags, headings, checklists, attachments (links), schedules, repeat rules, reminders, and settings. Ask your client to list tools for the current set with full descriptions.
 
 ## Development
 

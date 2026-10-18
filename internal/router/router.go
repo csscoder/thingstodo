@@ -14,6 +14,7 @@ import (
 	"github.com/collinjanssen/thingstodo/internal/config"
 	"github.com/collinjanssen/thingstodo/internal/frontend"
 	"github.com/collinjanssen/thingstodo/internal/handler"
+	"github.com/collinjanssen/thingstodo/internal/mcpserver"
 	mw "github.com/collinjanssen/thingstodo/internal/middleware"
 	"github.com/collinjanssen/thingstodo/internal/push"
 	"github.com/collinjanssen/thingstodo/internal/recurrence"
@@ -90,6 +91,30 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 		}
 	}
 
+	// Auth middleware shared by the /api and /mcp route groups: the same
+	// tokens and sessions authenticate MCP clients (spec B) and REST
+	// clients alike.
+	authMW := mw.Auth(cfg, func() (string, error) {
+		u, err := userRepo.GetFirst()
+		if err != nil {
+			return "", err
+		}
+		if u == nil {
+			return "", nil
+		}
+		return u.ID, nil
+	}, func(id string) (bool, error) {
+		u, err := userRepo.GetByID(id)
+		return u != nil, err
+	}, func(token string) (string, bool) {
+		id, ok, err := tokenRepo.Lookup(token)
+		if err != nil {
+			log.Printf("ERROR api token lookup: %v", err)
+			return "", false
+		}
+		return id, ok
+	}, tokenRepo.TouchLastUsed)
+
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -122,26 +147,7 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 
 		// Protected routes
 		r.Group(func(r chi.Router) {
-			r.Use(mw.Auth(cfg, func() (string, error) {
-				u, err := userRepo.GetFirst()
-				if err != nil {
-					return "", err
-				}
-				if u == nil {
-					return "", nil
-				}
-				return u.ID, nil
-			}, func(id string) (bool, error) {
-				u, err := userRepo.GetByID(id)
-				return u != nil, err
-			}, func(token string) (string, bool) {
-				id, ok, err := tokenRepo.Lookup(token)
-				if err != nil {
-					log.Printf("ERROR api token lookup: %v", err)
-					return "", false
-				}
-				return id, ok
-			}, tokenRepo.TouchLastUsed))
+			r.Use(authMW)
 
 			// SSE events
 			r.Get("/events", eventH.Stream)
@@ -268,18 +274,32 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 		})
 	})
 
-	// /mcp serves the Streamable HTTP MCP handler (spec B); the
-	// handler itself is mounted in a later task. Its CORS policy (A2) is
-	// the same as /api's, so agent and widget clients face one
-	// cross-origin policy. The placeholder 404 route exists because chi
-	// binds a subrouter's middleware chain only once it has a route —
-	// without it CORS would never run on /mcp. Task 20 replaces the
-	// placeholder with the real handler.
+	// /mcp serves the MCP server (spec B) over Streamable HTTP, stateless
+	// per MCP revision 2026-07-28. Its CORS policy (A2) is the same as
+	// /api's, so agent and widget clients face one cross-origin policy;
+	// CORS answers preflights before auth, so cross-origin clients can
+	// negotiate. Every tool call is dispatched in-process to this same
+	// router, carrying the caller's credentials. Only POST (and GET,
+	// which the stateless handler answers with 405) are routed: anything
+	// else falls through to chi's 404 instead of reaching the SDK.
+	root := r
 	r.Route("/mcp", func(r chi.Router) {
 		r.Use(mw.CORS(cfg.AuthMode != "none"))
-		r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Group(func(r chi.Router) {
+			r.Use(authMW)
+			mcpHandler := mcpserver.New(root, cfg.AuthProxyHeader)
+			r.Method(http.MethodPost, "/*", mcpHandler)
+			r.Method(http.MethodGet, "/*", mcpHandler)
+		})
+		// Methods the MCP handler does not serve keep the JSON 404 the
+		// Task 18 placeholder answered for every request (and which the
+		// router tests pin): no CORS-off preflight handling, no fall
+		// through to the SPA, no 405 with an Allow header.
+		mcpNotFound := func(w http.ResponseWriter, _ *http.Request) {
 			mw.WriteError(w, http.StatusNotFound, "not found", "NOT_FOUND", "")
-		}))
+		}
+		r.NotFound(mcpNotFound)
+		r.MethodNotAllowed(mcpNotFound)
 	})
 
 	// Serve embedded frontend static files with SPA fallback
