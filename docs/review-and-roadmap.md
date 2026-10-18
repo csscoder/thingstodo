@@ -217,7 +217,7 @@ Things' URL scheme, Shortcuts and AppleScript are the prior art for an external 
 
 ## 7. Roadmap
 
-Three projects, in order. Each goes through brainstorming → spec → plan → implementation with review. Status: Project 1 is done; the original Projects 2 and 3 were merged and executed as Project 2 (the 2026-10-17 agent-widget-api plan); the frontend project was renumbered to 3.
+Three projects, in order. Each goes through brainstorming → spec → plan → implementation with review. Status: Projects 1, 2 and 3 are done; the original Projects 2 and 3 were merged and executed as Project 2 (the 2026-10-17 agent-widget-api plan); the frontend project was renumbered to 3.
 
 ### Project 1 — Security hardening and runnable tests (DONE)
 
@@ -287,13 +287,13 @@ To do:
 12. **Docs:** reconcile `docs/api.md` with code (section 3.6).
 13. **Tests:** handler tests per endpoint for validation and error shapes; MCP tool tests against a test server.
 
-### Project 3 — Built-in UI bugs and frontend tests (IN DESIGN)
+### Project 3 — Built-in UI bugs and frontend tests (DONE)
 
-- **Spec:** `docs/superpowers/specs/2026-10-18-web-ui-sync-correctness-design.md` (approved 2026-10-18). **Plan:** `docs/superpowers/plans/2026-10-18-web-ui-sync-correctness.md` (30 tasks). A re-check on 2026-10-18 found the UI also breaks on server changes from Project 2 (403 under the Vite proxy, stuck sync entries, Trash lost on full sync); the spec covers those server fixes and the sync-push items Project 2 deferred here.
+- **Spec:** `docs/superpowers/specs/2026-10-18-web-ui-sync-correctness-design.md` (approved 2026-10-18). **Plan:** [docs/superpowers/plans/2026-10-18-web-ui-sync-correctness.md](superpowers/plans/2026-10-18-web-ui-sync-correctness.md) (30 tasks, all executed on branch `csscoder/review-and-test-coverage`, implementation HEAD `9d8a396`). A re-check on 2026-10-18 found the UI also breaks on server changes from Project 2 (403 under the Vite proxy, stuck sync entries, Trash lost on full sync); the spec covers those server fixes and the sync-push items Project 2 deferred here.
 
 Goal: the secondary UI is correct and stops diverging from the server.
 
-To do:
+Delivered (scope as planned):
 1. Fix H1 (single write path for multi-drag; relies on idempotent completion from project 2).
 2. Fix H2 (`_serverSeq` in `fullSync` or an explicit local-only marker).
 3. Fix H3 (remove queue entries by queue id; discard/retry UI for stuck entries; this also releases links rejected by project 1).
@@ -302,6 +302,46 @@ To do:
 6. Make the UI read the server's canonical rules (call `/api/views/*` or share the project 2 contract fixtures in tests).
 7. Logout clears IndexedDB and the queue.
 8. Tests for the modules ranked in 5.2 (frontend list).
+
+Verified on 2026-10-18 at `9d8a396`: `go test ./...` — 429 tests pass, 0 failures, 11 packages; `go vet ./...` clean; `golangci-lint` (v2.15.0, default linters, no repo config) — 0 issues; frontend `npm test` — 218/218 across 32 files; `npm run lint` clean; `npx tsc -b` clean; `make build` succeeds; Playwright e2e — 13/13 in both modes (`npm run e2e` against the built binary, 1.1m; `npm run e2e:dev` against the Vite dev server, 1.9m).
+
+Follow-ups deferred to Project 4. Sync and server leftovers are already captured in the Project 4 backlog below (field-level LWW + `device_id`, the four server inconsistencies from this spec's Non-goals, Logbook/Trash pagination and the `enrichTask(s)` N+1, cross-device tag creation). Additional UI findings from the implementation ledger:
+- Discarding a stuck change can leave local rows in phantom containers when no skipped snapshot exists to restore from.
+- Quick entry with a when-date can transiently show duplicate Today rows until sync settles.
+- Failed offline reorders give no feedback (silent drag failure).
+- `useLocalAreaDetail`'s `completed_tasks` returns all completed tasks of the area; the server's area detail returns completed-today only.
+
+### Backlog — candidates for Project 4 (NOT SCHEDULED)
+
+Items the specs above deferred or excluded. Project 4 is chosen after Project 3 ships, from what actually hurts when the owner uses Hermes and widgets; this list is the pool, not the scope.
+
+Sync and server leftovers:
+- Field-level last-write-wins for `/sync/push` instead of client-wins, plus `device_id` in the change log (Project 3, owner decision Q3).
+- Transactional change-log writes everywhere, not only in rewritten paths (Projects 2 and 3 non-goals).
+- Server inconsistencies the UI does not hit (Project 3 non-goals): deadline < when accepted on task update but rejected on create; sync schedule create allows a duplicate timeless date; an `end_time`-only schedule update stores end < start; `PATCH /projects/{id}` with `area_id: null` returns 500.
+- Logbook/Trash pagination and batching the N+1 Dexie queries in `enrichTask(s)`; add when measurably slow (Project 3).
+- A tag created on another device before the local create was pushed is not resolved by name (Project 3, known limitation).
+
+Things 3 parity (section 6.1):
+- Tag inheritance from projects/areas; AND vs OR semantics for multi-tag filters.
+- A project without an area.
+- Priority levels instead of boolean `high_priority`.
+- Things 3.23 repeat controls: complete early, Pause/Resume/Stop, Create Next Copy, Make Exception / Update Rule.
+
+Access (owner declined in Project 2; revisit only on need):
+- Token scopes (read-only vs read-write).
+- CORS origin allowlist.
+- API versioning (`/api/v1` or a version header).
+
+Server-side logic Hermes does itself today (Project 2 non-goals):
+- Natural-language dates and times (English and Russian), one parser for REST, MCP and CLI.
+- Title tokens `#tag` (Unicode) and `$Project` (word boundary) on create.
+- Saved-filter evaluation on the server.
+- Name→id resolution with explicit ambiguity errors.
+
+Outside the review entirely:
+- The widget apps themselves.
+- VPS operations: backups, monitoring, upgrade procedure.
 
 ---
 

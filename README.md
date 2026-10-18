@@ -184,6 +184,22 @@ make dev
 
 The Vite dev server on port 5173 proxies API requests to the Go backend and provides hot reload.
 
+### Tests
+
+```sh
+# Backend
+go test ./...
+
+# Frontend unit (Vitest), lint and typecheck
+cd frontend && npm test && npm run lint && npx tsc -b
+
+# End-to-end (Playwright)
+make build                        # prod mode serves this binary
+cd frontend && npx playwright install chromium
+npm run e2e                       # against the built Go binary
+npm run e2e:dev                   # against the Vite dev server
+```
+
 ## License
 
 AGPL-3.0
