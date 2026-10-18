@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"log"
@@ -302,6 +304,10 @@ type SyncPushResult struct {
 	Status   string `json:"status"` // applied, conflict_resolved, error
 	Seq      int64  `json:"seq"`
 	Error    string `json:"error,omitempty"`
+	// Code classifies an error result for machine handling by client
+	// sync queues: VALIDATION, NOT_FOUND and CONFLICT are permanent
+	// (retrying the same change cannot succeed); INTERNAL is transient.
+	Code string `json:"code,omitempty"`
 }
 
 // SyncPushResponse is returned by POST /api/sync/push.
@@ -359,6 +365,7 @@ func (h *SyncHandler) applyChange(change SyncChange) SyncPushResult {
 			Entity:   change.Entity,
 			EntityID: change.EntityID,
 			Status:   "error",
+			Code:     "VALIDATION",
 			Error:    "unsupported entity type: " + change.Entity,
 		}
 	}
@@ -439,9 +446,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 
 		task, err := h.tasks.Create(input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		_ = task
 		h.broadcastTaskChange("task_created", change.EntityID)
@@ -450,9 +455,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 	case "update":
 		existing, err := h.tasks.GetByID(change.EntityID)
 		if err != nil || existing == nil {
-			result.Status = "error"
-			result.Error = "task not found"
-			return result
+			return syncFieldError(result, "", "task not found")
 		}
 
 		// LWW: compare client_updated_at vs server updated_at
@@ -462,9 +465,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			// Try alternate format (SQLite datetime)
 			clientTime, err = time.Parse("2006-01-02 15:04:05", change.ClientUpdatedAt)
 			if err != nil {
-				result.Status = "error"
-				result.Error = "invalid client_updated_at format"
-				return result
+				return syncFieldError(result, "", "invalid client_updated_at format")
 			}
 		}
 
@@ -561,22 +562,19 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 						// FinishTask (idempotent on re-push, spawns once).
 						if h.scheduler == nil {
 							result.Status = "error"
+							result.Code = "INTERNAL"
 							result.Error = "scheduler not available"
 							return result
 						}
 						if _, _, cErr := h.scheduler.FinishTask(change.EntityID, s); cErr != nil {
-							result.Status = "error"
-							result.Error = syncErrorMessage(cErr)
-							return result
+							return syncFail(result, cErr)
 						}
 						h.broadcastTaskChange("task_updated", change.EntityID)
 						result.Status = status
 						return result
 					case "open":
 						if _, cErr := h.tasks.Reopen(change.EntityID); cErr != nil {
-							result.Status = "error"
-							result.Error = syncErrorMessage(cErr)
-							return result
+							return syncFail(result, cErr)
 						}
 						h.broadcastTaskChange("task_updated", change.EntityID)
 						result.Status = status
@@ -587,9 +585,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 				if val != nil {
 					// Soft-delete
 					if cErr := h.tasks.Delete(change.EntityID); cErr != nil {
-						result.Status = "error"
-						result.Error = syncErrorMessage(cErr)
-						return result
+						return syncFail(result, cErr)
 					}
 					h.broadcastTaskChange("task_deleted", change.EntityID)
 					result.Status = status
@@ -597,9 +593,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 				}
 				// Restore (deleted_at = null)
 				if _, cErr := h.tasks.Restore(change.EntityID); cErr != nil {
-					result.Status = "error"
-					result.Error = syncErrorMessage(cErr)
-					return result
+					return syncFail(result, cErr)
 				}
 				h.broadcastTaskChange("task_updated", change.EntityID)
 				result.Status = status
@@ -613,9 +607,7 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 			}
 			_, err = h.tasks.Update(change.EntityID, input)
 			if err != nil {
-				result.Status = "error"
-				result.Error = syncErrorMessage(err)
-				return result
+				return syncFail(result, err)
 			}
 			h.broadcastTaskChange("task_updated", change.EntityID)
 		}
@@ -624,16 +616,13 @@ func (h *SyncHandler) applyTaskChange(change SyncChange) SyncPushResult {
 	case "delete":
 		err := h.tasks.Delete(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		h.broadcastTaskChange("task_deleted", change.EntityID)
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 
 	return result
@@ -811,18 +800,14 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 
 		_, err = h.projects.Create(input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	case "update":
 		existing, err := h.projects.GetByID(change.EntityID)
 		if err != nil || existing == nil {
-			result.Status = "error"
-			result.Error = "project not found"
-			return result
+			return syncFieldError(result, "", "project not found")
 		}
 
 		status := "applied"
@@ -901,9 +886,7 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 			}
 			_, err = h.projects.Update(change.EntityID, input)
 			if err != nil {
-				result.Status = "error"
-				result.Error = syncErrorMessage(err)
-				return result
+				return syncFail(result, err)
 			}
 		}
 		result.Status = status
@@ -911,15 +894,12 @@ func (h *SyncHandler) applyProjectChange(change SyncChange) SyncPushResult {
 	case "delete":
 		err := h.projects.DeleteToTrash(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 
 	return result
@@ -950,18 +930,14 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 		}
 		_, err = h.areas.Create(input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	case "update":
 		existing, err := h.areas.GetByID(change.EntityID)
 		if err != nil || existing == nil {
-			result.Status = "error"
-			result.Error = "area not found"
-			return result
+			return syncFieldError(result, "", "area not found")
 		}
 
 		status := "applied"
@@ -989,24 +965,19 @@ func (h *SyncHandler) applyAreaChange(change SyncChange) SyncPushResult {
 
 		_, err = h.areas.Update(change.EntityID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = status
 
 	case "delete":
 		err := h.areas.DeleteToTrash(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 
 	return result
@@ -1049,9 +1020,7 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 		}
 		_, err = h.tags.Create(input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
@@ -1103,24 +1072,19 @@ func (h *SyncHandler) applyTagChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.tags.Update(change.EntityID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	case "delete":
 		err := h.tags.Delete(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 
 	return result
@@ -1135,9 +1099,7 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 	switch change.Action {
 	case "create":
 		if taskID == "" {
-			result.Status = "error"
-			result.Error = "task_id is required"
-			return result
+			return syncFieldError(result, "", "task_id is required")
 		}
 		input := model.CreateTaskScheduleInput{
 			ID:       change.EntityID,
@@ -1169,7 +1131,9 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 		existing, _ := h.schedules.GetByID(change.EntityID)
 		if existing != nil {
 			if existing.TaskID != taskID {
-				return syncFieldError(result, "id", "already exists for another task")
+				result = syncFieldError(result, "id", "already exists for another task")
+				result.Code = "CONFLICT"
+				return result
 			}
 			result.Status = "applied"
 			return result
@@ -1188,9 +1152,7 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.schedules.Create(taskID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
@@ -1251,24 +1213,19 @@ func (h *SyncHandler) applyScheduleChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.schedules.Update(change.EntityID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	case "delete":
 		err := h.schedules.Delete(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 	return result
 }
@@ -1282,9 +1239,7 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 	switch change.Action {
 	case "create":
 		if taskID == "" {
-			result.Status = "error"
-			result.Error = "task_id is required"
-			return result
+			return syncFieldError(result, "", "task_id is required")
 		}
 		input := model.CreateChecklistInput{
 			ID:    change.EntityID,
@@ -1302,7 +1257,9 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 		existing, _ := h.checklist.GetByID(change.EntityID)
 		if existing != nil {
 			if existing.TaskID != taskID {
-				return syncFieldError(result, "id", "already exists for another task")
+				result = syncFieldError(result, "id", "already exists for another task")
+				result.Code = "CONFLICT"
+				return result
 			}
 			result.Status = "applied"
 			return result
@@ -1312,9 +1269,7 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.checklist.Create(taskID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
@@ -1341,24 +1296,19 @@ func (h *SyncHandler) applyChecklistChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.checklist.Update(change.EntityID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	case "delete":
 		err := h.checklist.Delete(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 	return result
 }
@@ -1372,9 +1322,7 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 	switch change.Action {
 	case "create":
 		if taskID == "" {
-			result.Status = "error"
-			result.Error = "task_id is required"
-			return result
+			return syncFieldError(result, "", "task_id is required")
 		}
 		input := model.CreateAttachmentInput{
 			ID:       change.EntityID,
@@ -1400,21 +1348,19 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 		existing, _ := h.attachments.GetByID(change.EntityID)
 		if existing != nil {
 			if existing.TaskID != taskID {
-				return syncFieldError(result, "id", "already exists for another task")
+				result = syncFieldError(result, "id", "already exists for another task")
+				result.Code = "CONFLICT"
+				return result
 			}
 			result.Status = "applied"
 			return result
 		}
 		if err := normalizeLinkInput(&input); err != nil {
-			result.Status = "error"
-			result.Error = err.Error()
-			return result
+			return syncFieldError(result, "", err.Error())
 		}
 		_, err := h.attachments.Create(taskID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
@@ -1429,9 +1375,7 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 				result.Status = "applied"
 				return result
 			}
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		if orphanedFile != "" {
 			removeStoredFile(h.attachmentsPath, orphanedFile)
@@ -1439,8 +1383,7 @@ func (h *SyncHandler) applyAttachmentChange(change SyncChange) SyncPushResult {
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 	return result
 }
@@ -1454,9 +1397,7 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 	switch change.Action {
 	case "create":
 		if taskID == "" {
-			result.Status = "error"
-			result.Error = "task_id is required"
-			return result
+			return syncFieldError(result, "", "task_id is required")
 		}
 		input := model.CreateReminderInput{
 			ID:    change.EntityID,
@@ -1482,7 +1423,9 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 		existing, _ := h.reminders.GetByID(change.EntityID)
 		if existing != nil {
 			if existing.TaskID != taskID {
-				return syncFieldError(result, "id", "already exists for another task")
+				result = syncFieldError(result, "id", "already exists for another task")
+				result.Code = "CONFLICT"
+				return result
 			}
 			result.Status = "applied"
 			return result
@@ -1492,24 +1435,19 @@ func (h *SyncHandler) applyReminderChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.reminders.Create(taskID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	case "delete":
 		err := h.reminders.Delete(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 	return result
 }
@@ -1523,9 +1461,7 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 	switch change.Action {
 	case "create":
 		if projectID == "" {
-			result.Status = "error"
-			result.Error = "project_id is required"
-			return result
+			return syncFieldError(result, "", "project_id is required")
 		}
 		input := model.CreateHeadingInput{
 			ID:    change.EntityID,
@@ -1542,9 +1478,7 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.headings.Create(projectID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
@@ -1567,34 +1501,63 @@ func (h *SyncHandler) applyHeadingChange(change SyncChange) SyncPushResult {
 		}
 		_, err := h.headings.Update(change.EntityID, input)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	case "delete":
 		err := h.headings.Delete(change.EntityID)
 		if err != nil {
-			result.Status = "error"
-			result.Error = syncErrorMessage(err)
-			return result
+			return syncFail(result, err)
 		}
 		result.Status = "applied"
 
 	default:
-		result.Status = "error"
-		result.Error = "unsupported action: " + change.Action
+		result = syncFieldError(result, "", "unsupported action: "+change.Action)
 	}
 	return result
 }
 
 // --- Helpers ---
 
+// syncFail marks a sync change result as failed: the message is
+// client-safe (syncErrorMessage) and carries a machine-readable code.
+func syncFail(result SyncPushResult, err error) SyncPushResult {
+	result.Status = "error"
+	result.Error = syncErrorMessage(err)
+	result.Code = syncErrorCode(err)
+	return result
+}
+
+// syncErrorCode classifies an error for machine handling by client sync
+// queues: VALIDATION, NOT_FOUND and CONFLICT are permanent (a retry of
+// the same change cannot succeed), INTERNAL is transient. Sentinels are
+// matched with errors.Is; the string checks cover repository errors that
+// predate the sentinels.
+func syncErrorCode(err error) string {
+	if errors.Is(err, repository.ErrDuplicateProjectName) ||
+		errors.Is(err, repository.ErrDuplicateAreaName) ||
+		errors.Is(err, repository.ErrDuplicateTagName) ||
+		errors.Is(err, repository.ErrHasProjects) {
+		return "CONFLICT"
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "duplicate timeless date") {
+		return "VALIDATION"
+	}
+	if errors.Is(err, sql.ErrNoRows) ||
+		errors.Is(err, repository.ErrAttachmentNotFound) ||
+		strings.Contains(msg, "not found") {
+		return "NOT_FOUND"
+	}
+	return "INTERNAL"
+}
+
 // syncErrorMessage maps a sync change error to a client-safe message.
-// User-facing duplicate-name sentinels keep their own text; every other
-// error is logged server-side and replaced with a generic message so
-// internal details (SQLite errors, schema names) never reach clients.
+// User-facing duplicate-name sentinels keep their own text; the duplicate
+// timeless date rule names its field; every other error is logged
+// server-side and replaced with a generic message so internal details
+// (SQLite errors, schema names) never reach clients.
 func syncErrorMessage(err error) string {
 	if errors.Is(err, repository.ErrDuplicateProjectName) ||
 		errors.Is(err, repository.ErrDuplicateAreaName) ||
@@ -1603,6 +1566,9 @@ func syncErrorMessage(err error) string {
 	}
 	if errors.Is(err, repository.ErrHasProjects) {
 		return "HAS_PROJECTS: area still has projects"
+	}
+	if strings.Contains(err.Error(), "duplicate timeless date") {
+		return "when_date: duplicate timeless date"
 	}
 	log.Printf("sync change error: %v", err)
 	return "internal error"
@@ -1627,19 +1593,26 @@ func optString(v interface{}) (*string, bool) {
 // unexpected JSON type, so the rest of the batch continues.
 func fieldTypeError(result SyncPushResult, field string) SyncPushResult {
 	result.Status = "error"
+	result.Code = "VALIDATION"
 	result.Error = "invalid type for field " + field
 	return result
 }
 
 // syncFieldError marks a sync change result as failed boundary validation.
-// The error is "<field>: <msg>" (the field alone for internal errors), and
-// the rest of the batch continues.
+// The error is "<field>: <msg>" (the message alone when field is empty),
+// and the rest of the batch continues. The code classifies the failure:
+// NOT_FOUND when the message ends with "not found", otherwise VALIDATION.
 func syncFieldError(result SyncPushResult, field, msg string) SyncPushResult {
 	result.Status = "error"
 	if field == "" {
 		result.Error = msg
 	} else {
 		result.Error = field + ": " + msg
+	}
+	if strings.HasSuffix(msg, "not found") {
+		result.Code = "NOT_FOUND"
+	} else {
+		result.Code = "VALIDATION"
 	}
 	return result
 }

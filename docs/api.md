@@ -89,7 +89,7 @@ Mutation endpoints validate request fields at the API boundary, before any write
 - Bulk `set_when`/`set_deadline` validate their date params the same way (an empty string clears the date and stays allowed); `PATCH /api/tasks/:id/move` validates `when_date` and its reference params.
 - `deadline >= when_date` is enforced on task create and update (including cross-field updates resolved against the stored task).
 
-**Sync** (`POST /api/sync/push`) applies the same rules per change: a violation produces a result with `status: "error"` and `error: "<field>: <message>"`, and the rest of the batch continues.
+**Sync** (`POST /api/sync/push`) applies the same rules per change: a violation produces a result with `status: "error"`, `error: "<field>: <message>"` and a machine-readable `code`, and the rest of the batch continues.
 
 ---
 
@@ -1654,21 +1654,33 @@ Response (200):
       "entity_id": "abc12345",
       "status": "applied|conflict_resolved|error",
       "seq": 1001,
-      "error": "optional error message"
+      "error": "optional error message",
+      "code": "VALIDATION|NOT_FOUND|CONFLICT|INTERNAL"
     }
   ]
 }
 ```
 
+`results` is positional: `results[i]` is the outcome of `changes[i]`, in request order, even when some changes fail.
+
 | Status | Meaning |
 |--------|---------|
 | `applied` | Change was applied without conflict |
 | `conflict_resolved` | Change conflicted with server state (server was newer), but was still recorded for audit |
-| `error` | Change could not be applied; check `error` field for details. Internal failures report the generic `internal error`; user-facing messages (validation, not found, duplicate name, unsupported entity/action) keep their own text. Boundary validation failures use `"<field>: <message>"` (e.g. `when_date: must be YYYY-MM-DD or 'someday'`) and do not fail the batch |
+| `error` | Change could not be applied; check `error` and `code` fields for details. Internal failures report the generic `internal error`; user-facing messages (validation, not found, duplicate name, unsupported entity/action) keep their own text. Boundary validation failures use `"<field>: <message>"` (e.g. `when_date: must be YYYY-MM-DD or 'someday'`, or `when_date: duplicate timeless date`) and do not fail the batch |
+
+**Error codes:** every `error` result also carries a machine-readable `code` (absent on `applied` and `conflict_resolved`):
+
+| Code | Meaning | Client handling |
+|------|---------|-----------------|
+| `VALIDATION` | The change breaks a boundary rule: bad field value or type, unsupported entity type or action, missing `task_id`, or a `when_date` that would duplicate another timeless schedule of the same task (`when_date: duplicate timeless date`) | Permanent — the same change will fail again; fix or drop it |
+| `NOT_FOUND` | The change's target or a referenced entity (task, project, area, tag, heading) does not exist | Permanent — refresh state and re-resolve the id |
+| `CONFLICT` | Collision with server state: duplicate project/area/tag name, deleting an area that still has projects (`HAS_PROJECTS`), or a child-entity id re-used under another parent | Permanent — resolve locally before re-pushing |
+| `INTERNAL` | Unexpected server failure; `error` is the generic `internal error` | Transient — safe to retry later |
 
 **Supported entities:** task, project, area, tag, heading, checklistItem, attachment, schedule, reminder
 
-**Conflict resolution:** For task, project, and area updates, if the server's `updated_at` is strictly newer than the client's `client_updated_at`, the status is marked as `conflict_resolved`. The client's change is still recorded in the change log. The client is responsible for pulling the latest state and reapplying their changes if needed.
+**Conflict resolution:** For task, project, and area updates, if the server's `updated_at` is strictly newer than the client's `client_updated_at`, the status is marked as `conflict_resolved`. The client's write is still applied — conflicts are client-wins: a queued offline edit overwrites a newer server write; `conflict_resolved` is informational. The change is recorded in the change log either way.
 
 ---
 

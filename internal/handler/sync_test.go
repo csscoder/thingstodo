@@ -960,12 +960,192 @@ func TestSyncPushChildCreateOtherParentConflicts(t *testing.T) {
 			if second.Status != "error" {
 				t.Fatalf("cross-parent create: expected status 'error', got %q", second.Status)
 			}
-			// Task 5 adds a code field to results; then also assert
-			// code == "CONFLICT". Until then the message is the contract.
+			if second.Code != "CONFLICT" {
+				t.Errorf("cross-parent create: expected code CONFLICT, got %q (error: %s)", second.Code, second.Error)
+			}
 			if !strings.Contains(second.Error, "already exists") {
 				t.Errorf("cross-parent create: expected error mentioning 'already exists', got %q", second.Error)
 			}
 		})
+	}
+}
+
+// pushSyncChanges posts a batch of changes through /api/sync/push and
+// returns the decoded response, failing the test on transport or decode
+// errors. Callers assert on the per-change results.
+func pushSyncChanges(t *testing.T, client *testutil.TestClient, changes []map[string]interface{}) handler.SyncPushResponse {
+	t.Helper()
+	resp := client.Post("/api/sync/push", map[string]interface{}{
+		"device_id": "dev1",
+		"changes":   changes,
+	})
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	var result handler.SyncPushResponse
+	resp.JSON(t, &result)
+	return result
+}
+
+// syncChange builds one sync push change map with a far-future
+// client_updated_at so updates apply rather than resolve as conflicts.
+func syncChange(entity, entityID, action string, data map[string]interface{}, fields []string) map[string]interface{} {
+	return map[string]interface{}{
+		"entity":            entity,
+		"entity_id":         entityID,
+		"action":            action,
+		"data":              data,
+		"fields":            fields,
+		"client_updated_at": "2099-01-01T00:00:00Z",
+	}
+}
+
+// TestSyncPushResultCodes pins the machine-readable code on per-change
+// errors: the offline sync queue classifies VALIDATION, NOT_FOUND and
+// CONFLICT as permanent and INTERNAL as transient.
+func TestSyncPushResultCodes(t *testing.T) {
+	cases := []struct {
+		name     string
+		setup    func(t *testing.T, client *testutil.TestClient)
+		change   map[string]interface{}
+		wantErr  string
+		wantCode string
+	}{
+		{
+			name: "invalid when_date is VALIDATION",
+			change: syncChange("task", "codebadwd001", "create",
+				map[string]interface{}{"title": "Bad when date", "when_date": "tomorrow"},
+				[]string{"title", "when_date"}),
+			wantErr:  "when_date",
+			wantCode: "VALIDATION",
+		},
+		{
+			name: "schedule create for missing task is NOT_FOUND",
+			change: syncChange("schedule", "codemissing01", "create",
+				map[string]interface{}{"task_id": "no-such-task0", "when_date": "2030-01-01"},
+				[]string{}),
+			wantErr:  "task_id",
+			wantCode: "NOT_FOUND",
+		},
+		{
+			name: "duplicate project name is CONFLICT",
+			setup: func(t *testing.T, client *testutil.TestClient) {
+				// Projects require an area (NOT NULL), so seed one first.
+				seed := pushSyncChanges(t, client, []map[string]interface{}{
+					syncChange("area", "codeduparea01", "create", map[string]interface{}{"title": "Dup area"}, []string{"title"}),
+					syncChange("project", "codedupproj01", "create", map[string]interface{}{"title": "Duplicates", "area_id": "codeduparea01"}, []string{"title", "area_id"}),
+				})
+				for i, r := range seed.Results {
+					if r.Status != "applied" {
+						t.Fatalf("seed change %d: unexpected result %+v", i, r)
+					}
+				}
+			},
+			change: syncChange("project", "codedupproj02", "create",
+				map[string]interface{}{"title": "Duplicates", "area_id": "codeduparea01"}, []string{"title", "area_id"}),
+			wantErr:  "duplicate project name",
+			wantCode: "CONFLICT",
+		},
+		{
+			name: "unsupported entity type is VALIDATION",
+			change: syncChange("widget", "codewidget001", "create",
+				map[string]interface{}{}, []string{}),
+			wantErr:  "unsupported entity type",
+			wantCode: "VALIDATION",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _, _ := setupSyncRouter(t)
+			if tc.setup != nil {
+				tc.setup(t, client)
+			}
+			result := pushSyncChanges(t, client, []map[string]interface{}{tc.change})
+			if len(result.Results) != 1 {
+				t.Fatalf("expected 1 result, got %d", len(result.Results))
+			}
+			r := result.Results[0]
+			if r.Status != "error" {
+				t.Fatalf("expected status 'error', got %q (error: %s)", r.Status, r.Error)
+			}
+			if r.Code != tc.wantCode {
+				t.Errorf("expected code %q, got %q (error: %s)", tc.wantCode, r.Code, r.Error)
+			}
+			if tc.wantErr != "" && !strings.Contains(r.Error, tc.wantErr) {
+				t.Errorf("expected error containing %q, got %q", tc.wantErr, r.Error)
+			}
+		})
+	}
+}
+
+// TestSyncPushDuplicateTimelessIsValidation pins the classification and
+// client-safe message of the duplicate timeless date rejection: moving a
+// task's when_date onto another timeless schedule entry of the same task
+// is a VALIDATION error naming the field, not an opaque "internal error".
+func TestSyncPushDuplicateTimelessIsValidation(t *testing.T) {
+	client, _, _ := setupSyncRouter(t)
+
+	// Seed: the task's when_date 2030-05-10 created the first untimed
+	// schedule entry; a second untimed entry sits on 2030-05-11.
+	seed := pushSyncChanges(t, client, []map[string]interface{}{
+		syncChange("task", "timelessTask1", "create",
+			map[string]interface{}{"title": "Timeless conflict", "when_date": "2030-05-10"},
+			[]string{"title", "when_date"}),
+		syncChange("schedule", "timelessSche1", "create",
+			map[string]interface{}{"task_id": "timelessTask1", "when_date": "2030-05-11"},
+			[]string{}),
+	})
+	for i, r := range seed.Results {
+		if r.Status != "applied" {
+			t.Fatalf("seed change %d: expected 'applied', got %q (error: %s)", i, r.Status, r.Error)
+		}
+	}
+
+	result := pushSyncChanges(t, client, []map[string]interface{}{
+		syncChange("task", "timelessTask1", "update",
+			map[string]interface{}{"when_date": "2030-05-11"},
+			[]string{"when_date"}),
+	})
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	r := result.Results[0]
+	if r.Status != "error" {
+		t.Fatalf("expected status 'error', got %q", r.Status)
+	}
+	if r.Code != "VALIDATION" {
+		t.Errorf("expected code VALIDATION, got %q", r.Code)
+	}
+	if r.Error != "when_date: duplicate timeless date" {
+		t.Errorf("expected error 'when_date: duplicate timeless date', got %q", r.Error)
+	}
+}
+
+// TestSyncPushResultsKeepRequestOrder pins the response contract: results
+// appear in the same order as the request changes, so a client can match
+// them by position even when some changes fail.
+func TestSyncPushResultsKeepRequestOrder(t *testing.T) {
+	client, _, _ := setupSyncRouter(t)
+
+	changes := []map[string]interface{}{
+		syncChange("task", "orderTask0001", "create", map[string]interface{}{"title": "First"}, []string{"title"}),
+		syncChange("task", "orderTask0002", "create", map[string]interface{}{"title": "Second", "when_date": "tomorrow"}, []string{"title", "when_date"}),
+		syncChange("area", "orderArea0001", "create", map[string]interface{}{"title": "Order area"}, []string{"title"}),
+		syncChange("widget", "orderWidget01", "create", map[string]interface{}{}, []string{}),
+		syncChange("tag", "orderTag00001", "create", map[string]interface{}{"title": "ordered"}, []string{"title"}),
+	}
+	wantStatus := []string{"applied", "error", "applied", "error", "applied"}
+
+	result := pushSyncChanges(t, client, changes)
+	if len(result.Results) != len(changes) {
+		t.Fatalf("expected %d results, got %d", len(changes), len(result.Results))
+	}
+	for i, r := range result.Results {
+		if r.EntityID != changes[i]["entity_id"] {
+			t.Errorf("result[%d]: expected entity_id %v (request order), got %q", i, changes[i]["entity_id"], r.EntityID)
+		}
+		if r.Status != wantStatus[i] {
+			t.Errorf("result[%d]: expected status %q, got %q (error: %s)", i, wantStatus[i], r.Status, r.Error)
+		}
 	}
 }
 

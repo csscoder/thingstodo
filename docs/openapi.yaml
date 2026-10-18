@@ -3461,6 +3461,14 @@ components:
           format: int64
         error:
           type: string
+        code:
+          type: string
+          enum: [VALIDATION, NOT_FOUND, CONFLICT, INTERNAL]
+          description: >-
+            Machine-readable classification of an error result (absent on
+            applied/conflict_resolved). VALIDATION, NOT_FOUND and CONFLICT
+            are permanent; INTERNAL is transient. Results are returned in
+            request order.
 
     SyncPushResponse:
       type: object
