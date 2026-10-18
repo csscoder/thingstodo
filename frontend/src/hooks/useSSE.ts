@@ -3,6 +3,16 @@ import { useQueryClient } from '@tanstack/react-query'
 import { queryKeys, invalidateViewQueries } from './queries'
 import { useAppStore } from '../stores/app'
 import { syncNow } from '../sync/engine'
+import { localDb } from '../db/index'
+
+/**
+ * Delay before reconnecting an SSE source after its Nth consecutive error
+ * (attempt 0 = first error). Doubles per attempt, capped at 30 s; the
+ * attempt is also capped so the exponent cannot grow without bound.
+ */
+export function nextBackoffMs(attempt: number): number {
+  return Math.min(30000, 1000 * 2 ** Math.min(attempt, 30))
+}
 
 function dismissToast(toast: HTMLElement) {
   toast.style.animation = 'toast-out 0.2s ease-in forwards'
@@ -63,6 +73,7 @@ type SSEEventType =
   | 'task_created'
   | 'task_updated'
   | 'task_deleted'
+  | 'task_purged'
   | 'project_updated'
   | 'area_updated'
   | 'tag_updated'
@@ -73,26 +84,57 @@ type SSEEventType =
 interface SSEPayload {
   id?: string
   type?: string
+  entity?: string
+  /** Change-log seq of the write that triggered this event, when known. */
+  seq?: number
+}
+
+/** The sync cursor pull.ts advances — events at or below it are already local. */
+async function getLocalCursor(): Promise<number> {
+  const meta = await localDb.syncMeta.get('cursor')
+  return meta && typeof meta.value === 'number' ? meta.value : 0
 }
 
 export function useSSE() {
   const queryClient = useQueryClient()
   const sourceRef = useRef<EventSource | null>(null)
+  const reconnectTimerRef = useRef<number | null>(null)
+  const attemptRef = useRef(0)
 
   useEffect(() => {
+    function clearReconnectTimer() {
+      if (reconnectTimerRef.current !== null) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
+    }
+
     function connect() {
+      clearReconnectTimer()
       const source = new EventSource('/api/events')
       sourceRef.current = source
+
+      // A connection that stayed open long enough to fire open resets the
+      // backoff sequence; the next error is treated as attempt 0 again.
+      source.onopen = () => {
+        attemptRef.current = 0
+      }
 
       // Force immediate refetch even if data isn't stale yet (staleTime is 30s)
       const refetch = { refetchType: 'all' as const }
 
-      function handleEvent(type: SSEEventType, e: MessageEvent) {
+      async function handleEvent(type: SSEEventType, e: MessageEvent) {
         let payload: SSEPayload = {}
         try {
           payload = JSON.parse(e.data)
         } catch {
           // ignore malformed data
+        }
+
+        // Own-seq filter: this device already pulled the change that
+        // triggered the event, so skip the redundant refetch.
+        if (typeof payload.seq === 'number' && payload.seq <= (await getLocalCursor())) {
+          return
         }
 
         switch (type) {
@@ -124,6 +166,23 @@ export function useSSE() {
             queryClient.invalidateQueries({ queryKey: queryKeys.areas.all, ...refetch })
             invalidateViewQueries(queryClient, refetch)
             break
+
+          case 'task_purged': {
+            const id = payload.id
+            if (id) {
+              // The task is gone server-side: drop the local row and any
+              // queued mutations so we stop pushing updates to it.
+              await localDb.tasks.delete(id)
+              await localDb.syncQueue.where('entityId').equals(id).delete()
+              queryClient.removeQueries({
+                queryKey: queryKeys.tasks.detail(id),
+              })
+            }
+            queryClient.invalidateQueries({ queryKey: queryKeys.projects.all, ...refetch })
+            queryClient.invalidateQueries({ queryKey: queryKeys.areas.all, ...refetch })
+            invalidateViewQueries(queryClient, refetch)
+            break
+          }
 
           case 'project_updated':
             if (payload.id) {
@@ -183,6 +242,7 @@ export function useSSE() {
         'task_created',
         'task_updated',
         'task_deleted',
+        'task_purged',
         'project_updated',
         'area_updated',
         'tag_updated',
@@ -192,21 +252,37 @@ export function useSSE() {
       ]
 
       for (const type of eventTypes) {
-        source.addEventListener(type, (e) => handleEvent(type, e as MessageEvent))
+        source.addEventListener(type, (e) => {
+          handleEvent(type, e as MessageEvent).catch(() => {})
+        })
       }
 
       source.onerror = () => {
-        // Always close on error — we manage reconnection ourselves via online/visibility events
+        // Close and reconnect with exponential backoff; the online and
+        // visibilitychange handlers below also reconnect manually.
         source.close()
+        if (sourceRef.current !== source) return // a newer source took over
         sourceRef.current = null
+        const attempt = attemptRef.current
+        attemptRef.current = attempt + 1
+        clearReconnectTimer()
+        reconnectTimerRef.current = window.setTimeout(() => {
+          reconnectTimerRef.current = null
+          if (!sourceRef.current && navigator.onLine) connect()
+        }, nextBackoffMs(attempt))
       }
     }
 
     function handleOnline() {
-      if (!sourceRef.current) connect()
+      if (!sourceRef.current) {
+        // Manual reconnects start a fresh backoff sequence.
+        attemptRef.current = 0
+        connect()
+      }
     }
 
     function handleOffline() {
+      clearReconnectTimer()
       if (sourceRef.current) {
         sourceRef.current.close()
         sourceRef.current = null
@@ -221,10 +297,12 @@ export function useSSE() {
 
     function handleVisibility() {
       if (document.hidden) {
+        clearReconnectTimer()
         sourceRef.current?.close()
         sourceRef.current = null
       } else {
         if (!sourceRef.current && navigator.onLine) {
+          attemptRef.current = 0
           connect()
           queryClient.invalidateQueries()
         }
@@ -237,6 +315,7 @@ export function useSSE() {
       document.removeEventListener('visibilitychange', handleVisibility)
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
+      clearReconnectTimer()
       sourceRef.current?.close()
       sourceRef.current = null
     }
