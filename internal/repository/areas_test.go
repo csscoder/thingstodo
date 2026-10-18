@@ -2,6 +2,7 @@ package repository_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
 	"github.com/collinjanssen/thingstodo/internal/repository"
@@ -161,3 +162,54 @@ func TestAreaListWithCounts(t *testing.T) {
 		t.Errorf("expected task_count=1, got %d", areas[0].TaskCount)
 	}
 }
+
+// TestAreaCompletedToday_UsesLocation pins a standalone task completed at
+// 2026-10-16 21:10:00 UTC, which is 00:10 on 2026-10-17 in Moscow. With the
+// repository clock pinned to 2026-10-16 21:30 UTC (= 00:30 local on
+// 2026-10-17) and the repository bound to Europe/Moscow, the task belongs to
+// the area's completed-today list even though its UTC date is 2026-10-16.
+func TestAreaCompletedToday_UsesLocation(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	loc, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatalf("load Europe/Moscow: %v", err)
+	}
+	areaRepo := repository.NewAreaRepository(db, nil).WithLocation(loc)
+	areaRepo.SetClock(func() time.Time {
+		return time.Date(2026, 10, 16, 21, 30, 0, 0, time.UTC)
+	})
+	taskRepo := repository.NewTaskRepository(db, nil)
+
+	area, err := areaRepo.Create(model.CreateAreaInput{Title: "TZ Area"})
+	if err != nil {
+		t.Fatalf("create area: %v", err)
+	}
+	task, err := taskRepo.Create(model.CreateTaskInput{Title: "Done after local midnight", AreaID: &area.ID})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := taskRepo.SetDoneStatus(task.ID, "completed"); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	if _, err := db.Exec(
+		"UPDATE tasks SET completed_at = ?, canceled_at = NULL, updated_at = ? WHERE id = ?",
+		"2026-10-16 21:10:00", "2026-10-16 21:10:00", task.ID,
+	); err != nil {
+		t.Fatalf("pin completed_at: %v", err)
+	}
+
+	detail, err := areaRepo.GetByID(area.ID)
+	if err != nil {
+		t.Fatalf("get area: %v", err)
+	}
+	found := false
+	for _, ct := range detail.CompletedTasks {
+		if ct.ID == task.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("task completed at 00:10 local is missing from the area's completed-today list; got %d entries", len(detail.CompletedTasks))
+	}
+}
+

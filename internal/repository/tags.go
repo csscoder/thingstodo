@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/model"
 )
@@ -11,10 +12,23 @@ import (
 type TagRepository struct {
 	db        *sql.DB
 	changeLog *ChangeLogRepository
+	loc       *time.Location
 }
 
 func NewTagRepository(db *sql.DB, changeLog *ChangeLogRepository) *TagRepository {
-	return &TagRepository{db: db, changeLog: changeLog}
+	return &TagRepository{db: db, changeLog: changeLog, loc: time.UTC}
+}
+
+// WithLocation returns a copy of the repository whose clock runs in loc, so
+// the tag task listing resolves "today" in the server timezone like the view
+// repository does. A nil loc keeps UTC.
+func (r *TagRepository) WithLocation(loc *time.Location) *TagRepository {
+	if loc == nil {
+		return r
+	}
+	cp := *r
+	cp.loc = loc
+	return &cp
 }
 
 // Conn returns the underlying connection pool, for boundary validation
@@ -185,6 +199,9 @@ func (r *TagRepository) GetTasksByTag(tagID string) ([]model.TaskListItem, error
 	}
 	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(r.db, rows)
-	populateActionableScheduleFlagsNow(r.db, tasks)
+	// "Today" for the schedule flags resolves in the server timezone, like
+	// the view repository's.
+	today := time.Now().In(r.loc).Format("2006-01-02")
+	populateActionableScheduleFlags(r.db, tasks, today)
 	return tasks, nil
 }

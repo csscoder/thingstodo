@@ -1034,12 +1034,6 @@ func ParseIntDefault(s string, def int) int {
 	return n
 }
 
-// populateActionableScheduleFlagsNow is the server-clock fallback used by the
-// area/project/tag listings, which do not carry the owner's timezone yet.
-func populateActionableScheduleFlagsNow(db DBTX, tasks []model.TaskListItem) {
-	populateActionableScheduleFlags(db, tasks, time.Now().Format("2006-01-02"))
-}
-
 // populateActionableScheduleFlags sets HasActionableSchedules on each task
 // that has uncompleted schedule entries requiring confirmation — i.e. past
 // entries (will be auto-completed) or future/someday entries (will be deleted).

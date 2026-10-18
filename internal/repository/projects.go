@@ -19,10 +19,23 @@ type ProjectRepository struct {
 	conn      *sql.DB
 	tx        *sql.Tx
 	changeLog *ChangeLogRepository
+	loc       *time.Location
 }
 
 func NewProjectRepository(db *sql.DB, changeLog *ChangeLogRepository) *ProjectRepository {
-	return &ProjectRepository{db: db, conn: db, changeLog: changeLog}
+	return &ProjectRepository{db: db, conn: db, changeLog: changeLog, loc: time.UTC}
+}
+
+// WithLocation returns a copy of the repository whose clock runs in loc, so
+// the task listings resolve "today" in the server timezone like the view
+// repository does. A nil loc keeps UTC.
+func (r *ProjectRepository) WithLocation(loc *time.Location) *ProjectRepository {
+	if loc == nil {
+		return r
+	}
+	cp := *r
+	cp.loc = loc
+	return &cp
 }
 
 // Conn returns the underlying connection pool, for boundary validation
@@ -127,6 +140,9 @@ func (r *ProjectRepository) GetByID(id string) (*model.ProjectDetail, error) {
 		p.Area = getRef(r.db, "areas", *p.AreaID)
 	}
 	p.Tags = getProjectTags(r.db, id)
+	// "Today" for the schedule flags resolves in the server timezone, like
+	// the view repository's.
+	today := time.Now().In(r.loc).Format("2006-01-02")
 
 	// Load headings with tasks
 	headingRows, err := r.db.Query(
@@ -142,7 +158,7 @@ func (r *ProjectRepository) GetByID(id string) (*model.ProjectDetail, error) {
 		if err := headingRows.Scan(&h.ID, &h.Title, &h.ProjectID, &h.SortOrder); err != nil {
 			return nil, fmt.Errorf("scan heading: %w", err)
 		}
-		h.Tasks = getTaskListItems(r.db, "heading_id", h.ID)
+		h.Tasks = getTaskListItems(r.db, "heading_id", h.ID, today)
 		headings = append(headings, h)
 	}
 	if headings == nil {
@@ -151,7 +167,7 @@ func (r *ProjectRepository) GetByID(id string) (*model.ProjectDetail, error) {
 	p.Headings = headings
 
 	// Tasks without heading
-	p.TasksWithoutHeading = getTaskListItemsNoHeading(r.db, id)
+	p.TasksWithoutHeading = getTaskListItemsNoHeading(r.db, id, today)
 
 	// Completed tasks (all time)
 	completedRows, err := r.db.Query(`
@@ -554,7 +570,7 @@ func (r *ProjectRepository) setTags(projectID string, tagIDs []string) error {
 
 var validFilterCols = map[string]bool{"heading_id": true, "project_id": true, "area_id": true}
 
-func getTaskListItems(db DBTX, filterCol, filterVal string) []model.TaskListItem {
+func getTaskListItems(db DBTX, filterCol, filterVal, today string) []model.TaskListItem {
 	if !validFilterCols[filterCol] {
 		return []model.TaskListItem{}
 	}
@@ -582,11 +598,11 @@ func getTaskListItems(db DBTX, filterCol, filterVal string) []model.TaskListItem
 	}
 	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(db, rows)
-	populateActionableScheduleFlagsNow(db, tasks)
+	populateActionableScheduleFlags(db, tasks, today)
 	return tasks
 }
 
-func getTaskListItemsNoHeading(db DBTX, projectID string) []model.TaskListItem {
+func getTaskListItemsNoHeading(db DBTX, projectID, today string) []model.TaskListItem {
 	rows, err := db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -611,7 +627,7 @@ func getTaskListItemsNoHeading(db DBTX, projectID string) []model.TaskListItem {
 	}
 	defer func() { _ = rows.Close() }()
 	tasks := scanTaskListItems(db, rows)
-	populateActionableScheduleFlagsNow(db, tasks)
+	populateActionableScheduleFlags(db, tasks, today)
 	return tasks
 }
 

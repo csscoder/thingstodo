@@ -17,10 +17,16 @@ type RepeatRuleHandler struct {
 	taskRepo *repository.TaskRepository
 	engine   *recurrence.Engine
 	broker   *sse.Broker
+	loc      *time.Location
 }
 
-func NewRepeatRuleHandler(repo *repository.RepeatRuleRepository, taskRepo *repository.TaskRepository, engine *recurrence.Engine, broker *sse.Broker) *RepeatRuleHandler {
-	return &RepeatRuleHandler{repo: repo, taskRepo: taskRepo, engine: engine, broker: broker}
+// NewRepeatRuleHandler binds the preview date resolution to the server
+// timezone loc; a nil loc falls back to UTC.
+func NewRepeatRuleHandler(repo *repository.RepeatRuleRepository, taskRepo *repository.TaskRepository, engine *recurrence.Engine, broker *sse.Broker, loc *time.Location) *RepeatRuleHandler {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return &RepeatRuleHandler{repo: repo, taskRepo: taskRepo, engine: engine, broker: broker, loc: loc}
 }
 
 func (h *RepeatRuleHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +70,7 @@ func (h *RepeatRuleHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 
 	// If task has no when_date, set it to the first occurrence
 	if task, taskErr := h.taskRepo.GetByID(taskID); taskErr == nil && task != nil && task.WhenDate == nil {
-		today := time.Now().Format("2006-01-02")
+		today := time.Now().In(h.loc).Format("2006-01-02")
 		if nextDate, calcErr := h.engine.FirstOnOrAfter(today, rule.Pattern); calcErr == nil {
 			if _, updateErr := h.taskRepo.Update(taskID, model.UpdateTaskInput{
 				WhenDate: &nextDate,

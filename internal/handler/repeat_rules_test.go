@@ -3,6 +3,7 @@ package handler_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/collinjanssen/thingstodo/internal/handler"
 	"github.com/collinjanssen/thingstodo/internal/recurrence"
@@ -23,7 +24,7 @@ func setupRepeatRouter(t *testing.T) *testutil.TestClient {
 	repeatRepo := repository.NewRepeatRuleRepository(db, changeLog)
 
 	taskH := handler.NewTaskHandler(taskRepo, reminderRepo, settingsRepo, broker, nil)
-	repeatH := handler.NewRepeatRuleHandler(repeatRepo, taskRepo, recurrence.NewEngine(), broker)
+	repeatH := handler.NewRepeatRuleHandler(repeatRepo, taskRepo, recurrence.NewEngine(), broker, time.UTC)
 
 	r := chi.NewRouter()
 	r.Post("/api/tasks", taskH.Create)

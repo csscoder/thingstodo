@@ -14,10 +14,32 @@ type AreaRepository struct {
 	conn      *sql.DB
 	tx        *sql.Tx
 	changeLog *ChangeLogRepository
+	loc       *time.Location
+	now       func() time.Time
 }
 
 func NewAreaRepository(db *sql.DB, changeLog *ChangeLogRepository) *AreaRepository {
-	return &AreaRepository{db: db, conn: db, changeLog: changeLog}
+	return &AreaRepository{db: db, conn: db, changeLog: changeLog, loc: time.UTC, now: time.Now}
+}
+
+// WithLocation returns a copy of the repository whose clock runs in loc, so
+// the completed-today listing resolves "today" in the server timezone like
+// the view repository does. A nil loc keeps UTC.
+func (r *AreaRepository) WithLocation(loc *time.Location) *AreaRepository {
+	if loc == nil {
+		return r
+	}
+	cp := *r
+	cp.loc = loc
+	return &cp
+}
+
+// SetClock overrides the repository clock (default time.Now). "Today" is
+// resolved as r.now().In(r.loc).
+func (r *AreaRepository) SetClock(now func() time.Time) {
+	if now != nil {
+		r.now = now
+	}
 }
 
 // WithTx returns a shallow copy of the repository bound to tx: its statements
@@ -132,10 +154,15 @@ func (r *AreaRepository) GetByID(id string) (*model.AreaDetail, error) {
 	}
 	defer func() { _ = taskRows.Close() }()
 	a.Tasks = scanTaskListItems(r.db, taskRows)
-	populateActionableScheduleFlagsNow(r.db, a.Tasks)
+	// "Today" resolves in the server timezone, like the view repository's.
+	today := r.now().In(r.loc).Format("2006-01-02")
+	populateActionableScheduleFlags(r.db, a.Tasks, today)
 
-	// Completed standalone tasks (today only)
-	today := time.Now().Format("2006-01-02")
+	// Completed standalone tasks (today only): the stored UTC timestamps
+	// must fall inside the local calendar day, i.e. between the UTC instants
+	// of this local midnight (inclusive) and the next one (exclusive), like
+	// the Today view's Completed section.
+	completedStart, completedEnd := localDayUTCBounds(today, r.loc)
 	completedRows, err := r.db.Query(`
 		SELECT t.id, t.title, t.notes, t.status, t.when_date, t.when_evening, t.high_priority,
 			t.deadline, t.project_id, t.area_id, t.heading_id,
@@ -157,8 +184,9 @@ func (r *AreaRepository) GetByID(id string) (*model.AreaDetail, error) {
 		WHERE t.area_id = ? AND t.project_id IS NULL
 			AND t.status IN ('completed', 'canceled', 'wont_do')
 			AND COALESCE(t.completed_at, t.canceled_at, t.updated_at) >= ?
+			AND COALESCE(t.completed_at, t.canceled_at, t.updated_at) < ?
 			AND t.deleted_at IS NULL
-		ORDER BY COALESCE(t.completed_at, t.canceled_at, t.updated_at) DESC`, id, today)
+		ORDER BY COALESCE(t.completed_at, t.canceled_at, t.updated_at) DESC`, id, completedStart, completedEnd)
 	if err != nil {
 		return nil, err
 	}
