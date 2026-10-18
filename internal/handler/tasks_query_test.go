@@ -122,8 +122,12 @@ func TestTaskQuery_Filters(t *testing.T) {
 	}
 
 	// Dates are computed relative to the repository clock so list=today
-	// membership (overdue deadline, when_date today) is stable.
-	today := time.Now().UTC().Format("2006-01-02")
+	// membership (overdue deadline, when_date today) and the when_before /
+	// when_after bounds are stable regardless of the wall clock.
+	now := time.Now().UTC()
+	today := now.Format("2006-01-02")
+	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 
 	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixOpen01", Title: "Inbox task"})
 	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixDone01", Title: "Done task"})
@@ -174,8 +178,8 @@ func TestTaskQuery_Filters(t *testing.T) {
 		{"tag_ids any", "tag_ids=tagWork01", []string{"fixHigh01", "fixWhen01"}},
 		{"tag_ids all", "tag_ids=tagWork01,tagUrgent01&tag_mode=all", []string{"fixHigh01"}},
 		{"when_date", "when_date=someday", []string{"fixWhen01"}},
-		{"when_before", "when_before=2026-10-18", []string{"fixToday01"}},
-		{"when_after", "when_after=2026-10-16", []string{"fixToday01"}},
+		{"when_before", "when_before=" + tomorrow, []string{"fixToday01"}},
+		{"when_after", "when_after=" + yesterday, []string{"fixToday01"}},
 		{"deadline_before inclusive", "deadline_before=2026-10-16", []string{"fixOver01"}},
 		{"deadline_after inclusive", "deadline_after=2026-10-16", []string{"fixDead01"}},
 		{"has_deadline", "has_deadline=true", []string{"fixDead01", "fixOver01"}},
