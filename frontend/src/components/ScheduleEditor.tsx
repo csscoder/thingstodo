@@ -11,6 +11,7 @@ import type { TaskSchedule } from '../api/types'
 import { reorderSchedules } from '../api/schedules'
 import { localDb } from '../db/index'
 import { formatRelativeDate } from '../lib/format-date'
+import { addDays, useOwnerToday } from '../lib/owner-time'
 
 interface ScheduleEditorProps {
   taskId: string
@@ -68,6 +69,9 @@ export function ScheduleEditor({
   }, [focusStartTimeId])
 
   const [timeError, setTimeError] = useState<string | null>(null)
+
+  // Owner-zone today: past/today checks agree with the server's "today"
+  const today = useOwnerToday()
 
   // Auto-clear error message after 3 seconds
   useEffect(() => {
@@ -171,21 +175,16 @@ export function ScheduleEditor({
     const timelessDates = new Set(
       schedules.filter((s) => !s.start_time && s.when_date !== 'someday').map((s) => s.when_date),
     )
-    const d = new Date()
-    d.setDate(d.getDate() + 1)
     // Skip dates that already have a timeless entry (up to 30 days out)
-    for (let i = 0; i < 30; i++) {
-      const iso = d.toISOString().split('T')[0]
+    for (let i = 1; i <= 30; i++) {
+      const iso = addDays(today, i)
       if (!timelessDates.has(iso)) {
         createSchedule.mutate({ when_date: iso })
         return
       }
-      d.setDate(d.getDate() + 1)
     }
     // Fallback: just use the first available date
-    const date = new Date()
-    date.setDate(date.getDate() + 1)
-    createSchedule.mutate({ when_date: date.toISOString().split('T')[0] })
+    createSchedule.mutate({ when_date: addDays(today, 1) })
   }
 
   function handleDateChange(entry: TaskSchedule, index: number, date: string | null) {
@@ -311,8 +310,9 @@ export function ScheduleEditor({
         const isFirst = index === 0
         const isLast = index === schedules.length - 1
         const hasTime = !!entry.start_time
+        // Local clock for the time-of-day comparison within today;
+        // "today" itself comes from useOwnerToday above.
         const now = new Date()
-        const today = now.toISOString().split('T')[0]
         const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
         const isToday = entry.when_date === today
         const isPast = entry.when_date !== 'someday' && (

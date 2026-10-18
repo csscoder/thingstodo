@@ -5,6 +5,7 @@ import { useAppStore } from '../stores/app'
 import { useSearch } from '../hooks/queries'
 import { getTaskContext } from '../hooks/useTaskContext'
 import type { SearchResult } from '../api/types'
+import { ownerToday } from '../lib/owner-time'
 
 /** Wait for a task element to appear in the DOM, then expand and scroll to it.
  *  Retries briefly to handle page navigation + data loading delays. */
@@ -59,7 +60,7 @@ function SearchOverlayInner() {
       } else if (task.when_date === 'someday') {
         navigate('/someday')
       } else if (task.when_date) {
-        const today = new Date().toISOString().slice(0, 10)
+        const today = ownerToday()
         navigate(task.when_date <= today ? '/today' : '/upcoming')
       } else {
         navigate('/inbox')

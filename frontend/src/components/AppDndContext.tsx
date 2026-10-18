@@ -91,6 +91,7 @@ import { useAppStore } from '../stores/app'
 import { SortableListRegistryProvider } from '../contexts/SortableListRegistry'
 import { useSortableListRegistry } from '../contexts/useSortableListRegistry'
 import { calculatePosition } from '../lib/sort-position'
+import { ownerToday } from '../lib/owner-time'
 
 /** Parsed sidebar drop target for task drops (from a sidebar droppable id). */
 export type SidebarDropTarget =
@@ -127,7 +128,7 @@ function parseSidebarDropTarget(overId: string): SidebarDropTarget | null {
  */
 // eslint-disable-next-line react-refresh/only-export-components -- extracted for testability; moves with the drop handler
 export async function applySidebarDrop(target: SidebarDropTarget, taskIds: string[]): Promise<void> {
-  const today = new Date().toISOString().split('T')[0]
+  const today = ownerToday()
 
   for (const taskId of taskIds) {
     if (target.kind === 'trash') {
@@ -550,7 +551,7 @@ function AppDndContextInner({ children }: AppDndContextProps) {
             await localMutations.reopenTask(taskId)
           }
           if (overId === 'sidebar-today') {
-            const today = new Date().toISOString().split('T')[0]
+            const today = ownerToday()
             updateTaskInCache(queryClient, taskId, { when_date: today } as Partial<Task>)
             await localMutations.updateTask(taskId, { when_date: today })
           } else if (overId === 'sidebar-anytime') {

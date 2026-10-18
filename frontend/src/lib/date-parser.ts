@@ -15,6 +15,7 @@ import {
   isBefore,
   addYears,
 } from 'date-fns'
+import { ownerToday } from './owner-time'
 
 export interface ParsedDate {
   date: string // ISO date string YYYY-MM-DD
@@ -60,7 +61,10 @@ export function parseNaturalDate(input: string): ParsedDate | null {
   const text = input.trim().toLowerCase()
   if (!text) return null
 
-  const today = new Date()
+  // Anchor on the owner-zone date string, parsed to a local-midnight Date,
+  // so every date below is pure calendar math in the owner's "today".
+  const [year, month, day] = ownerToday().split('-').map(Number)
+  const today = new Date(year, month - 1, day)
 
   // "today"
   if (text === 'today' || text === 'this evening' || text === 'tonight') {

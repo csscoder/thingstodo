@@ -1,8 +1,9 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { useLocalUpcoming, useLocalViewCounts } from '../localQueries'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocalLogbook, useLocalToday, useLocalUpcoming, useLocalViewCounts } from '../localQueries'
 import { localDb } from '../../db'
 import type { LocalSchedule, LocalTask } from '../../db/schema'
+import { setOwnerTimeZone } from '../../lib/owner-time'
 
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear()
@@ -279,5 +280,65 @@ describe('useLocalViewCounts', () => {
 
     expect(result.current!.today).toBe(3) // earlier + multi-schedule-today + overdue
     expect(result.current!.overdue).toBe(1)
+  })
+})
+
+describe('owner-timezone date grouping', () => {
+  beforeEach(async () => {
+    await localDb.tasks.clear()
+    await localDb.schedules.clear()
+  })
+
+  afterEach(async () => {
+    await localDb.tasks.clear()
+    await localDb.schedules.clear()
+    vi.useRealTimers()
+    // Reset the owner zone to the browser zone so formatLocalDate and the
+    // hooks keep agreeing on "today" for the rest of this file.
+    setOwnerTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone)
+    localStorage.removeItem('thingstodo_timezone')
+  })
+
+  // At 22:00 UTC the Moscow (UTC+3) date is already Oct 19: a completion at
+  // 21:30Z is owner-today, one at 20:00Z (23:00 Oct 18 Moscow) is yesterday.
+  async function seedCompletionsAroundMidnight() {
+    await localDb.tasks.put(makeTask({
+      id: 'done-today',
+      status: 'completed',
+      completed_at: '2026-10-18 21:30:00',
+    }))
+    await localDb.tasks.put(makeTask({
+      id: 'done-yesterday',
+      status: 'completed',
+      completed_at: '2026-10-18 20:00:00',
+    }))
+  }
+
+  it('completed today uses the owner day', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-10-18T22:00:00Z'))
+    setOwnerTimeZone('Europe/Moscow')
+    await seedCompletionsAroundMidnight()
+
+    const { result } = renderHook(() => useLocalToday())
+
+    await waitFor(() => {
+      expect(result.current).toBeDefined()
+    })
+    expect(result.current!.completed.map((t) => t.id)).toEqual(['done-today'])
+  })
+
+  it('logbook groups by owner date', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-10-18T22:00:00Z'))
+    setOwnerTimeZone('Europe/Moscow')
+    await seedCompletionsAroundMidnight()
+
+    const { result } = renderHook(() => useLocalLogbook())
+
+    await waitFor(() => {
+      expect(result.current).toBeDefined()
+    })
+    expect(result.current!.groups.map((g) => g.date)).toEqual(['2026-10-19', '2026-10-18'])
   })
 })

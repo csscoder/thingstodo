@@ -28,6 +28,11 @@ import { formatRepeatRule } from '../lib/format-repeat'
 import type { ChecklistItem, Attachment, Reminder, ReminderType } from '../api/types'
 import { isReservedLink, hasReservedLink, isReservedAnchor } from '../lib/reserved-tags'
 import { formatReminderLabel } from '../lib/format-reminder'
+import {
+  isoToOwnerLocalInput,
+  ownerLocalInputToIso,
+  ownerToday,
+} from '../lib/owner-time'
 
 interface TaskDetailProps {
   taskId: string
@@ -249,7 +254,7 @@ export function TaskDetail({ taskId, isModal, toolbarPortalEl }: TaskDetailProps
     setShowWhen(false)
   }
 
-  const today = new Date().toISOString().split('T')[0]
+  const today = ownerToday()
   const hasActionableSchedules = task
     ? (task.schedules ?? []).some((s) => !s.completed && s.when_date !== today)
     : false
@@ -1144,13 +1149,16 @@ function ReminderEditor({ taskId, reminders, timeFormat }: { taskId: string; rem
   const [editingId, setEditingId] = useState<string | null>(null)
 
   function handleSave(type: ReminderType, value: number, exactAt: string, deleteId?: string) {
+    // The datetime-local field yields 'YYYY-MM-DDTHH:mm' — read it as a
+    // wall time in the owner zone so exact_at carries the zone's offset.
+    const exactIso = ownerLocalInputToIso(exactAt)
     const data = type === 'exact'
-      ? { type: 'exact' as const, exact_at: exactAt }
+      ? { type: 'exact' as const, exact_at: exactIso }
       : type === 'at_start' || type === 'on_day'
         ? { type, value: 0 }
         : { type, value }
 
-    if (type === 'exact' && !exactAt) return
+    if (type === 'exact' && !exactIso) return
 
     if (deleteId) {
       // Edit: delete old, then create new
@@ -1175,7 +1183,7 @@ function ReminderEditor({ taskId, reminders, timeFormat }: { taskId: string; rem
               key={r.id}
               type={r.type}
               value={r.value}
-              exactAt={r.exact_at ?? ''}
+              exactAt={isoToOwnerLocalInput(r.exact_at ?? '')}
               onSave={(type, value, exactAt) => handleSave(type, value, exactAt, r.id)}
               onCancel={() => setEditingId(null)}
             />

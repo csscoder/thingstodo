@@ -15,6 +15,7 @@ import { useFilterStore } from '../stores/filters'
 import { startSyncEngine, stopSyncEngine } from '../sync/engine'
 import { fullSync } from '../sync/pull'
 import { localDb } from '../db'
+import { loadOwnerTimeZone } from '../lib/owner-time'
 import { OfflineBanner } from './OfflineBanner'
 import { MissedRemindersToast } from './MissedRemindersToast'
 import { SyncingOverlay } from './SyncingOverlay'
@@ -47,6 +48,9 @@ export function AppLayout() {
   useEffect(() => {
     let mounted = true
     async function init() {
+      // Adopt the server's timezone before the first snapshot so its dates
+      // land in the owner zone; loadOwnerTimeZone never throws.
+      await loadOwnerTimeZone()
       const taskCount = await localDb.tasks.count()
       if (taskCount === 0 && mounted) {
         setInitialSyncing(true)

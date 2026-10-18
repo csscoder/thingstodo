@@ -3,6 +3,7 @@ import { api } from '../../api/client'
 import { localDb } from '../../db/index'
 import { createProject, createTask } from '../../db/mutations'
 import { applySidebarDrop } from '../AppDndContext'
+import { ownerToday } from '../../lib/owner-time'
 
 // Mock the sync engine so queued changes never hit the network
 vi.mock('../../sync/engine', () => ({
@@ -102,6 +103,6 @@ describe('applySidebarDrop (multi-drag drop semantics)', () => {
     const reopened = await localDb.tasks.get(completedId)
     expect(reopened?.status).toBe('open')
     expect(reopened?.completed_at).toBeNull()
-    expect(reopened?.when_date).toBe(new Date().toISOString().split('T')[0])
+    expect(reopened?.when_date).toBe(ownerToday())
   })
 })

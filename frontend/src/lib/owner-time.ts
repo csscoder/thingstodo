@@ -165,7 +165,8 @@ export function ownerDateOf(isoUtc: string): string {
 /** Pure date-string arithmetic (UTC), independent of any timezone. */
 export function addDays(date: string, n: number): string {
   const [year, month, day] = date.split('-').map(Number)
-  return new Date(Date.UTC(year, month - 1, day + n)).toISOString().slice(0, 10)
+  const d = new Date(Date.UTC(year, month - 1, day + n))
+  return `${String(d.getUTCFullYear()).padStart(4, '0')}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`
 }
 
 /** RFC3339 UTC bounds [start, end) of one owner-zone calendar day. */

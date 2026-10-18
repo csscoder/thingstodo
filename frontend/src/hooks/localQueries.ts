@@ -11,6 +11,7 @@
 
 import { useLiveQuery } from 'dexie-react-hooks'
 import { localDb } from '../db/index'
+import { addDays, ownerDateOf, ownerToday, useOwnerToday } from '../lib/owner-time'
 import type {
   LocalTask,
   LocalProject,
@@ -51,23 +52,14 @@ import type {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Returns today's date as a YYYY-MM-DD string in local time. */
+/** Returns today's date as a YYYY-MM-DD string in the owner timezone. */
 function todayString(): string {
-  const d = new Date()
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+  return ownerToday()
 }
 
-/** Returns tomorrow's date as a YYYY-MM-DD string in local time. */
+/** Returns tomorrow's date as a YYYY-MM-DD string in the owner timezone. */
 function tomorrowString(): string {
-  const d = new Date()
-  d.setDate(d.getDate() + 1)
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+  return addDays(todayString(), 1)
 }
 
 /** Strip sync metadata fields so callers get plain server-shaped types. */
@@ -277,6 +269,8 @@ function tagToPlain(t: LocalTag): Tag {
  * When `reviewIncludeRecurring` is false, recurring tasks are excluded from review.
  */
 export function useLocalInbox(reviewAfterDays?: number | null, reviewIncludeRecurring = true): InboxView | undefined {
+  // Owner-zone today: re-runs at owner midnight so the review cutoff rolls over
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
     const tasks = await localDb.tasks
       .where('status')
@@ -294,9 +288,7 @@ export function useLocalInbox(reviewAfterDays?: number | null, reviewIncludeRecu
 
     let review: Task[] = []
     if (reviewAfterDays && reviewAfterDays > 0) {
-      const cutoff = new Date()
-      cutoff.setDate(cutoff.getDate() - reviewAfterDays)
-      const cutoffStr = cutoff.toISOString().slice(0, 10)
+      const cutoffStr = addDays(today, -reviewAfterDays)
 
       const stale = await localDb.tasks
         .where('status')
@@ -318,7 +310,7 @@ export function useLocalInbox(reviewAfterDays?: number | null, reviewIncludeRecu
       tasks: await enrichTasks(tasks),
       review,
     } satisfies InboxView
-  }, [reviewAfterDays, reviewIncludeRecurring])
+  }, [reviewAfterDays, reviewIncludeRecurring, today])
 }
 
 /**
@@ -345,9 +337,9 @@ async function tasksToGroups(tasks: LocalTask[]): Promise<TodayViewGroup[]> {
  * Includes overdue, earlier, and completed-today.
  */
 export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined {
+  // Owner-zone today: re-runs at owner midnight so Today rolls over
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
-    const today = todayString()
-
     // Collect all tasks that should appear in Today:
     // 1) when_date = today
     // 2) deadline = today (even if no when_date)
@@ -463,13 +455,13 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
       (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0),
     )
 
-    // Completed today
+    // Completed today (owner-zone calendar day of the terminal timestamp)
     const completedTasks = await localDb.tasks
       .filter(
         (t) =>
           !t.deleted_at &&
           (t.status === 'completed' || t.status === 'canceled' || t.status === 'wont_do') &&
-          (t.completed_at ?? t.canceled_at ?? t.updated_at ?? '') >= today,
+          ownerDateOf(t.completed_at ?? t.canceled_at ?? t.updated_at ?? '') === today,
       )
       .toArray()
     completedTasks.sort((a, b) => {
@@ -489,7 +481,7 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
       earlier: await enrichTasks(earlierTasks),
       completed: await enrichTasks(completedTasks),
     } satisfies TodayView
-  }, [eveningStartsAt])
+  }, [eveningStartsAt, today])
 }
 
 /**
@@ -503,8 +495,9 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
  * today, never to tomorrow.
  */
 export function useLocalUpcoming(): UpcomingView | undefined {
+  // Owner-zone today: re-runs at owner midnight so the date groups roll over
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
-    const today = todayString()
     const tomorrow = tomorrowString()
 
     // Date groups: one entry per uncompleted schedule on or after tomorrow.
@@ -600,7 +593,7 @@ export function useLocalUpcoming(): UpcomingView | undefined {
       dates,
       earlier: await enrichTasks(earlierTasks),
     } satisfies UpcomingView
-  })
+  }, [today])
 }
 
 /**
@@ -773,12 +766,12 @@ export function useLocalLogbook(): LogbookView | undefined {
       return bTs.localeCompare(aTs)
     })
 
-    // Group by calendar date of completion
+    // Group by owner-zone calendar date of completion
     const enriched = await enrichTasks(allDone)
     const dateMap = new Map<string, Task[]>()
     for (const t of enriched) {
       const ts = t.completed_at ?? t.canceled_at ?? t.updated_at ?? ''
-      const dateKey = ts ? ts.slice(0, 10) : 'unknown'
+      const dateKey = ts ? ownerDateOf(ts) : 'unknown'
       if (!dateMap.has(dateKey)) dateMap.set(dateKey, [])
       dateMap.get(dateKey)!.push(t)
     }
@@ -804,7 +797,7 @@ export function useLocalTrash(): TrashView | undefined {
     const enriched = await enrichTasks(deleted)
     const dateMap = new Map<string, Task[]>()
     for (const t of enriched) {
-      const dateKey = (t.deleted_at ?? '').slice(0, 10)
+      const dateKey = ownerDateOf(t.deleted_at ?? '')
       if (!dateMap.has(dateKey)) dateMap.set(dateKey, [])
       dateMap.get(dateKey)!.push(t)
     }
@@ -967,8 +960,9 @@ export function useLocalTags(): Tag[] | undefined {
  * View counts for sidebar badges — mirrors ViewCounts from the server.
  */
 export function useLocalViewCounts(reviewAfterDays?: number | null, reviewIncludeRecurring = true): ViewCounts | undefined {
+  // Owner-zone today: re-runs at owner midnight so the badges roll over
+  const today = useOwnerToday()
   return useLiveQuery(async () => {
-    const today = todayString()
     // Read the whole task table once so the badge query reruns on any task
     // mutation, including changes only visible through JS filters. The
     // schedule rows join the same way for the today badge.
@@ -1024,9 +1018,7 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
     // Review: open tasks not updated in reviewAfterDays, excluding inbox tasks
     let reviewCount = 0
     if (reviewAfterDays && reviewAfterDays > 0) {
-      const cutoff = new Date()
-      cutoff.setDate(cutoff.getDate() - reviewAfterDays)
-      const cutoffStr = cutoff.toISOString().slice(0, 10)
+      const cutoffStr = addDays(today, -reviewAfterDays)
       const inboxIds = new Set(inboxTasks.map((t) => t.id))
 
       reviewCount = openTasks.filter(
@@ -1047,7 +1039,7 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
       logbook: logbookCount,
       trash: trashCount,
     } satisfies ViewCounts
-  }, [reviewAfterDays, reviewIncludeRecurring])
+  }, [reviewAfterDays, reviewIncludeRecurring, today])
 }
 
 // ---------------------------------------------------------------------------
