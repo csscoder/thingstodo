@@ -50,6 +50,13 @@ func newRouterClient(t *testing.T, cfg config.Config) (*testutil.TestClient, *sq
 	t.Helper()
 	cfg.AuthMode = "proxy"
 	cfg.AuthProxyHeader = "Remote-User"
+	return newRouterClientForConfig(t, cfg)
+}
+
+// newRouterClientForConfig builds a router that keeps the auth mode of
+// cfg, for tests that need something other than proxy auth.
+func newRouterClientForConfig(t *testing.T, cfg config.Config) (*testutil.TestClient, *sql.DB) {
+	t.Helper()
 	if cfg.AttachmentsPath == "" {
 		cfg.AttachmentsPath = t.TempDir()
 	}
@@ -95,6 +102,185 @@ func doReq(t *testing.T, client *testutil.TestClient, method, path, userID strin
 		t.Fatalf("failed to read response body: %v", err)
 	}
 	return &testutil.TestResponse{Response: resp, Body: respBody}
+}
+
+// doRaw sends req against the test server and returns the response with
+// its body fully read, without adding any auth headers.
+func doRaw(t *testing.T, client *testutil.TestClient, req *http.Request) *testutil.TestResponse {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	return &testutil.TestResponse{Response: resp, Body: respBody}
+}
+
+func newOptionsRequest(t *testing.T, client *testutil.TestClient, path string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodOptions, client.Server.URL+path, nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	return req
+}
+
+// assertCORSHeaders pins the spec A2 header set verbatim, plus the
+// invariant that Access-Control-Allow-Credentials is never sent.
+func assertCORSHeaders(t *testing.T, h http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"Access-Control-Allow-Origin":   "*",
+		"Access-Control-Allow-Methods":  "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+		"Access-Control-Allow-Headers":  "Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID",
+		"Access-Control-Expose-Headers": "Mcp-Session-Id",
+		"Access-Control-Max-Age":        "600",
+	} {
+		if got := h.Get(name); got != want {
+			t.Errorf("header %s: expected %q, got %q", name, want, got)
+		}
+	}
+	assertNoCredentialsHeader(t, h)
+}
+
+func assertNoCredentialsHeader(t *testing.T, h http.Header) {
+	t.Helper()
+	if got := h.Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("Access-Control-Allow-Credentials must never be set, got %q", got)
+	}
+}
+
+// assertNoCORSHeaders asserts that none of the A2 headers (nor the
+// forbidden credentials header) were added.
+func assertNoCORSHeaders(t *testing.T, h http.Header) {
+	t.Helper()
+	for _, name := range []string{
+		"Access-Control-Allow-Origin",
+		"Access-Control-Allow-Methods",
+		"Access-Control-Allow-Headers",
+		"Access-Control-Expose-Headers",
+		"Access-Control-Max-Age",
+		"Access-Control-Allow-Credentials",
+	} {
+		if got := h.Get(name); got != "" {
+			t.Errorf("expected no %s header, got %q", name, got)
+		}
+	}
+}
+
+func TestCORS_Preflight(t *testing.T) {
+	client, _ := newRouterClient(t, config.Config{})
+
+	// No Remote-User header is sent: a preflight that reached the auth
+	// middleware would answer 401, so a 204 proves OPTIONS is answered
+	// before auth runs.
+	req := newOptionsRequest(t, client, "/api/tasks")
+	req.Header.Set("Origin", "https://widget.example")
+	resp := doRaw(t, client, req)
+
+	testutil.AssertStatus(t, resp, http.StatusNoContent)
+	assertCORSHeaders(t, resp.Header)
+
+	// The same preflight policy covers the /mcp mount point.
+	mcpReq := newOptionsRequest(t, client, "/mcp")
+	mcpReq.Header.Set("Origin", "https://widget.example")
+	mcpResp := doRaw(t, client, mcpReq)
+
+	testutil.AssertStatus(t, mcpResp, http.StatusNoContent)
+	assertCORSHeaders(t, mcpResp.Header)
+}
+
+func TestCORS_PreflightLowercaseHeaders(t *testing.T) {
+	client, _ := newRouterClient(t, config.Config{})
+
+	req := newOptionsRequest(t, client, "/api/tasks")
+	// Sent with a lowercase field name on the wire. Go canonicalizes
+	// header names when parsing the request, and http.Header lookups are
+	// case-insensitive, so the middleware must not depend on the case
+	// any header arrives — or is read — in.
+	req.Header["origin"] = []string{"https://widget.example"}
+	resp := doRaw(t, client, req)
+
+	testutil.AssertStatus(t, resp, http.StatusNoContent)
+	for name, want := range map[string]string{
+		"access-control-allow-origin":   "*",
+		"access-control-allow-methods":  "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+		"access-control-allow-headers":  "Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID",
+		"access-control-expose-headers": "Mcp-Session-Id",
+		"access-control-max-age":        "600",
+	} {
+		if got := resp.Header.Get(name); got != want {
+			t.Errorf("header %s: expected %q, got %q", name, want, got)
+		}
+	}
+	assertNoCredentialsHeader(t, resp.Header)
+}
+
+func TestCORS_TokenGetCrossOrigin(t *testing.T) {
+	client, db := newRouterClient(t, config.Config{})
+
+	if _, err := repository.NewUserRepository(db).Create("tokenuser", "hash"); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	_, token, err := repository.NewAPITokenRepository(db).Create("cors")
+	if err != nil {
+		t.Fatalf("failed to create token: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, client.Server.URL+"/api/tasks", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Origin", "https://widget.example")
+	resp := doRaw(t, client, req)
+
+	testutil.AssertStatus(t, resp, http.StatusOK)
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin: expected *, got %q", got)
+	}
+	assertNoCredentialsHeader(t, resp.Header)
+}
+
+func TestCORS_OffInNoneMode(t *testing.T) {
+	client, db := newRouterClientForConfig(t, config.Config{AuthMode: "none"})
+
+	if _, err := repository.NewUserRepository(db).Create("noneuser", "hash"); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// CORS disabled: the preflight is not answered with 204, the request
+	// falls through to chi's 405, and no CORS headers are added.
+	req := newOptionsRequest(t, client, "/api/tasks")
+	req.Header.Set("Origin", "https://widget.example")
+	resp := doRaw(t, client, req)
+
+	testutil.AssertStatus(t, resp, http.StatusMethodNotAllowed)
+	assertNoCORSHeaders(t, resp.Header)
+
+	// Plain requests stay header-free as well.
+	getReq, err := http.NewRequest(http.MethodGet, client.Server.URL+"/api/tasks", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	getResp := doRaw(t, client, getReq)
+
+	testutil.AssertStatus(t, getResp, http.StatusOK)
+	assertNoCORSHeaders(t, getResp.Header)
+
+	// The /mcp mount point exists but is empty; with CORS off its
+	// preflight is not answered either — the request 404s inside the
+	// group instead of falling through to the SPA.
+	mcpReq := newOptionsRequest(t, client, "/mcp")
+	mcpReq.Header.Set("Origin", "https://widget.example")
+	mcpResp := doRaw(t, client, mcpReq)
+
+	testutil.AssertStatus(t, mcpResp, http.StatusNotFound)
+	assertNoCORSHeaders(t, mcpResp.Header)
 }
 
 func TestRouter_UnknownAPIRouteIsJSON404(t *testing.T) {

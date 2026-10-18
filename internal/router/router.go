@@ -98,6 +98,12 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
+		// CORS (spec A2), mounted before the auth group so preflight
+		// OPTIONS requests are answered with 204 without a token. Off
+		// in none mode, where any wildcard policy would expose the
+		// unauthenticated API to every website.
+		r.Use(mw.CORS(cfg.AuthMode != "none"))
+
 		// Unknown /api routes and wrong methods return the JSON error
 		// envelope instead of chi's plain-text defaults.
 		r.NotFound(func(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +266,20 @@ func New(db *sql.DB, cfg config.Config, broker *sse.Broker, sched *scheduler.Sch
 			r.Post("/sync/push", syncH.Push)
 			r.Get("/sync/full", syncH.Full)
 		})
+	})
+
+	// /mcp serves the Streamable HTTP MCP handler (spec B); the
+	// handler itself is mounted in a later task. Its CORS policy (A2) is
+	// the same as /api's, so agent and widget clients face one
+	// cross-origin policy. The placeholder 404 route exists because chi
+	// binds a subrouter's middleware chain only once it has a route —
+	// without it CORS would never run on /mcp. Task 20 replaces the
+	// placeholder with the real handler.
+	r.Route("/mcp", func(r chi.Router) {
+		r.Use(mw.CORS(cfg.AuthMode != "none"))
+		r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mw.WriteError(w, http.StatusNotFound, "not found", "NOT_FOUND", "")
+		}))
 	})
 
 	// Serve embedded frontend static files with SPA fallback

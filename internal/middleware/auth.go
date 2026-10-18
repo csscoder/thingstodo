@@ -3,7 +3,9 @@ package middleware
 import (
 	"context"
 	"crypto/subtle"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/collinjanssen/thingstodo/internal/config"
@@ -74,6 +76,10 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 					WriteError(w, http.StatusInternalServerError, "no users found", "INTERNAL", "")
 					return
 				}
+				if crossOriginSession(r) {
+					rejectCrossOriginSession(w)
+					return
+				}
 				ctx := context.WithValue(r.Context(), UserIDKey, userID)
 				ctx = context.WithValue(ctx, AuthMethodKey, AuthSession)
 				next.ServeHTTP(w, r.WithContext(ctx))
@@ -109,6 +115,13 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 					id, found := tokenLookup(token)
 					if found {
 						if sessionOK {
+							// The session outranks the token, so the
+							// effective method is session and the
+							// cross-origin guard applies.
+							if crossOriginSession(r) {
+								rejectCrossOriginSession(w)
+								return
+							}
 							next.ServeHTTP(w, r.WithContext(sessionCtx))
 							return
 						}
@@ -132,12 +145,71 @@ func Auth(cfg config.Config, apiKeyUserLookup UserLookupFunc, userExists UserExi
 			}
 
 			if sessionOK {
+				if crossOriginSession(r) {
+					rejectCrossOriginSession(w)
+					return
+				}
 				next.ServeHTTP(w, r.WithContext(sessionCtx))
 				return
 			}
 			WriteError(w, http.StatusUnauthorized, rejectMsg, "UNAUTHORIZED", "")
 		})
 	}
+}
+
+// crossOriginSession reports whether r names an origin other than the
+// one it was sent to: it carries an Origin header whose host — name and,
+// with default ports (80 for http, 443 for https) stripped on both
+// sides, port — differs from the request Host.
+//
+// This is the cross-origin session guard of spec A2. Browsers attach
+// Origin to every cross-origin request and scripts cannot suppress it,
+// so a request that would authenticate as a session (cookie or proxy
+// header) and still names a foreign origin cannot come from the trusted
+// web UI; it is rejected with 403. A missing or unparseable Origin
+// counts as same-origin: browsers always send it cross-origin, so only
+// header-less non-browser clients (curl, the CLI, Hermes) omit or mangle
+// it. Bearer-authenticated requests (master key or named token) are
+// exempt — cross-origin use is exactly what tokens are for.
+func crossOriginSession(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	originHost, originPort := u.Hostname(), stripDefaultPort(u.Scheme, u.Port())
+	if originHost == "" {
+		// Opaque origins such as "null" (sandboxed frames) are never
+		// same-origin with the target.
+		return true
+	}
+	reqHost, reqPort := r.Host, ""
+	if h, p, err := net.SplitHostPort(r.Host); err == nil {
+		reqHost, reqPort = h, p
+	}
+	reqPort = stripDefaultPort(u.Scheme, reqPort)
+	return !strings.EqualFold(originHost, reqHost) || originPort != reqPort
+}
+
+// stripDefaultPort drops the scheme's default port so that
+// "https://app.example:443" and Host "app.example" compare equal.
+func stripDefaultPort(scheme, port string) string {
+	switch {
+	case scheme == "http" && port == "80":
+		return ""
+	case scheme == "https" && port == "443":
+		return ""
+	}
+	return port
+}
+
+// rejectCrossOriginSession answers a session-authenticated request that
+// named a foreign Origin with 403 FORBIDDEN in the standard envelope.
+func rejectCrossOriginSession(w http.ResponseWriter) {
+	WriteError(w, http.StatusForbidden, "cross-origin session request forbidden", "FORBIDDEN", "")
 }
 
 // sessionAuth evaluates the mode-specific session (proxy header or JWT

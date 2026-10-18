@@ -112,6 +112,24 @@ Authorization: Bearer ttd_<token>
 
 Precedence: the master `API_KEY` is checked first, then the session (cookie or proxy header), then named tokens. A valid session wins over a presented Bearer token; a Bearer value that matches nothing (wrong master key, unknown or revoked token) rejects the request with 401 immediately, with no cookie fallback. In `none` mode Bearer headers are ignored entirely. A named token authenticates as the first (admin) user, updates its `last_used_at` (at most one write per minute per token) and cannot call the `/api/tokens` management endpoints (403 `FORBIDDEN`).
 
+### CORS (all modes except `none`)
+
+The `/api` and `/mcp` endpoints send these headers on every response:
+
+```
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID
+Access-Control-Expose-Headers: Mcp-Session-Id
+Access-Control-Max-Age: 600
+```
+
+`Access-Control-Allow-Credentials` is never sent, so cross-origin scripts cannot read responses to cookie-authenticated requests. Preflight `OPTIONS` requests are answered with **204** before authentication runs. Widgets on any origin therefore work with a Bearer token (master key or named token).
+
+CORS is **off** in `AUTH_MODE=none`: that mode has no auth, and a wildcard policy would let any website read and write the data.
+
+**Cross-origin session guard.** A request that would authenticate as a session (cookie or proxy header) and carries an `Origin` header naming a different host than the request `Host` is rejected with **403 Forbidden** (`FORBIDDEN`), regardless of method — CORS alone cannot stop a browser from attaching a `SameSite=Lax` cookie to a simple `text/plain` POST, which needs no preflight, and a cross-origin session GET leaks data too. Browsers always attach `Origin` to cross-origin requests, so genuine cross-origin browser requests cannot slip past the guard by omitting it. Requests without `Origin` (CLI, curl, agents) and same-origin requests (the web UI) are unaffected, and Bearer-authenticated requests are exempt. Default ports (80 for `http`, 443 for `https`) are stripped on both sides before comparing, so `https://app.example:443` matches `Host: app.example`.
+
 ### GET /api/auth/config
 **Mode: all** (public, no authentication required)
 
@@ -1385,6 +1403,28 @@ On connect the server sends:
 ```
 event: connected
 data: {"client_id": "string"}
+```
+
+#### Reading the stream from a widget (SSE via fetch)
+
+The browser's `EventSource` cannot send headers, so cross-origin widgets
+authenticate by reading the stream with `fetch()` and a `ReadableStream`
+instead. Tokens in query strings are not supported.
+
+```js
+const resp = await fetch("/api/events", {
+  headers: { Authorization: "Bearer ttd_<token>" },
+});
+const reader = resp.body
+  .pipeThrough(new TextDecoderStream())
+  .getReader();
+for (;;) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  // value is one chunk of the text/event-stream: parse "event:" and
+  // "data:" lines and refetch what changed.
+  console.log(value);
+}
 ```
 
 Every **single-entity** change event carries an envelope: the changed
