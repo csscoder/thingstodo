@@ -409,7 +409,27 @@ func (r *ScheduleRepository) CreateFirstEntry(taskID, date string) error {
 // task is completed, canceled, or marked won't do.
 func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
 	var deletedIDs []string
+	var flippedIDs []string
 	if err := r.inTx(func(db DBTX) error {
+		// Collect the ids of past/today entries this run flips to completed
+		// before the update clears the completed = 0 flag that selects them.
+		rows, err := db.Query(
+			"SELECT id FROM task_schedules WHERE task_id = ? AND when_date <= ? AND when_date != 'someday' AND completed = 0",
+			taskID, today,
+		)
+		if err != nil {
+			return fmt.Errorf("query flipped schedule ids: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan flipped schedule id: %w", err)
+			}
+			flippedIDs = append(flippedIDs, id)
+		}
+		_ = rows.Close()
+
 		// Mark past and today's uncompleted entries as completed
 		if _, err := db.Exec(
 			"UPDATE task_schedules SET completed = 1 WHERE task_id = ? AND when_date <= ? AND when_date != 'someday' AND completed = 0",
@@ -419,7 +439,7 @@ func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
 		}
 
 		// Collect IDs of future/someday entries before deleting them (for change log)
-		rows, err := db.Query(
+		rows, err = db.Query(
 			"SELECT id FROM task_schedules WHERE task_id = ? AND (when_date > ? OR when_date = 'someday') AND completed = 0",
 			taskID, today,
 		)
@@ -448,21 +468,18 @@ func (r *ScheduleRepository) CleanupOnTaskDone(taskID, today string) error {
 		return err
 	}
 
-	// Log completed entries
-	completedRows, err := r.db.Query(
-		"SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE task_id = ? AND when_date <= ? AND when_date != 'someday' AND completed = 1",
-		taskID, today,
-	)
-	if err == nil {
-		defer func() { _ = completedRows.Close() }()
-		for completedRows.Next() {
-			var s model.TaskSchedule
-			if err := completedRows.Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder); err != nil {
-				break
-			}
-			// Best-effort log: the transaction already committed.
-			_ = logChange(r.changeLog, "schedule", s.ID, "update", []string{"completed"}, &s, "", "")
+	// Log only the entries this run flipped: rows completed before this
+	// call are unchanged and must not produce redundant change-log entries.
+	for _, id := range flippedIDs {
+		var s model.TaskSchedule
+		err := r.db.QueryRow(
+			"SELECT id, task_id, when_date, start_time, end_time, completed, sort_order FROM task_schedules WHERE id = ?", id,
+		).Scan(&s.ID, &s.TaskID, &s.WhenDate, &s.StartTime, &s.EndTime, &s.Completed, &s.SortOrder)
+		if err != nil {
+			continue
 		}
+		// Best-effort log: the transaction already committed.
+		_ = logChange(r.changeLog, "schedule", id, "update", []string{"completed"}, &s, "", "")
 	}
 
 	// Log deleted entries
