@@ -2,7 +2,7 @@ import { renderHook, waitFor, act } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocalLogbook, useLocalProjectTasks, useLocalToday, useLocalUpcoming, useLocalViewCounts } from '../localQueries'
 import { localDb } from '../../db'
-import type { LocalSchedule, LocalTask } from '../../db/schema'
+import type { LocalProject, LocalSchedule, LocalTask } from '../../db/schema'
 import { setOwnerTimeZone } from '../../lib/owner-time'
 
 function formatLocalDate(date: Date): string {
@@ -76,6 +76,29 @@ function makeSchedule(overrides: Partial<LocalSchedule> = {}): LocalSchedule {
     completed: false,
     sort_order: 0,
     created_at: now,
+    _syncStatus: 'synced',
+    _localUpdatedAt: now,
+    ...overrides,
+  }
+}
+
+function makeProject(overrides: Partial<LocalProject> = {}): LocalProject {
+  const now = new Date().toISOString()
+  return {
+    id: 'project-1',
+    title: 'Project',
+    notes: '',
+    area_id: null,
+    area: { id: '', title: '' },
+    status: 'open',
+    when_date: null,
+    deadline: null,
+    sort_order: 0,
+    task_count: 0,
+    completed_task_count: 0,
+    tags: [],
+    created_at: now,
+    updated_at: now,
     _syncStatus: 'synced',
     _localUpdatedAt: now,
     ...overrides,
@@ -183,11 +206,13 @@ describe('useLocalViewCounts', () => {
   beforeEach(async () => {
     await localDb.tasks.clear()
     await localDb.schedules.clear()
+    await localDb.projects.clear()
   })
 
   afterEach(async () => {
     await localDb.tasks.clear()
     await localDb.schedules.clear()
+    await localDb.projects.clear()
   })
 
   it('reacts to review and overdue changes driven by non-indexed fields', async () => {
@@ -197,6 +222,10 @@ describe('useLocalViewCounts', () => {
     const tenDaysAgo = new Date(today)
     tenDaysAgo.setDate(today.getDate() - 10)
 
+    // The task's project must exist and be open: like the server's
+    // anytimeOwnershipCond, the anytime badge counts only tasks the Anytime
+    // view can list.
+    await localDb.projects.put(makeProject())
     await localDb.tasks.put(makeTask({
       updated_at: tenDaysAgo.toISOString(),
       deadline: formatLocalDate(yesterday),
@@ -371,5 +400,52 @@ describe('owner-timezone date grouping', () => {
       expect(result.current).toBeDefined()
     })
     expect(result.current!.groups.map((g) => g.date)).toEqual(['2026-10-19', '2026-10-18'])
+  })
+})
+
+describe('useLocalProjectTasks ordering', () => {
+  beforeEach(async () => {
+    await localDb.tasks.clear()
+    await localDb.schedules.clear()
+    await localDb.projects.clear()
+  })
+
+  afterEach(async () => {
+    await localDb.tasks.clear()
+    await localDb.schedules.clear()
+    await localDb.projects.clear()
+  })
+
+  // M1: the project list follows sort_order_project like the server, so a
+  // drag that writes new positions survives the live-query re-run.
+  it('drag reorder in a project survives re-render', async () => {
+    await localDb.projects.put(makeProject())
+    await localDb.tasks.put(makeTask({
+      id: 'task-a',
+      title: 'Aaa first alphabetically',
+      sort_order_project: 20,
+    }))
+    await localDb.tasks.put(makeTask({
+      id: 'task-b',
+      title: 'Bbb second alphabetically',
+      sort_order_project: 10,
+    }))
+
+    const { result } = renderHook(() => useLocalProjectTasks('project-1'))
+
+    await waitFor(() => {
+      expect(result.current).toBeDefined()
+    })
+    // Order follows sort_order_project, not the title.
+    expect(result.current!.map((t) => t.id)).toEqual(['task-b', 'task-a'])
+
+    // Drag task-a above task-b: the reorder writes a smaller sort_order_project.
+    await act(async () => {
+      await localDb.tasks.update('task-a', { sort_order_project: 5 })
+    })
+
+    await waitFor(() => {
+      expect(result.current!.map((t) => t.id)).toEqual(['task-a', 'task-b'])
+    })
   })
 })

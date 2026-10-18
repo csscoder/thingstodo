@@ -3,7 +3,19 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { useLocalToday, useLocalUpcoming } from '../localQueries'
+import {
+  useLocalAnytime,
+  useLocalAreaDetail,
+  useLocalInbox,
+  useLocalLogbook,
+  useLocalProjectDetail,
+  useLocalSomeday,
+  useLocalTagTasks,
+  useLocalToday,
+  useLocalTrash,
+  useLocalUpcoming,
+  useLocalViewCounts,
+} from '../localQueries'
 import { localDb } from '../../db'
 import { setOwnerTimeZone } from '../../lib/owner-time'
 import type {
@@ -14,7 +26,16 @@ import type {
   LocalTag,
   LocalTask,
 } from '../../db/schema'
-import type { ProjectStatus, Task, TodayView, UpcomingView } from '../../api/types'
+import type {
+  AnytimeView,
+  AreaDetail,
+  LogbookView,
+  ProjectDetail,
+  ProjectStatus,
+  Task,
+  TodayView,
+  UpcomingView,
+} from '../../api/types'
 
 // The shared view contract fixtures (testdata/views) are the one source of
 // view truth: the Go contract test runs them against the repositories, this
@@ -52,6 +73,16 @@ interface FixtureTask {
   tag_ids?: string[]
 }
 
+interface FixtureCounts {
+  inbox: number
+  today: number
+  overdue: number
+  anytime: number
+  someday: number
+  logbook: number
+  trash: number
+}
+
 interface Fixture {
   name: string
   now: string
@@ -76,7 +107,13 @@ interface Fixture {
   expect: {
     today?: FixtureRow[]
     upcoming?: FixtureRow[]
-  }
+    inbox?: FixtureRow[]
+    anytime?: FixtureRow[]
+    someday?: FixtureRow[]
+    logbook?: FixtureRow[]
+    trash?: FixtureRow[]
+    counts?: FixtureCounts
+  } & Record<string, unknown>
 }
 
 async function loadFixture(name: string): Promise<Fixture> {
@@ -237,6 +274,44 @@ function upcomingRows(view: UpcomingView): FixtureRow[] {
   return rows
 }
 
+/** Flatten Anytime/Someday in display order, like the Go runner's
+ *  vcFlattenAnytime: each area's projects then standalone tasks, then the
+ *  no-area projects and no-area standalone tasks. */
+function flattenAnytime(view: AnytimeView): FixtureRow[] {
+  const rows: FixtureRow[] = []
+  for (const a of view.areas) {
+    for (const p of a.projects) rows.push(...p.tasks.map((t) => rowOf(t)))
+    rows.push(...a.standalone_tasks.map((t) => rowOf(t)))
+  }
+  for (const p of view.no_area.projects) rows.push(...p.tasks.map((t) => rowOf(t)))
+  rows.push(...view.no_area.standalone_tasks.map((t) => rowOf(t)))
+  return rows
+}
+
+/** Date-grouped listings (logbook, trash): like the Go vcGroupRows. */
+function groupRows(view: LogbookView): FixtureRow[] {
+  const rows: FixtureRow[] = []
+  for (const g of view.groups) {
+    for (const t of g.tasks) rows.push(rowOf(t, undefined, g.date))
+  }
+  return rows
+}
+
+/** Project detail in the Go runner's flatten order: headings' tasks, then
+ *  tasks without heading, then completed tasks. */
+function projectDetailRows(view: ProjectDetail): FixtureRow[] {
+  const rows: FixtureRow[] = []
+  for (const h of view.headings) rows.push(...h.tasks.map((t) => rowOf(t)))
+  rows.push(...view.tasks_without_heading.map((t) => rowOf(t)))
+  rows.push(...view.completed_tasks.map((t) => rowOf(t)))
+  return rows
+}
+
+/** Area detail: standalone tasks, then completed standalone tasks. */
+function areaDetailRows(view: AreaDetail): FixtureRow[] {
+  return [...view.tasks, ...view.completed_tasks].map((t) => rowOf(t))
+}
+
 function expectRows(key: string, name: string, want: FixtureRow[], got: FixtureRow[]): void {
   expect(
     got.map(norm),
@@ -256,7 +331,7 @@ afterEach(async () => {
   localStorage.removeItem('thingstodo_timezone')
 })
 
-test.each(FIXTURE_NAMES)('%s: today and upcoming match', async (name) => {
+test.each(FIXTURE_NAMES)('%s: local views match the shared fixtures', async (name) => {
   const fx = await loadFixture(name)
 
   vi.useFakeTimers({ shouldAdvanceTime: true })
@@ -276,4 +351,76 @@ test.each(FIXTURE_NAMES)('%s: today and upcoming match', async (name) => {
 
   expectRows('today', name, fx.expect.today ?? [], todayRows(today.result.current!))
   expectRows('upcoming', name, fx.expect.upcoming ?? [], upcomingRows(upcoming.result.current!))
+
+  // Every remaining expect key maps to one local hook, exactly like the Go
+  // runner maps it to one repository call. The hook mounts get slower as
+  // more live queries pile up under fake timers, so the waits allow 5s.
+  const WAIT: Parameters<typeof waitFor>[1] = { timeout: 5000 }
+  for (const key of Object.keys(fx.expect).sort()) {
+    if (key === 'today' || key === 'upcoming') continue
+
+    if (key === 'counts') {
+      const counts = renderHook(() => useLocalViewCounts())
+      await waitFor(() => {
+        expect(counts.result.current).toBeDefined()
+      }, WAIT)
+      const got = counts.result.current!
+      expect(
+        {
+          inbox: got.inbox,
+          today: got.today,
+          overdue: got.overdue,
+          anytime: got.anytime,
+          someday: got.someday,
+          logbook: got.logbook,
+          trash: got.trash,
+        },
+        `${name} counts`,
+      ).toEqual(fx.expect.counts)
+      continue
+    }
+
+    const want = fx.expect[key] as FixtureRow[]
+    let got: FixtureRow[]
+    if (key === 'inbox') {
+      const inbox = renderHook(() => useLocalInbox())
+      await waitFor(() => {
+        expect(inbox.result.current).toBeDefined()
+      }, WAIT)
+      got = inbox.result.current!.tasks.map((t) => rowOf(t))
+    } else if (key === 'anytime' || key === 'someday') {
+      const view = renderHook(() => (key === 'anytime' ? useLocalAnytime() : useLocalSomeday()))
+      await waitFor(() => {
+        expect(view.result.current).toBeDefined()
+      }, WAIT)
+      got = flattenAnytime(view.result.current!)
+    } else if (key === 'logbook' || key === 'trash') {
+      const view = renderHook(() => (key === 'logbook' ? useLocalLogbook() : useLocalTrash()))
+      await waitFor(() => {
+        expect(view.result.current).toBeDefined()
+      }, WAIT)
+      got = groupRows(view.result.current!)
+    } else if (key.startsWith('project:')) {
+      const detail = renderHook(() => useLocalProjectDetail(key.slice('project:'.length)))
+      await waitFor(() => {
+        expect(detail.result.current).toBeDefined()
+      }, WAIT)
+      got = projectDetailRows(detail.result.current!)
+    } else if (key.startsWith('area:')) {
+      const detail = renderHook(() => useLocalAreaDetail(key.slice('area:'.length)))
+      await waitFor(() => {
+        expect(detail.result.current).toBeDefined()
+      }, WAIT)
+      got = areaDetailRows(detail.result.current!)
+    } else if (key.startsWith('tag:')) {
+      const tasks = renderHook(() => useLocalTagTasks(key.slice('tag:'.length)))
+      await waitFor(() => {
+        expect(tasks.result.current).toBeDefined()
+      }, WAIT)
+      got = tasks.result.current!.map((t) => rowOf(t))
+    } else {
+      throw new Error(`${name}: unknown expect key ${key}`)
+    }
+    expectRows(key, name, want, got)
+  }
 })

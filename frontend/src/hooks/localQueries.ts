@@ -30,9 +30,7 @@ import type {
   TodayViewGroup,
   UpcomingView,
   AnytimeView,
-  AnytimeViewAreaGroup,
   AnytimeViewProjectGroup,
-  AnytimeViewNoArea,
   SomedayView,
   LogbookView,
   TrashView,
@@ -357,13 +355,18 @@ export function useLocalInbox(reviewAfterDays?: number | null, reviewIncludeRecu
   }, [reviewAfterDays, reviewIncludeRecurring, today])
 }
 
-/** Standard task sort: priority desc, start_time asc (null last), title asc. */
-function sortTasks(tasks: Task[]): Task[] {
-  return tasks.sort((a, b) =>
-    (b.high_priority ? 1 : 0) - (a.high_priority ? 1 : 0) ||
-    (a.first_schedule_time ?? '\xff').localeCompare(b.first_schedule_time ?? '\xff') ||
-    (a.title ?? '').localeCompare(b.title ?? ''),
-  )
+/** Sort by a REAL sort_order column ASC, the server's ORDER BY for the
+ *  project/heading lists (sort_order_project) and the area/tag lists
+ *  (sort_order_today). */
+function bySortOrder(key: 'sort_order_project' | 'sort_order_today') {
+  return (a: LocalTask, b: LocalTask): number => (a[key] ?? 0) - (b[key] ?? 0)
+}
+
+/** Terminal-timestamp sort for completed lists: the server's
+ *  COALESCE(completed_at, canceled_at, updated_at) DESC. */
+function byTerminalTsDesc(a: LocalTask, b: LocalTask): number {
+  const ts = (t: LocalTask): string => t.completed_at ?? t.canceled_at ?? t.updated_at ?? ''
+  return ts(b).localeCompare(ts(a))
 }
 
 /** One display row of the Today view: the task plus the open schedule
@@ -514,11 +517,7 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
           ownerDateOf(t.completed_at ?? t.canceled_at ?? t.updated_at ?? '') === today,
       )
       .toArray()
-    completedTasks.sort((a, b) => {
-      const aTs = a.completed_at ?? a.canceled_at ?? a.updated_at ?? ''
-      const bTs = b.completed_at ?? b.canceled_at ?? b.updated_at ?? ''
-      return bTs.localeCompare(aTs)
-    })
+    completedTasks.sort(byTerminalTsDesc)
 
     return {
       sections: [
@@ -665,115 +664,80 @@ export function useLocalSomeday(): SomedayView | undefined {
 }
 
 /**
- * Shared helper to group tasks into AnytimeView / SomedayView shape.
- * This is a synchronous helper called inside a live-query callback —
- * it does NOT load additional DB data; project/area names come from the
- * task's denormalized project_name / area_name fields.
+ * Shared builder for the Anytime / Someday view shape. Mirrors the server's
+ * buildAnytimeView (views.go): areas in sort_order, each listing its open
+ * projects in sort_order and then its standalone tasks; no-area projects
+ * follow, then no-area standalone tasks. A task lists only where the server
+ * would place it — under its project (which must be open and whose area, if
+ * any, must exist) or, without a project, under its own existing area. Tasks
+ * of closed or missing projects and of missing areas appear in no group;
+ * only Someday keeps loose tasks (the anytime predicate requires a project
+ * or an area, so its loose bucket is always empty). Within a group tasks
+ * order by sort_order_today, and empty groups are omitted.
  */
 async function buildAnytimeShape(
   rawTasks: LocalTask[],
   today: string,
 ): Promise<AnytimeView> {
-  // Sort tasks by sort_order_today within groups
-  rawTasks.sort((a, b) => (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0))
+  rawTasks.sort(bySortOrder('sort_order_today'))
 
-  // Collect unique area/project IDs and look up full records for sort_order
-  const areaIds = new Set<string>()
-  const projectIds = new Set<string>()
+  const areas = await localDb.areas.orderBy('sort_order').toArray()
+  const areaExists = new Set(areas.map((a) => a.id))
+  const openProjects = (await localDb.projects.where('status').equals('open').toArray())
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+  const projectById = new Map(openProjects.map((p) => [p.id, p]))
+
+  const byProject = new Map<string, LocalTask[]>()
+  const standaloneByArea = new Map<string, LocalTask[]>()
+  const loose: LocalTask[] = []
   for (const t of rawTasks) {
-    if (t.area_id) areaIds.add(t.area_id)
-    if (t.project_id) projectIds.add(t.project_id)
-  }
-
-  const areaRecords = new Map<string, LocalArea>()
-  const projectRecords = new Map<string, LocalProject>()
-  for (const aId of areaIds) {
-    const area = await localDb.areas.get(aId)
-    if (area) areaRecords.set(aId, area)
-  }
-  for (const pId of projectIds) {
-    const project = await localDb.projects.get(pId)
-    if (project) projectRecords.set(pId, project)
-  }
-
-  // Group by area_id, then project_id
-  const areaMap = new Map<string | null, Map<string | null, LocalTask[]>>()
-
-  for (const t of rawTasks) {
-    const aKey = t.area_id ?? null
-    if (!areaMap.has(aKey)) areaMap.set(aKey, new Map())
-    const pKey = t.project_id ?? null
-    const pMap = areaMap.get(aKey)!
-    if (!pMap.has(pKey)) pMap.set(pKey, [])
-    pMap.get(pKey)!.push(t)
-  }
-
-  // Sort area IDs by area sort_order
-  const sortedAreaIds = [...areaMap.keys()]
-    .filter((k): k is string => k !== null)
-    .sort((a, b) => (areaRecords.get(a)?.sort_order ?? 0) - (areaRecords.get(b)?.sort_order ?? 0))
-
-  const areas: AnytimeViewAreaGroup[] = []
-  const noAreaProjectMap = areaMap.get(null)
-
-  // Tasks that belong to areas (in area sort_order)
-  for (const aId of sortedAreaIds) {
-    const pMap = areaMap.get(aId)!
-    const areaName = areaRecords.get(aId)?.title ?? aId
-
-    const projects: AnytimeViewProjectGroup[] = []
-    // Sort project IDs by project sort_order
-    const sortedPIds = [...pMap.keys()]
-      .filter((k): k is string => k !== null)
-      .sort((a, b) => (projectRecords.get(a)?.sort_order ?? 0) - (projectRecords.get(b)?.sort_order ?? 0))
-
-    for (const pId of sortedPIds) {
-      const ptasks = pMap.get(pId) ?? []
-      const projName = projectRecords.get(pId)?.title ?? pId
-      projects.push({
-        project: { id: pId, title: projName },
-        tasks: await enrichTasks(ptasks, today),
-      })
+    if (t.project_id) {
+      const project = projectById.get(t.project_id)
+      // A closed or missing project lists nothing; a project whose area_id
+      // dangles sits in no area and not under no-area either.
+      if (!project || (project.area_id && !areaExists.has(project.area_id))) continue
+      const bucket = byProject.get(project.id)
+      if (bucket) bucket.push(t)
+      else byProject.set(project.id, [t])
+    } else if (t.area_id) {
+      if (!areaExists.has(t.area_id)) continue
+      const bucket = standaloneByArea.get(t.area_id)
+      if (bucket) bucket.push(t)
+      else standaloneByArea.set(t.area_id, [t])
+    } else {
+      loose.push(t)
     }
+  }
 
-    const standaloneTasks = await enrichTasks(pMap.get(null) ?? [], today)
+  const projectGroup = async (id: string): Promise<AnytimeViewProjectGroup> => {
+    const project = projectById.get(id)!
+    return {
+      project: { id: project.id, title: project.title },
+      tasks: await enrichTasks(byProject.get(id) ?? [], today),
+    }
+  }
 
-    areas.push({
-      area: { id: aId, title: areaName },
+  const view: AnytimeView = { areas: [], no_area: { projects: [], standalone_tasks: [] } }
+  for (const area of areas) {
+    const projects: AnytimeViewProjectGroup[] = []
+    for (const p of openProjects.filter((p) => p.area_id === area.id)) {
+      if ((byProject.get(p.id) ?? []).length === 0) continue
+      projects.push(await projectGroup(p.id))
+    }
+    const standaloneTasks = await enrichTasks(standaloneByArea.get(area.id) ?? [], today)
+    if (projects.length === 0 && standaloneTasks.length === 0) continue
+    view.areas.push({
+      area: { id: area.id, title: area.title },
       projects,
       standalone_tasks: standaloneTasks,
     })
   }
-
-  // Tasks with no area
-  const noAreaProjects: AnytimeViewProjectGroup[] = []
-  const noAreaStandalone: Task[] = []
-
-  if (noAreaProjectMap) {
-    const sortedNoAreaPIds = [...noAreaProjectMap.keys()]
-      .filter((k): k is string => k !== null)
-      .sort((a, b) => (projectRecords.get(a)?.sort_order ?? 0) - (projectRecords.get(b)?.sort_order ?? 0))
-
-    for (const pId of sortedNoAreaPIds) {
-      const ptasks = noAreaProjectMap.get(pId) ?? []
-      const projName = projectRecords.get(pId)?.title ?? pId
-      noAreaProjects.push({
-        project: { id: pId, title: projName },
-        tasks: await enrichTasks(ptasks, today),
-      })
-    }
-    const standalone = noAreaProjectMap.get(null)
-    if (standalone) {
-      noAreaStandalone.push(...await enrichTasks(standalone, today))
-    }
+  for (const p of openProjects.filter((p) => !p.area_id)) {
+    if ((byProject.get(p.id) ?? []).length === 0) continue
+    view.no_area.projects.push(await projectGroup(p.id))
   }
-
-  const no_area: AnytimeViewNoArea = {
-    projects: noAreaProjects,
-    standalone_tasks: noAreaStandalone,
-  }
-
-  return { areas, no_area }
+  view.no_area.standalone_tasks = await enrichTasks(loose, today)
+  return view
 }
 
 /**
@@ -1000,16 +964,18 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
   return useLiveQuery(async () => {
     // Read the whole task table once so the badge query reruns on any task
     // mutation, including changes only visible through JS filters. The
-    // schedule rows join the same way for the today badge.
-    const [tasks, schedules] = await Promise.all([
+    // schedule rows join the same way for the today badge; projects and
+    // areas feed the Anytime/Someday ownership check.
+    const [tasks, schedules, projects, areas] = await Promise.all([
       localDb.tasks.toArray(),
       localDb.schedules.toArray(),
+      localDb.projects.toArray(),
+      localDb.areas.toArray(),
     ])
     const openTasks = tasks.filter((t) => t.status === 'open' && !t.deleted_at)
     const inboxTasks = openTasks.filter((t) => !t.project_id && !t.area_id && !t.when_date)
 
     const inboxCount = inboxTasks.length
-    const somedayCount = openTasks.filter((t) => t.when_date === 'someday').length
     const logbookCount = tasks.filter(
       (t) =>
         !t.deleted_at &&
@@ -1042,9 +1008,29 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
     }
     const todayCount = openTasks.filter(inTodayView).length
 
-    // anytime: open, no when_date, owned by a project or an area, not deleted
+    // Anytime/Someday mirror the views' ownership (anytimeOwnershipCond) so
+    // counts equal the views: a task of an open project whose area exists
+    // (or that has none), or a standalone task of an existing area. Tasks of
+    // closed or missing projects and of missing areas appear in no group and
+    // do not count; loose tasks count only for someday.
+    const openProjectsById = new Map(
+      projects.filter((p) => p.status === 'open').map((p) => [p.id, p] as const),
+    )
+    const areaIds = new Set(areas.map((a) => a.id))
+    const ownedByOpenProjectOrArea = (t: LocalTask): boolean => {
+      if (t.project_id) {
+        const p = openProjectsById.get(t.project_id)
+        return !!p && (!p.area_id || areaIds.has(p.area_id))
+      }
+      return !!t.area_id && areaIds.has(t.area_id)
+    }
     const anytimeCount = openTasks.filter(
-      (t) => !t.when_date && (!!t.project_id || !!t.area_id),
+      (t) => !t.when_date && ownedByOpenProjectOrArea(t),
+    ).length
+    const somedayCount = openTasks.filter(
+      (t) =>
+        t.when_date === 'someday' &&
+        (ownedByOpenProjectOrArea(t) || (!t.project_id && !t.area_id)),
     ).length
 
     // Overdue: open tasks with deadline < today, not deleted
@@ -1082,7 +1068,8 @@ export function useLocalViewCounts(reviewAfterDays?: number | null, reviewInclud
 // ---------------------------------------------------------------------------
 
 /**
- * Open tasks for a specific project, sorted by sort_order_project.
+ * Open tasks for a specific project, ordered by sort_order_project like the
+ * server's getTaskListItems / getTaskListItemsNoHeading.
  */
 export function useLocalProjectTasks(projectId: string): Task[] | undefined {
   // Owner-zone today: schedule flags re-derive at owner midnight
@@ -1096,12 +1083,14 @@ export function useLocalProjectTasks(projectId: string): Task[] | undefined {
       .filter((t) => t.status === 'open' && !t.deleted_at)
       .toArray()
 
-    return sortTasks(await enrichTasks(tasks, today))
+    tasks.sort(bySortOrder('sort_order_project'))
+    return enrichTasks(tasks, today)
   }, [projectId, today])
 }
 
 /**
- * Open tasks for a specific area.
+ * Open standalone tasks for a specific area, ordered by sort_order_today
+ * like the server's AreaRepository.GetByID.
  */
 export function useLocalAreaTasks(areaId: string): Task[] | undefined {
   // Owner-zone today: schedule flags re-derive at owner midnight
@@ -1112,15 +1101,17 @@ export function useLocalAreaTasks(areaId: string): Task[] | undefined {
     const tasks = await localDb.tasks
       .where('area_id')
       .equals(areaId)
-      .filter((t) => t.status === 'open' && !t.deleted_at)
+      .filter((t) => t.status === 'open' && !t.deleted_at && !t.project_id)
       .toArray()
 
-    return sortTasks(await enrichTasks(tasks, today))
+    tasks.sort(bySortOrder('sort_order_today'))
+    return enrichTasks(tasks, today)
   }, [areaId, today])
 }
 
 /**
- * Open tasks for a specific tag.
+ * Open tasks for a specific tag, ordered by sort_order_today like the
+ * server's GetTasksByTag.
  * Tags are stored as a TagRef[] array on each Task — there is no separate
  * task_tags join table in the local schema. We scan all open tasks and
  * filter by tag id match.
@@ -1142,7 +1133,8 @@ export function useLocalTagTasks(tagId: string): Task[] | undefined {
       )
       .toArray()
 
-    return sortTasks(await enrichTasks(tasks, today))
+    tasks.sort(bySortOrder('sort_order_today'))
+    return enrichTasks(tasks, today)
   }, [tagId, today])
 }
 
@@ -1175,23 +1167,27 @@ export function useLocalProjectDetail(projectId: string): ProjectDetail | undefi
         .sortBy('sort_order'),
     ])
 
-    const openTasks = allTasks.filter((t: LocalTask) => t.status === 'open')
-    const completedTasks = allTasks.filter(
-      (t: LocalTask) => t.status === 'completed' || t.status === 'canceled' || t.status === 'wont_do',
-    )
+    const openTasks = allTasks
+      .filter((t: LocalTask) => t.status === 'open')
+      .sort(bySortOrder('sort_order_project'))
+    const completedTasks = allTasks
+      .filter(
+        (t: LocalTask) => t.status === 'completed' || t.status === 'canceled' || t.status === 'wont_do',
+      )
+      .sort(byTerminalTsDesc)
 
     // Split open tasks by heading
-    const tasksWithoutHeading = sortTasks(await enrichTasks(
+    const tasksWithoutHeading = await enrichTasks(
       openTasks.filter((t: LocalTask) => !t.heading_id),
       today,
-    ))
+    )
 
     const headingsWithTasks: HeadingWithTasks[] = []
     for (const h of headings) {
       const hTasks = openTasks.filter((t: LocalTask) => t.heading_id === h.id)
       headingsWithTasks.push({
         ...stripSyncMeta(h),
-        tasks: sortTasks(await enrichTasks(hTasks, today)),
+        tasks: await enrichTasks(hTasks, today),
       })
     }
 
@@ -1240,6 +1236,7 @@ export function useLocalAreaDetail(areaId: string): AreaDetail | undefined {
 
     const openTasks = allTasks
       .filter((t: LocalTask) => t.status === 'open')
+      .sort(bySortOrder('sort_order_today'))
     const completedTasks = allTasks.filter(
       (t: LocalTask) => t.status === 'completed' || t.status === 'canceled' || t.status === 'wont_do',
     )
@@ -1268,7 +1265,7 @@ export function useLocalAreaDetail(areaId: string): AreaDetail | undefined {
       task_count: openTasks.length + completedTasks.length,
       standalone_task_count: openTasks.length,
       projects: projectsWithCounts,
-      tasks: sortTasks(await enrichTasks(openTasks, today)),
+      tasks: await enrichTasks(openTasks, today),
       completed_tasks: await enrichTasks(completedTasks, today),
     } as AreaDetail
   }, [areaId, today])
