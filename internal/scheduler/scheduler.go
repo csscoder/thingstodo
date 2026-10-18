@@ -31,6 +31,9 @@ type Scheduler struct {
 	db            *sql.DB
 	engine        *recurrence.Engine
 	loc           *time.Location
+	// lastReminderTick is the local time of the previous reminder tick;
+	// the zero value means no tick has run yet.
+	lastReminderTick time.Time
 
 	// testHookAfterInstance runs inside the finishing transaction after the
 	// next repeat instance is created. Tests use it to force a rollback.
@@ -327,74 +330,113 @@ func (s *Scheduler) createNextInstance(tx *sql.Tx, originalTaskID string, patter
 
 func (s *Scheduler) processReminders() {
 	now := s.now().In(s.loc)
-	windowStart := now.Add(-1 * time.Minute)
-	windowEnd := now.Add(1 * time.Minute)
+	for _, d := range s.remindersDue(now) {
+		s.fireReminder(d.pending, d.fireAt)
+	}
+	// Advance the tick window per scheduler, not per reminder: every fired
+	// fireAt is <= now and therefore outside the next tick's
+	// (lastReminderTick, nextNow] window, so a fired reminder cannot fire
+	// twice.
+	s.lastReminderTick = now
+}
 
-	// Get morning time from first user's settings (single-user app)
-	morningTime := "09:00"
-	if user, err := s.userRepo.GetFirst(); err == nil && user != nil {
-		if settings, err := s.settingsRepo.GetOrCreate(user.ID); err == nil {
-			_ = settings
-		}
+// dueReminder pairs a pending reminder with the local time it fires at.
+type dueReminder struct {
+	pending model.PendingReminder
+	fireAt  time.Time
+}
+
+// remindersDue returns every reminder whose fire time falls in the
+// (lastReminderTick, now] window. It never reads a clock: now comes from
+// the argument and the previous tick from scheduler state, so the selection
+// is deterministic and testable. A reminder therefore never fires early and,
+// once the tick loop has advanced lastReminderTick past its fire time, never
+// fires twice (reminder_log keeps guarding across restarts).
+func (s *Scheduler) remindersDue(now time.Time) []dueReminder {
+	lastTick := s.lastReminderTick
+	if lastTick.IsZero() {
+		lastTick = now.Add(-time.Minute)
 	}
 
-	// Process relative reminders (at_start, on_day, minutes_before, hours_before, days_before)
+	var due []dueReminder
+
+	// Relative reminders (at_start, on_day, minutes_before, hours_before, days_before)
 	pending, err := s.reminderRepo.GetPendingRelative()
 	if err != nil {
 		log.Printf("scheduler: get pending relative reminders: %v", err)
-	}
-	for _, p := range pending {
-		fireAt := computeFireAt(p, morningTime, s.loc)
-		if fireAt.IsZero() {
-			continue
+	} else {
+		for _, p := range pending {
+			fireAt := computeFireAt(p, s.loc)
+			if !inDueWindow(fireAt, lastTick, now) {
+				continue
+			}
+			due = append(due, dueReminder{pending: p, fireAt: fireAt})
 		}
-		if fireAt.Before(windowStart) || !fireAt.Before(windowEnd) {
-			continue
-		}
-		s.fireReminder(p, fireAt)
 	}
 
-	// Process exact reminders
+	// Exact reminders
 	exact, err := s.reminderRepo.GetPendingExact()
 	if err != nil {
 		log.Printf("scheduler: get pending exact reminders: %v", err)
-	}
-	for _, p := range exact {
-		if p.Reminder.ExactAt == nil {
-			continue
-		}
-		var fireAt time.Time
-		for _, layout := range []string{
-			"2006-01-02T15:04:05",
-			"2006-01-02T15:04",
-			"2006-01-02 15:04:05",
-			"2006-01-02 15:04",
-		} {
-			fireAt, err = time.ParseInLocation(layout, *p.Reminder.ExactAt, s.loc)
-			if err == nil {
-				break
+	} else {
+		for _, p := range exact {
+			fireAt := parseExactAt(p, s.loc)
+			if fireAt.IsZero() {
+				log.Printf("scheduler: exact reminder %s: failed to parse exact_at=%q", p.Reminder.ID, *p.Reminder.ExactAt)
+				continue
 			}
+			if !inDueWindow(fireAt, lastTick, now) {
+				continue
+			}
+			due = append(due, dueReminder{pending: p, fireAt: fireAt})
 		}
-		if err != nil {
-			log.Printf("scheduler: exact reminder %s: failed to parse exact_at=%q: %v", p.Reminder.ID, *p.Reminder.ExactAt, err)
-			continue
-		}
-		if fireAt.Before(windowStart) || !fireAt.Before(windowEnd) {
-			continue
-		}
-		s.fireReminder(p, fireAt)
 	}
+	return due
 }
 
-func computeFireAt(p model.PendingReminder, morningTime string, loc *time.Location) time.Time {
-	morningHour, morningMin := 9, 0
-	if parts := splitTime(morningTime); parts != nil {
-		morningHour, morningMin = parts[0], parts[1]
-	}
+// inDueWindow reports whether fireAt is set and satisfies
+// lastTick < fireAt <= now.
+func inDueWindow(fireAt, lastTick, now time.Time) bool {
+	return !fireAt.IsZero() && fireAt.After(lastTick) && !fireAt.After(now)
+}
 
+// parseExactAt parses an exact reminder's stored exact_at: RFC 3339 first
+// (the normalized storage format), then the legacy naive layouts read in
+// loc. It returns the zero time when nothing parses.
+func parseExactAt(p model.PendingReminder, loc *time.Location) time.Time {
+	if p.Reminder.ExactAt == nil {
+		return time.Time{}
+	}
+	raw := *p.Reminder.ExactAt
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t
+	}
+	for _, layout := range []string{
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+	} {
+		if t, err := time.ParseInLocation(layout, raw, loc); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// Morning is the constant local wall-clock time anchoring reminders without
+// a start time (09:00). Building anchors with time.Date keeps the wall-clock
+// time on DST transition days, where adding a duration to local midnight
+// would shift it by the offset change.
+const (
+	morningHour = 9
+	morningMin  = 0
+)
+
+func computeFireAt(p model.PendingReminder, loc *time.Location) time.Time {
 	switch p.Reminder.Type {
 	case model.ReminderAtStart:
-		return parseAnchor(p.WhenDate, p.StartTime, morningHour, morningMin, loc)
+		return parseAnchor(p.WhenDate, p.StartTime, loc)
 
 	case model.ReminderOnDay:
 		if p.WhenDate == "" {
@@ -404,17 +446,17 @@ func computeFireAt(p model.PendingReminder, morningTime string, loc *time.Locati
 		if err != nil {
 			return time.Time{}
 		}
-		return d.Add(time.Duration(morningHour)*time.Hour + time.Duration(morningMin)*time.Minute)
+		return time.Date(d.Year(), d.Month(), d.Day(), morningHour, morningMin, 0, 0, loc)
 
 	case model.ReminderMinutesBefore:
-		anchor := parseAnchor(p.WhenDate, p.StartTime, morningHour, morningMin, loc)
+		anchor := parseAnchor(p.WhenDate, p.StartTime, loc)
 		if anchor.IsZero() {
 			return time.Time{}
 		}
 		return anchor.Add(-time.Duration(p.Reminder.Value) * time.Minute)
 
 	case model.ReminderHoursBefore:
-		anchor := parseAnchor(p.WhenDate, p.StartTime, morningHour, morningMin, loc)
+		anchor := parseAnchor(p.WhenDate, p.StartTime, loc)
 		if anchor.IsZero() {
 			return time.Time{}
 		}
@@ -429,14 +471,16 @@ func computeFireAt(p model.PendingReminder, morningTime string, loc *time.Locati
 			return time.Time{}
 		}
 		d = d.AddDate(0, 0, -p.Reminder.Value)
-		return d.Add(time.Duration(morningHour)*time.Hour + time.Duration(morningMin)*time.Minute)
+		return time.Date(d.Year(), d.Month(), d.Day(), morningHour, morningMin, 0, 0, loc)
 	}
 	return time.Time{}
 }
 
-// parseAnchor returns the anchor time for time-relative reminders.
-// If start_time exists, use when_date + start_time. Otherwise fall back to when_date + morning.
-func parseAnchor(whenDate string, startTime *string, morningH, morningM int, loc *time.Location) time.Time {
+// parseAnchor returns the anchor time for time-relative reminders,
+// built with time.Date so the local wall-clock survives DST changes.
+// If start_time exists, use when_date + start_time. Otherwise fall back to
+// when_date + morning (constant 09:00).
+func parseAnchor(whenDate string, startTime *string, loc *time.Location) time.Time {
 	if whenDate == "" || whenDate == "someday" {
 		return time.Time{}
 	}
@@ -444,13 +488,13 @@ func parseAnchor(whenDate string, startTime *string, morningH, morningM int, loc
 	if err != nil {
 		return time.Time{}
 	}
+	h, m := morningHour, morningMin
 	if startTime != nil && *startTime != "" {
-		parts := splitTime(*startTime)
-		if parts != nil {
-			return d.Add(time.Duration(parts[0])*time.Hour + time.Duration(parts[1])*time.Minute)
+		if parts := splitTime(*startTime); parts != nil {
+			h, m = parts[0], parts[1]
 		}
 	}
-	return d.Add(time.Duration(morningH)*time.Hour + time.Duration(morningM)*time.Minute)
+	return time.Date(d.Year(), d.Month(), d.Day(), h, m, 0, 0, loc)
 }
 
 // splitTime parses "HH:MM" into [hour, minute].

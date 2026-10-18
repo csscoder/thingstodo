@@ -627,11 +627,11 @@ Response (200):
 Type+value encoding:
 | type | value | exact_at | meaning |
 |------|-------|----------|---------|
-| `at_start` | 0 | null | At schedule start_time |
-| `on_day` | 0 | null | Morning of when_date |
-| `minutes_before` | 0-99 | null | N min before start_time |
-| `hours_before` | 0-99 | null | N hours before start_time |
-| `days_before` | 0-99 | null | N days before when_date at morning time |
+| `at_start` | 0 | null | At schedule `start_time`, or 09:00 server-local when the schedule has no start time |
+| `on_day` | 0 | null | 09:00 server-local on `when_date` |
+| `minutes_before` | 0-99 | null | N minutes before schedule `start_time` (09:00 server-local fallback) |
+| `hours_before` | 0-99 | null | N hours before schedule `start_time` (09:00 server-local fallback) |
+| `days_before` | 0-99 | null | N days before `when_date` at 09:00 server-local |
 | `exact` | 0 | ISO datetime | Fires at the exact specified date/time |
 
 ### POST /api/tasks/:id/reminders
