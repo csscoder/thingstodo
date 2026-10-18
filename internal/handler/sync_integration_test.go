@@ -286,6 +286,107 @@ func TestSyncCursorExpired(t *testing.T) {
 	testutil.AssertStatus(t, pullResp, http.StatusGone)
 }
 
+// TestSyncFullIncludesTrashedTasks verifies GET /api/sync/full returns
+// soft-deleted tasks alongside live ones (the web Trash view seeds itself
+// from the full snapshot). Purged tasks stay excluded by construction:
+// purge is a hard row removal, so the table only holds live and
+// soft-deleted rows.
+func TestSyncFullIncludesTrashedTasks(t *testing.T) {
+	client, _, _ := setupSyncRouter(t)
+
+	// Create two tasks via REST.
+	ids := make([]string, 0, 2)
+	for _, title := range []string{"Kept task", "Trashed task"} {
+		resp := client.Post("/api/tasks", map[string]string{"title": title})
+		testutil.AssertStatus(t, resp, http.StatusCreated)
+		var created map[string]interface{}
+		resp.JSON(t, &created)
+		ids = append(ids, created["id"].(string))
+	}
+	keptID, trashedID := ids[0], ids[1]
+
+	// Soft-delete the second task via sync push.
+	pushResp := client.Post("/api/sync/push", map[string]interface{}{
+		"device_id": "dev-trash",
+		"changes": []map[string]interface{}{
+			{
+				"entity":            "task",
+				"entity_id":         trashedID,
+				"action":            "update",
+				"data":              map[string]interface{}{"deleted_at": "2026-01-01T00:00:00Z"},
+				"fields":            []string{"deleted_at"},
+				"client_updated_at": "2099-01-01T00:00:00Z",
+			},
+		},
+	})
+	testutil.AssertStatus(t, pushResp, http.StatusOK)
+	var pushResult handler.SyncPushResponse
+	pushResp.JSON(t, &pushResult)
+	if len(pushResult.Results) != 1 || pushResult.Results[0].Status != "applied" {
+		t.Fatalf("expected one applied soft-delete, got %+v (body: %s)",
+			pushResult.Results, string(pushResp.Body))
+	}
+
+	// Full sync must include both tasks; the trashed one carries deleted_at.
+	fullResp := client.Get("/api/sync/full")
+	testutil.AssertStatus(t, fullResp, http.StatusOK)
+
+	var full handler.FullSyncResponse
+	fullResp.JSON(t, &full)
+
+	tasksRaw, ok := full.Tasks.([]interface{})
+	if !ok {
+		t.Fatalf("expected tasks array in full sync, got %v", full.Tasks)
+	}
+	deletedAt := make(map[string]interface{}, len(tasksRaw))
+	for _, item := range tasksRaw {
+		task, ok := item.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected task objects in full sync tasks, got %T", item)
+		}
+		deletedAt[task["id"].(string)] = task["deleted_at"]
+	}
+	for _, id := range ids {
+		if _, found := deletedAt[id]; !found {
+			t.Errorf("task %s missing from full sync tasks (got %d tasks)", id, len(tasksRaw))
+		}
+	}
+	if deletedAt[trashedID] == nil {
+		t.Errorf("trashed task %s must have non-null deleted_at", trashedID)
+	}
+	if deletedAt[keptID] != nil {
+		t.Errorf("kept task %s must have null deleted_at, got %v", keptID, deletedAt[keptID])
+	}
+}
+
+// TestSyncFullCursorEqualsLatestSeq verifies that, with no concurrent
+// writes, the full-sync cursor equals the latest change-log seq. Full reads
+// the cursor before its snapshot queries; that ordering (which keeps a
+// racing write from being skipped by a later pull) cannot be observed here
+// without a hook between the cursor read and the snapshot reads — see the
+// comment in SyncHandler.Full.
+func TestSyncFullCursorEqualsLatestSeq(t *testing.T) {
+	client, changeLog, _ := setupSyncRouter(t)
+
+	resp := client.Post("/api/tasks", map[string]string{"title": "Cursor probe"})
+	testutil.AssertStatus(t, resp, http.StatusCreated)
+
+	latest, err := changeLog.GetLatestSeq()
+	if err != nil {
+		t.Fatalf("failed to read latest change-log seq: %v", err)
+	}
+
+	fullResp := client.Get("/api/sync/full")
+	testutil.AssertStatus(t, fullResp, http.StatusOK)
+
+	var full handler.FullSyncResponse
+	fullResp.JSON(t, &full)
+
+	if full.Cursor != latest {
+		t.Errorf("expected cursor %d (latest change-log seq), got %d", latest, full.Cursor)
+	}
+}
+
 // int64String converts an int64 to its decimal string representation.
 func int64String(n int64) string {
 	if n == 0 {

@@ -187,7 +187,22 @@ type FullSyncResponse struct {
 // Full returns all current entities along with the latest change_log cursor.
 // GET /api/sync/full
 func (h *SyncHandler) Full(w http.ResponseWriter, r *http.Request) {
-	tasks, _, err := h.tasks.List(model.TaskFilters{})
+	// The cursor is read before the snapshot tables on purpose: a write
+	// that commits after this point is both in the snapshot and re-sent by
+	// a later pull from this cursor, and pull re-applies full snapshots so
+	// the overlap is harmless. A cursor taken after the reads could skip a
+	// write that landed between the two. This ordering is deliberate but,
+	// without a hook between the reads, not observable by a test.
+	cursor, err := h.changeLog.GetLatestSeq()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get cursor: "+err.Error(), "INTERNAL")
+		return
+	}
+
+	// IncludeDeleted: trashed tasks must reach clients on first load (the
+	// web Trash view seeds from this snapshot). Purged tasks are
+	// hard-deleted rows and never appear.
+	tasks, _, err := h.tasks.List(model.TaskFilters{IncludeDeleted: true})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load tasks: "+err.Error(), "INTERNAL")
 		return
@@ -244,12 +259,6 @@ func (h *SyncHandler) Full(w http.ResponseWriter, r *http.Request) {
 	repeatRules, err := h.repeatRules.ListAll()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load repeat rules: "+err.Error(), "INTERNAL")
-		return
-	}
-
-	cursor, err := h.changeLog.GetLatestSeq()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get cursor: "+err.Error(), "INTERNAL")
 		return
 	}
 

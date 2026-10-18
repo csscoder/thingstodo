@@ -1599,6 +1599,8 @@ Response (410 Gone): Cursor has been purged, perform a full sync
 ### GET /api/sync/full
 Returns the complete current state of all entities, used for initial sync or when cursor has expired.
 
+The `tasks` array includes trashed (soft-deleted, `deleted_at` non-null) tasks so clients can populate their Trash view from the initial snapshot; purged tasks are excluded. The `cursor` is taken before the snapshot reads: a write that commits during the snapshot may appear both in the snapshot and in a subsequent pull from this cursor (pull re-applies full snapshots, so the overlap is harmless), but no write can be skipped.
+
 Response (200):
 ```json
 {

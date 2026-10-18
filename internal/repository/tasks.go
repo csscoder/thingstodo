@@ -324,7 +324,10 @@ func (r *TaskRepository) List(f model.TaskFilters) (tasks []model.TaskListItem, 
 			conditions = append(conditions, cond)
 			args = append(args, condArgs...)
 		}
-	} else {
+	} else if !f.IncludeDeleted {
+		// No list filter excludes trashed rows unless the caller (full
+		// sync) explicitly asks for them via IncludeDeleted. Purged rows
+		// are hard-deleted and never present.
 		conditions = append(conditions, "t.deleted_at IS NULL")
 	}
 

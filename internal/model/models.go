@@ -425,11 +425,15 @@ type TaskFilters struct {
 	// List selects a view's membership (C1): inbox, today, upcoming,
 	// anytime, someday, logbook, trash. trash selects only soft-deleted
 	// rows; every other value excludes them.
-	List      *string
-	ProjectID *string
-	AreaID    *string
-	HeadingID *string
-	TagIDs    []string
+	List *string
+	// IncludeDeleted keeps soft-deleted rows when List is nil, so full
+	// sync can ship trashed tasks. A non-nil List keeps its own trash
+	// semantics and ignores this flag.
+	IncludeDeleted bool
+	ProjectID      *string
+	AreaID         *string
+	HeadingID      *string
+	TagIDs         []string
 	// TagMode is "any" (default) or "all".
 	TagMode    string
 	WhenDate   *string
