@@ -120,7 +120,6 @@ export function ScheduleEditor({
       // Also send to server
       reorderSchedules(taskIdRef.current, items).catch(() => {})
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Auto-focus the new entry's DateInput when an entry is added

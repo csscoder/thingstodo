@@ -84,7 +84,7 @@ export function ProjectView() {
       <ConfirmDialog
         open={showDelete}
         title={`Delete "${project.title}"?`}
-        description={`"${project.title}" and all its tasks will be permanently deleted.`}
+        description="Delete this project? Its tasks move to Trash."
         confirmLabel="Delete"
         destructive
         onConfirm={() => {

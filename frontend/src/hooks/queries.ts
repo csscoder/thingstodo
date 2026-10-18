@@ -593,7 +593,8 @@ export function useDeleteArea() {
         }
         throw err
       }
-      await localDb.areas.delete(id)
+      // Mirror the server's trash cascade locally (loose tasks → Trash)
+      await localMutations.deleteArea(id)
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.areas.all })
@@ -952,7 +953,7 @@ export function useSearch(query: string) {
   return useQuery({
     queryKey: queryKeys.search(query),
     queryFn: () => searchApi.search(query),
-    enabled: query.length > 0,
+    enabled: query.trim().length > 0,
     staleTime: 0,
   })
 }

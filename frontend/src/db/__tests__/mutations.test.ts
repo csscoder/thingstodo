@@ -5,6 +5,11 @@ import {
   updateTask,
   completeTask,
   deleteTask,
+  createProject,
+  createArea,
+  createSchedule,
+  deleteProject,
+  deleteArea,
 } from '../mutations'
 
 // Mock syncNow so tests don't try to call the API
@@ -81,5 +86,72 @@ describe('mutations', () => {
     expect(task?.status).toBe('open')
     expect(task?.high_priority).toBe(false)
     expect(task?._syncStatus).toBe('pending')
+  })
+
+  test('syncFirstScheduleDate moves the first entry of a multi-entry task', async () => {
+    const id = await createTask({ title: 'Multi', when_date: '2026-01-10' })
+    await createSchedule({ task_id: id, when_date: '2026-02-20', sort_order: 1 })
+
+    await updateTask(id, { when_date: '2026-01-05' })
+
+    const schedules = await localDb.schedules.where('task_id').equals(id).sortBy('sort_order')
+    expect(schedules).toHaveLength(2)
+    expect(schedules[0].when_date).toBe('2026-01-05')
+    expect(schedules[1].when_date).toBe('2026-02-20')
+  })
+
+  test('deleting a project locally moves its tasks to Trash and clears project_id and area_id', async () => {
+    const areaId = await createArea({ title: 'Area' })
+    const projectId = await createProject({ title: 'Project' })
+    const liveTask = await createTask({
+      title: 'Live task',
+      project_id: projectId,
+      area_id: areaId,
+    })
+    const trashedTask = await createTask({
+      title: 'Already trashed',
+      project_id: projectId,
+      deleted_at: '2026-01-01T00:00:00.000Z',
+    })
+    const outsideTask = await createTask({ title: 'Outside', area_id: areaId })
+
+    await deleteProject(projectId)
+
+    // Live task moved to Trash with containers cleared (as projects.go DeleteToTrash)
+    const live = await localDb.tasks.get(liveTask)
+    expect(live?.deleted_at).toBeTruthy()
+    expect(live?.project_id).toBeNull()
+    expect(live?.area_id).toBeNull()
+    // Already-trashed task keeps its trash date, containers cleared
+    const trashed = await localDb.tasks.get(trashedTask)
+    expect(trashed?.deleted_at).toBe('2026-01-01T00:00:00.000Z')
+    expect(trashed?.project_id).toBeNull()
+    // Tasks outside the project are untouched
+    const outside = await localDb.tasks.get(outsideTask)
+    expect(outside?.deleted_at).toBeFalsy()
+    expect(outside?.area_id).toBe(areaId)
+    // Project row is gone and the delete is queued for sync
+    expect(await localDb.projects.get(projectId)).toBeUndefined()
+    const queue = await localDb.syncQueue.toArray()
+    expect(queue.some((e) => e.entity === 'project' && e.action === 'delete' && e.entityId === projectId)).toBe(true)
+  })
+
+  test('deleting an area locally moves its loose tasks to Trash', async () => {
+    const areaId = await createArea({ title: 'Area' })
+    const projectId = await createProject({ title: 'Project' })
+    const looseTask = await createTask({ title: 'Loose', area_id: areaId })
+    const projectTask = await createTask({ title: 'In project', area_id: areaId, project_id: projectId })
+
+    await deleteArea(areaId)
+
+    // Loose task moved to Trash with the area cleared (as areas.go DeleteToTrash)
+    const loose = await localDb.tasks.get(looseTask)
+    expect(loose?.deleted_at).toBeTruthy()
+    expect(loose?.area_id).toBeNull()
+    // Project tasks are not the area's concern
+    const inProject = await localDb.tasks.get(projectTask)
+    expect(inProject?.deleted_at).toBeFalsy()
+    expect(inProject?.area_id).toBe(areaId)
+    expect(await localDb.areas.get(areaId)).toBeUndefined()
   })
 })

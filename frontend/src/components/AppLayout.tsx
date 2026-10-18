@@ -17,7 +17,6 @@ import { fullSync } from '../sync/pull'
 import { localDb } from '../db'
 import { loadOwnerTimeZone } from '../lib/owner-time'
 import { OfflineBanner } from './OfflineBanner'
-import { MissedRemindersToast } from './MissedRemindersToast'
 import { SyncingOverlay } from './SyncingOverlay'
 
 import { QuickEntry } from './QuickEntry'
@@ -178,7 +177,6 @@ export function AppLayout() {
         <BulkActionToolbar />
         </div>
       </div>
-      <MissedRemindersToast />
     </AppDndContext>
   )
 }

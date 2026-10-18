@@ -75,9 +75,9 @@ async function syncFirstScheduleDate(taskId: string, whenDate: string | null): P
       _localUpdatedAt: timestamp,
     }
     await localDb.schedules.put(schedule)
-  } else if (existing.length === 1) {
-    // Only update the first entry when there's a single schedule.
-    // Multi-schedule tasks are managed independently by ScheduleEditor.
+  } else {
+    // Mirror the server: when_date always reflects the first entry,
+    // even when the task has several schedule entries.
     const first = existing[0]
     if (first.when_date !== whenDate) {
       const timestamp = now()
@@ -360,6 +360,23 @@ export async function updateProject(
 export async function deleteProject(id: string): Promise<void> {
   const existing = await localDb.projects.get(id)
   if (!existing) return
+  // Mirror the server's DeleteToTrash (internal/repository/projects.go):
+  // every task in the project moves to Trash with its containers cleared;
+  // tasks already trashed keep their trash date. Local-only writes — the
+  // server runs its own cascade when the queued delete is pushed.
+  const tasks = await localDb.tasks.where('project_id').equals(id).toArray()
+  const timestamp = now()
+  for (const task of tasks) {
+    await localDb.tasks.update(task.id, {
+      deleted_at: task.deleted_at ?? timestamp,
+      project_id: null,
+      heading_id: null,
+      area_id: null,
+      project_name: null,
+      area_name: null,
+      updated_at: timestamp,
+    })
+  }
   await localDb.projects.delete(id)
   await queueChange('project', id, 'delete', { id })
 }
@@ -430,6 +447,32 @@ export async function updateArea(
 
   // Cascade title changes to denormalized area_name on tasks
   await cascadeAreaToTasks(id, fields)
+}
+
+/**
+ * Mirror the server's DeleteToTrash (internal/repository/areas.go): loose
+ * tasks (no project) move to Trash with the area cleared; tasks already
+ * trashed keep their trash date. Server-first op — no queue entry, the
+ * server has already applied the same cascade before this runs.
+ */
+export async function deleteArea(id: string): Promise<void> {
+  const existing = await localDb.areas.get(id)
+  if (!existing) return
+  const tasks = await localDb.tasks
+    .where('area_id')
+    .equals(id)
+    .filter((t) => !t.project_id)
+    .toArray()
+  const timestamp = now()
+  for (const task of tasks) {
+    await localDb.tasks.update(task.id, {
+      deleted_at: task.deleted_at ?? timestamp,
+      area_id: null,
+      area_name: null,
+      updated_at: timestamp,
+    })
+  }
+  await localDb.areas.delete(id)
 }
 
 // ---------------------------------------------------------------------------
