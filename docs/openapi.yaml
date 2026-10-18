@@ -3215,7 +3215,8 @@ components:
           enum: ['12h', '24h']
         font_size:
           type: integer
-          enum: [12, 14, 16, 18, 20]
+          minimum: 12
+          maximum: 20
         default_reminder_type:
           oneOf:
             - type: 'null'
@@ -3275,7 +3276,8 @@ components:
           enum: ['12h', '24h']
         font_size:
           type: integer
-          enum: [12, 14, 16, 18, 20]
+          minimum: 12
+          maximum: 20
         default_reminder_type:
           oneOf:
             - type: 'null'

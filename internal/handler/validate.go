@@ -91,7 +91,6 @@ func validateReminderCreate(input *model.CreateReminderInput, loc *time.Location
 var (
 	sortOrders            = map[string]bool{"manual": true, "a-z": true, "z-a": true}
 	timeFormats           = map[string]bool{"12h": true, "24h": true}
-	fontSizes             = map[int]bool{12: true, 14: true, 16: true, 18: true, 20: true}
 	notificationProviders = map[string]bool{"webpush": true, "ntfy": true, "none": true}
 	defaultReminderTypes  = map[string]bool{"at_start": true, "on_day": true, "minutes_before": true, "hours_before": true, "days_before": true}
 	projectStatuses       = map[string]bool{"open": true, "completed": true, "canceled": true}
@@ -113,8 +112,8 @@ func validateSettingsPatch(input *model.UpdateUserSettingsInput) (string, string
 	if input.TimeFormat != nil && !timeFormats[*input.TimeFormat] {
 		return "time_format", "must be 12h or 24h", false
 	}
-	if input.FontSize != nil && !fontSizes[*input.FontSize] {
-		return "font_size", "must be one of 12, 14, 16, 18 or 20", false
+	if input.FontSize != nil && (*input.FontSize < 12 || *input.FontSize > 20) {
+		return "font_size", "must be an integer from 12 to 20", false
 	}
 	if input.DefaultReminderType != nil && !defaultReminderTypes[*input.DefaultReminderType] {
 		return "default_reminder_type", "must be at_start, on_day, minutes_before, hours_before or days_before", false

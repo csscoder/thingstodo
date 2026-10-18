@@ -1197,7 +1197,7 @@ Request: Partial update (any subset of fields)
   "default_time_gap": "integer (minutes, default 60)",
   "show_time_badge": "boolean (default true)",
   "time_format": "12h|24h (default 12h)",
-  "font_size": "integer (12|14|16|18|20, default 16)",
+  "font_size": "integer 12-20 (default 16)",
   "default_reminder_type": "at_start|on_day|minutes_before|hours_before|days_before|null (default null)",
   "default_reminder_value": "integer 0-99 (default 0)",
   "copy_reminders_to_recurring": "boolean (default true)",

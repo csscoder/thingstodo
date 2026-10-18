@@ -49,6 +49,35 @@ func TestSettingsFirstPatchSaved(t *testing.T) {
 	testutil.AssertJSONField(t, getResp, "review_after_days", float64(3))
 }
 
+func TestSettingsFontSizeRange(t *testing.T) {
+	client := setupSettingsRouter(t)
+
+	// GET first so the settings row exists.
+	getResp := client.Get("/api/user/settings")
+	testutil.AssertStatus(t, getResp, http.StatusOK)
+
+	// Every integer from 12 to 20 is accepted, including the odd
+	// sizes 15 and 17 the UI slider produces.
+	for _, size := range []int{12, 15, 17, 20} {
+		resp := client.Patch("/api/user/settings", map[string]interface{}{"font_size": size})
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("font_size %d: expected status 200, got %d (body: %s)", size, resp.StatusCode, string(resp.Body))
+		}
+	}
+
+	// Values outside the range are rejected with the documented message.
+	for _, size := range []int{11, 21} {
+		resp := client.Patch("/api/user/settings", map[string]interface{}{"font_size": size})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("font_size %d: expected status 400, got %d (body: %s)", size, resp.StatusCode, string(resp.Body))
+			continue
+		}
+		testutil.AssertJSONField(t, resp, "code", "VALIDATION")
+		testutil.AssertJSONField(t, resp, "field", "font_size")
+		testutil.AssertJSONField(t, resp, "error", "must be an integer from 12 to 20")
+	}
+}
+
 func TestSettingsPatch_Validates(t *testing.T) {
 	client := setupSettingsRouter(t)
 
@@ -61,7 +90,7 @@ func TestSettingsPatch_Validates(t *testing.T) {
 		{"sort_tags", map[string]interface{}{"sort_tags": "random"}, "sort_tags"},
 		{"evening_starts_at 7pm", map[string]interface{}{"evening_starts_at": "7pm"}, "evening_starts_at"},
 		{"time_format x", map[string]interface{}{"time_format": "x"}, "time_format"},
-		{"font_size 13", map[string]interface{}{"font_size": 13}, "font_size"},
+		{"font_size 11", map[string]interface{}{"font_size": 11}, "font_size"},
 		{"default_reminder_type sms", map[string]interface{}{"default_reminder_type": "sms"}, "default_reminder_type"},
 		{"default_reminder_value 100", map[string]interface{}{"default_reminder_value": 100}, "default_reminder_value"},
 		{"notification_provider carrier_pigeon", map[string]interface{}{"notification_provider": "carrier_pigeon"}, "notification_provider"},
