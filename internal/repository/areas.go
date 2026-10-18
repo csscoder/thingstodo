@@ -334,9 +334,12 @@ func (r *AreaRepository) DeleteToTrash(id string) error {
 			); err != nil {
 				return fmt.Errorf("trash area task %s: %w", c.id, err)
 			}
-			snapshot := map[string]interface{}{
-				"id": c.id, "title": c.title, "status": c.status, "deleted_at": now,
-				"area_id": nil,
+			// Log the full task snapshot: pull clients overwrite their local
+			// row with it, so a minimal one would drop fields like tags.
+			taskRepo := &TaskRepository{db: tx, changeLog: cl}
+			snapshot, gerr := taskRepo.GetByID(c.id)
+			if gerr != nil || snapshot == nil {
+				return fmt.Errorf("load trashed task %s snapshot: %v", c.id, gerr)
 			}
 			if err := logChange(cl, "task", c.id, "delete", nil, snapshot, "", ""); err != nil {
 				return fmt.Errorf("log trashed task %s: %w", c.id, err)

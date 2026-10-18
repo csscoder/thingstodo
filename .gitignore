@@ -52,3 +52,7 @@ research/
 docs/plans/
 .claude/worktrees/
 data
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
