@@ -48,7 +48,7 @@ export function ConfirmDialog({
           <h3 className="text-base font-medium text-neutral-900 dark:text-neutral-100">
             {title}
           </h3>
-          <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+          <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400 whitespace-pre-line">
             {description}
           </p>
         </div>

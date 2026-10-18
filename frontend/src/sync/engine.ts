@@ -40,6 +40,9 @@ export async function syncNow(): Promise<void> {
     // Push first, then pull
     const pushSummary = await pushChanges(deviceId)
 
+    // Surface permanently stuck changes after every push
+    store.setStuckCount(pushSummary.stuckCount)
+
     // Update pending count after push
     const remainingPending = await localDb.syncQueue.count()
     store.setPendingCount(remainingPending)
