@@ -28,9 +28,7 @@ import type {
   InboxView,
   TodayView,
   TodayViewGroup,
-  TodayViewSection,
   UpcomingView,
-  UpcomingViewDate,
   AnytimeView,
   AnytimeViewAreaGroup,
   AnytimeViewProjectGroup,
@@ -57,11 +55,6 @@ function todayString(): string {
   return ownerToday()
 }
 
-/** Returns tomorrow's date as a YYYY-MM-DD string in the owner timezone. */
-function tomorrowString(): string {
-  return addDays(todayString(), 1)
-}
-
 /** Strip sync metadata fields so callers get plain server-shaped types. */
 function stripSyncMeta<T extends object>(
   obj: T,
@@ -82,11 +75,14 @@ function taskToPlain(t: LocalTask): Task {
  * Compute schedule flags on a plain Task from its local schedule entries.
  * Mirrors the server's populateActionableScheduleFlags / populatePastScheduleCounts.
  */
-async function computeScheduleFlags(plain: Task, today: string = todayString()): Promise<void> {
-  const allSchedules = await localDb.schedules
-    .where('task_id')
-    .equals(plain.id)
-    .toArray()
+async function computeScheduleFlags(
+  plain: Task,
+  today: string = todayString(),
+  preloaded?: LocalSchedule[],
+): Promise<void> {
+  const allSchedules =
+    preloaded ??
+    (await localDb.schedules.where('task_id').equals(plain.id).toArray())
 
   if (allSchedules.length === 0) return
 
@@ -115,11 +111,79 @@ async function computeScheduleFlags(plain: Task, today: string = todayString()):
   ).length
 }
 
+/** start_time ASC with nulls first (SQLite ASC NULL ordering). */
+function timeNullsFirst(a: string | null, b: string | null): number {
+  if (a === b) return 0
+  if (a === null) return -1
+  if (b === null) return 1
+  return a < b ? -1 : 1
+}
+
+/** How a row's displayed schedule time is chosen. The server picks these
+ * per view query (views.go); the local builders mirror each mode. */
+type ScheduleTimePick =
+  /** This row's own schedule entry — Today/Evening rows and Upcoming date
+   * rows. A null entry is the LEFT JOIN fallback row: force no time. */
+  | { kind: 'row-entry'; entry: LocalSchedule | null }
+  /** First schedule row by sort_order, any completion, any date — the
+   * generic lists and Overdue. No entry id is exposed there. */
+  | { kind: 'first-any' }
+  /** First OPEN past entry (when_date < today, never someday) — Earlier. */
+  | { kind: 'first-open-past' }
+
+/** Set first_schedule_time / first_schedule_end_time / schedule_entry_id
+ * from the task's schedule rows according to the view's selection rule.
+ * A null pick keeps the generic default used by the other local views. */
+function applyScheduleTimePick(
+  plain: Task,
+  rows: LocalSchedule[],
+  today: string,
+  pick: ScheduleTimePick | null,
+): void {
+  if (pick?.kind === 'row-entry') {
+    plain.first_schedule_time = pick.entry?.start_time ?? null
+    plain.first_schedule_end_time = pick.entry?.end_time ?? null
+    plain.schedule_entry_id = pick.entry?.id ?? null
+    return
+  }
+  if (pick?.kind === 'first-any') {
+    const first = [...rows].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))[0]
+    plain.first_schedule_time = first?.start_time ?? null
+    plain.first_schedule_end_time = first?.end_time ?? null
+    plain.schedule_entry_id = null
+    return
+  }
+  if (pick?.kind === 'first-open-past') {
+    const first = rows
+      .filter((s) => !s.completed && s.when_date < today && s.when_date !== 'someday')
+      .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))[0]
+    plain.first_schedule_time = first?.start_time ?? null
+    plain.first_schedule_end_time = first?.end_time ?? null
+    plain.schedule_entry_id = first?.id ?? null
+    return
+  }
+  // Generic default: first uncompleted entry by sort_order.
+  if (!plain.first_schedule_time) {
+    const first = rows
+      .filter((s) => !s.completed)
+      .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))[0]
+    if (first?.start_time) {
+      plain.first_schedule_time = first.start_time
+      plain.first_schedule_end_time = first.end_time ?? null
+      plain.schedule_entry_id = first.id
+    }
+  }
+}
+
 /**
  * Enrich a task with denormalized project_name, area_name, schedule time, and flags.
  * The server does this via SQL JOINs; we do it by looking up related entities.
  */
-async function enrichTask(t: LocalTask, today: string = todayString()): Promise<Task> {
+async function enrichTask(
+  t: LocalTask,
+  today: string = todayString(),
+  pick?: ScheduleTimePick,
+): Promise<Task> {
   const plain = taskToPlain(t)
 
   // Resolve project/area names
@@ -132,19 +196,10 @@ async function enrichTask(t: LocalTask, today: string = todayString()): Promise<
     if (area) plain.area_name = area.title
   }
 
-  // Resolve first schedule time if not already set
-  if (!plain.first_schedule_time) {
-    const firstSchedule = await localDb.schedules
-      .where('task_id')
-      .equals(t.id)
-      .filter((s) => !s.completed)
-      .sortBy('sort_order')
-    if (firstSchedule.length > 0 && firstSchedule[0].start_time) {
-      plain.first_schedule_time = firstSchedule[0].start_time
-      plain.first_schedule_end_time = firstSchedule[0].end_time ?? null
-      plain.schedule_entry_id = firstSchedule[0].id
-    }
-  }
+  // Schedule time selection: view-specific where a pick is given, else
+  // the generic first-uncompleted-by-sort_order default.
+  const schedules = await localDb.schedules.where('task_id').equals(t.id).toArray()
+  applyScheduleTimePick(plain, schedules, today, pick ?? null)
 
   // Resolve reminder fields
   const reminders = await localDb.reminders
@@ -170,7 +225,7 @@ async function enrichTask(t: LocalTask, today: string = todayString()): Promise<
   plain.checklist_count = checklistItems.length
   plain.checklist_done = checklistItems.filter((c) => c.completed).length
 
-  await computeScheduleFlags(plain, today)
+  await computeScheduleFlags(plain, today, schedules)
   return plain
 }
 
@@ -206,18 +261,8 @@ async function enrichTasks(tasks: LocalTask[], today: string = todayString()): P
     if (t.area_id && !plain.area_name) {
       plain.area_name = areaNames.get(t.area_id) ?? null
     }
-    if (!plain.first_schedule_time) {
-      const schedules = await localDb.schedules
-        .where('task_id')
-        .equals(t.id)
-        .filter((s) => !s.completed)
-        .sortBy('sort_order')
-      if (schedules.length > 0 && schedules[0].start_time) {
-        plain.first_schedule_time = schedules[0].start_time
-        plain.first_schedule_end_time = schedules[0].end_time ?? null
-        plain.schedule_entry_id = schedules[0].id
-      }
-    }
+    const schedules = await localDb.schedules.where('task_id').equals(t.id).toArray()
+    applyScheduleTimePick(plain, schedules, today, null)
     // Resolve reminder fields
     const reminders = await localDb.reminders
       .where('task_id')
@@ -240,7 +285,7 @@ async function enrichTasks(tasks: LocalTask[], today: string = todayString()): P
     const checklistItems = await localDb.checklistItems.where('task_id').equals(t.id).toArray()
     plain.checklist_count = checklistItems.length
     plain.checklist_done = checklistItems.filter((c) => c.completed).length
-    await computeScheduleFlags(plain, today)
+    await computeScheduleFlags(plain, today, schedules)
     result.push(plain)
   }
   return result
@@ -312,9 +357,6 @@ export function useLocalInbox(reviewAfterDays?: number | null, reviewIncludeRecu
   }, [reviewAfterDays, reviewIncludeRecurring, today])
 }
 
-/**
- * Group tasks by project_id, resolving project names from the local DB.
- */
 /** Standard task sort: priority desc, start_time asc (null last), title asc. */
 function sortTasks(tasks: Task[]): Task[] {
   return tasks.sort((a, b) =>
@@ -324,135 +366,144 @@ function sortTasks(tasks: Task[]): Task[] {
   )
 }
 
-/** Enrich tasks and return as a single flat group. */
-async function tasksToGroups(tasks: LocalTask[], today: string): Promise<TodayViewGroup[]> {
-  const enriched = await enrichTasks(tasks, today)
-  return [{ project: null, tasks: enriched }]
+/** One display row of the Today view: the task plus the open schedule
+ *  entry the row shows (null for the timeless membership row). */
+interface TodayRow {
+  task: LocalTask
+  entry: LocalSchedule | null
+  startTime: string | null
+}
+
+/** All open, non-deleted tasks plus their schedule rows grouped by task. */
+async function loadOpenTasksWithSchedules(): Promise<{
+  openTasks: LocalTask[]
+  rowsByTask: Map<string, LocalSchedule[]>
+}> {
+  const [openTasks, allSchedules] = await Promise.all([
+    localDb.tasks.filter((t) => t.status === 'open' && !t.deleted_at).toArray(),
+    localDb.schedules.toArray(),
+  ])
+  const rowsByTask = new Map<string, LocalSchedule[]>()
+  for (const s of allSchedules) {
+    const rows = rowsByTask.get(s.task_id)
+    if (rows) rows.push(s)
+    else rowsByTask.set(s.task_id, [s])
+  }
+  return { openTasks, rowsByTask }
+}
+
+/** Overdue: open tasks with deadline < today, oldest deadline first. */
+function collectOverdueTasks(openTasks: LocalTask[], today: string): LocalTask[] {
+  return openTasks
+    .filter((t) => !!t.deadline && t.deadline < today)
+    .sort((a, b) => (a.deadline ?? '').localeCompare(b.deadline ?? ''))
+}
+
+/** Earlier: open tasks with when_date < today, never someday, regardless
+ *  of schedule rows (E3) — by date, then sort_order_today. */
+function collectEarlierTasks(openTasks: LocalTask[], today: string): LocalTask[] {
+  return openTasks
+    .filter((t) => !!t.when_date && t.when_date !== 'someday' && t.when_date < today)
+    .sort(
+      (a, b) =>
+        (a.when_date ?? '').localeCompare(b.when_date ?? '') ||
+        (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0),
+    )
+}
+
+/** Sort Today rows like the server: sort_order_today ASC, then the row's
+ *  start_time ASC with timeless rows first (SQL NULLs first). */
+function sortTodayRows(rows: TodayRow[]): TodayRow[] {
+  return rows.sort((a, b) =>
+    (a.task.sort_order_today ?? 0) - (b.task.sort_order_today ?? 0) ||
+    timeNullsFirst(a.startTime, b.startTime),
+  )
+}
+
+/** Enrich Today rows (each showing its own entry) and group them by
+ *  project in first-appearance order — the server's groupByProject. */
+async function todayRowsToGroups(rows: TodayRow[], today: string): Promise<TodayViewGroup[]> {
+  const order: string[] = []
+  const buckets = new Map<string, TodayRow[]>()
+  for (const row of rows) {
+    const key = row.task.project_id ?? ''
+    if (!buckets.has(key)) {
+      buckets.set(key, [])
+      order.push(key)
+    }
+    buckets.get(key)!.push(row)
+  }
+
+  const groups: TodayViewGroup[] = []
+  for (const key of order) {
+    const project = key ? await localDb.projects.get(key) : undefined
+    const tasks: Task[] = []
+    for (const row of buckets.get(key)!) {
+      tasks.push(await enrichTask(row.task, today, { kind: 'row-entry', entry: row.entry }))
+    }
+    groups.push({ project: project ? { id: project.id, title: project.title } : null, tasks })
+  }
+  return groups
 }
 
 /**
- * Today: open tasks matching today via when_date, deadline, or schedule entry.
- * Split into Today and This Evening sections based on eveningStartsAt.
- * Includes overdue, earlier, and completed-today.
+ * Today: mirrors the server rules in internal/repository/views.go —
+ * one row per OPEN today schedule entry (an entry at or after eveningStartsAt
+ * joins This Evening), plus one timeless row for a member with no open today
+ * entries (deadline today, or a rowless task dated today). Sections order by
+ * sort_order_today then start_time (nulls first). Overdue (deadline < today)
+ * and Earlier (when_date < today, never someday, regardless of schedule
+ * rows) follow, and Earlier shows the first OPEN past entry.
  */
 export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined {
   // Owner-zone today: re-runs at owner midnight so Today rolls over
   const today = useOwnerToday()
   return useLiveQuery(async () => {
-    // Collect all tasks that should appear in Today:
-    // 1) when_date = today
-    // 2) deadline = today (even if no when_date)
-    // 3) has a schedule entry with when_date = today and not completed
-    const seenIds = new Set<string>()
-    const candidates: LocalTask[] = []
+    const { openTasks, rowsByTask } = await loadOpenTasksWithSchedules()
 
-    // 1) when_date = today — only if the task has no schedule rows at all
-    //    (the synthetic entry of E3), or an uncompleted schedule for today
-    const byWhenDate = await localDb.tasks
-      .where('when_date')
-      .equals(today)
-      .filter((t) => t.status === 'open' && !t.deleted_at)
-      .toArray()
-    for (const t of byWhenDate) {
-      if (seenIds.has(t.id)) continue
-      const scheduleCount = await localDb.schedules
-        .where('task_id')
-        .equals(t.id)
-        .count()
-      const todayScheds = await localDb.schedules
-        .where('task_id')
-        .equals(t.id)
-        .filter((s) => s.when_date === today && !s.completed)
-        .toArray()
-      if (scheduleCount === 0 || todayScheds.length > 0) {
-        seenIds.add(t.id); candidates.push(t)
-      }
-    }
-
-    // 2) deadline = today
-    const byDeadline = await localDb.tasks
-      .where('deadline')
-      .equals(today)
-      .filter((t) => t.status === 'open' && !t.deleted_at)
-      .toArray()
-    for (const t of byDeadline) {
-      if (!seenIds.has(t.id)) { seenIds.add(t.id); candidates.push(t) }
-    }
-
-    // 3) schedule entry with when_date = today (task's when_date may differ)
-    const todaySchedules = await localDb.schedules
-      .where('when_date')
-      .equals(today)
-      .filter((s) => !s.completed)
-      .toArray()
-    const scheduleTaskIds = new Set(todaySchedules.map((s) => s.task_id))
-    for (const taskId of scheduleTaskIds) {
-      if (seenIds.has(taskId)) continue
-      const t = await localDb.tasks.get(taskId)
-      if (t && t.status === 'open' && !t.deleted_at) {
-        seenIds.add(t.id)
-        candidates.push(t)
-      }
-    }
-
-    // Split into today vs evening based on schedule start_time,
-    // tracking each task's start_time for sorting
-    const todayTasks: Array<{ task: LocalTask; startTime: string | null }> = []
-    const eveningTasks: Array<{ task: LocalTask; startTime: string | null }> = []
-    for (const t of candidates) {
-      const schedules = await localDb.schedules
-        .where('task_id')
-        .equals(t.id)
-        .filter((s) => s.when_date === today && !s.completed)
-        .toArray()
-      const eveningSchedule = schedules.find(
-        (s) => s.start_time !== null && s.start_time >= eveningStartsAt,
+    // Membership (view_predicates.go todaySectionsCond): deadline today, an
+    // open schedule entry for today, or a rowless task dated today (the E3
+    // synthetic entry). A dated task whose rows all exist and are completed
+    // matches nothing — the documented no-list exception.
+    const isTodayMember = (t: LocalTask): boolean => {
+      const rows = rowsByTask.get(t.id) ?? []
+      return (
+        t.deadline === today ||
+        rows.some((s) => s.when_date === today && !s.completed) ||
+        (t.when_date === today && rows.length === 0)
       )
-      if (eveningSchedule) {
-        eveningTasks.push({ task: t, startTime: eveningSchedule.start_time })
-      } else {
-        const firstTime = schedules.find((s) => s.start_time !== null)
-        todayTasks.push({ task: t, startTime: firstTime?.start_time ?? null })
+    }
+
+    // One row per OPEN today entry (the LEFT JOIN): an entry at or after
+    // eveningStartsAt joins This Evening, a timeless or earlier one joins
+    // Today. A member with no open today entries at all keeps one timeless
+    // row (the NULL join row).
+    const dayRows: TodayRow[] = []
+    const eveningRows: TodayRow[] = []
+    for (const t of openTasks) {
+      if (!isTodayMember(t)) continue
+      const openToday = (rowsByTask.get(t.id) ?? []).filter(
+        (s) => s.when_date === today && !s.completed,
+      )
+      for (const entry of openToday) {
+        const row: TodayRow = { task: t, entry, startTime: entry.start_time ?? null }
+        if (entry.start_time !== null && entry.start_time >= eveningStartsAt) {
+          eveningRows.push(row)
+        } else {
+          dayRows.push(row)
+        }
+      }
+      if (openToday.length === 0) {
+        dayRows.push({ task: t, entry: null, startTime: null })
       }
     }
 
-    // Sort by: high_priority desc, start_time asc (null last), title asc
-    const sortSection = (items: Array<{ task: LocalTask; startTime: string | null }>) =>
-      items.sort((a, b) =>
-        (b.task.high_priority ? 1 : 0) - (a.task.high_priority ? 1 : 0) ||
-        (a.startTime ?? '\xff').localeCompare(b.startTime ?? '\xff') ||
-        (a.task.title ?? '').localeCompare(b.task.title ?? ''),
-      ).map((i) => i.task)
+    // ORDER BY sort_order_today ASC, start_time ASC (nulls first)
+    const sortedTodayRows = sortTodayRows(dayRows)
+    const sortedEveningRows = sortTodayRows(eveningRows)
 
-    const sortedTodayTasks = sortSection(todayTasks)
-    const sortedEveningTasks = sortSection(eveningTasks)
-
-    // Overdue: open tasks with deadline < today
-    const overdueTasks = await localDb.tasks
-      .where('deadline')
-      .below(today)
-      .filter((t) => t.status === 'open' && !t.deleted_at && !!t.deadline)
-      .toArray()
-    overdueTasks.sort((a, b) => (a.deadline ?? '').localeCompare(b.deadline ?? ''))
-
-    // Earlier: open tasks with when_date < today, not someday, regardless
-    // of schedule rows (E3); a task with a passed deadline may appear here
-    // and in Overdue at once.
-    const earlierTasks = await localDb.tasks
-      .where('when_date')
-      .below(today)
-      .filter(
-        (t) =>
-          t.status === 'open' &&
-          !t.deleted_at &&
-          !!t.when_date &&
-          t.when_date !== 'someday',
-      )
-      .toArray()
-    earlierTasks.sort((a, b) =>
-      (a.when_date ?? '').localeCompare(b.when_date ?? '') ||
-      (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0),
-    )
+    const overdueTasks = collectOverdueTasks(openTasks, today)
+    const earlierTasks = collectEarlierTasks(openTasks, today)
 
     // Completed today (owner-zone calendar day of the terminal timestamp)
     const completedTasks = await localDb.tasks
@@ -469,15 +520,17 @@ export function useLocalToday(eveningStartsAt = '18:00'): TodayView | undefined 
       return bTs.localeCompare(aTs)
     })
 
-    const sections: TodayViewSection[] = [
-      { title: 'Today', groups: await tasksToGroups(sortedTodayTasks, today) },
-      { title: 'This Evening', groups: await tasksToGroups(sortedEveningTasks, today) },
-    ]
-
     return {
-      sections,
-      overdue: await enrichTasks(overdueTasks, today),
-      earlier: await enrichTasks(earlierTasks, today),
+      sections: [
+        { title: 'Today', groups: await todayRowsToGroups(sortedTodayRows, today) },
+        { title: 'This Evening', groups: await todayRowsToGroups(sortedEveningRows, today) },
+      ],
+      overdue: await Promise.all(
+        overdueTasks.map((t) => enrichTask(t, today, { kind: 'first-any' })),
+      ),
+      earlier: await Promise.all(
+        earlierTasks.map((t) => enrichTask(t, today, { kind: 'first-open-past' })),
+      ),
       completed: await enrichTasks(completedTasks, today),
     } satisfies TodayView
   }, [eveningStartsAt, today])
@@ -497,100 +550,74 @@ export function useLocalUpcoming(): UpcomingView | undefined {
   // Owner-zone today: re-runs at owner midnight so the date groups roll over
   const today = useOwnerToday()
   return useLiveQuery(async () => {
-    const tomorrow = tomorrowString()
+    // E3: the date groups start tomorrow (the server's default from);
+    // Overdue and Earlier stay relative to today, never to from.
+    const from = addDays(today, 1)
 
-    // Date groups: one entry per uncompleted schedule on or after tomorrow.
-    const allSchedules = await localDb.schedules
-      .where('when_date')
-      .aboveOrEqual(tomorrow)
-      .filter((s) => !s.completed && s.when_date !== 'someday')
-      .toArray()
+    const { openTasks, rowsByTask } = await loadOpenTasksWithSchedules()
 
-    // Group schedule entries by date, sorted by date then start_time
-    allSchedules.sort((a, b) =>
-      a.when_date.localeCompare(b.when_date) ||
-      (a.start_time ?? '').localeCompare(b.start_time ?? '') ||
-      (a.sort_order ?? 0) - (b.sort_order ?? 0),
+    // One row per OPEN entry dated on or after from, never someday — the
+    // LEFT JOIN. A task with a when_date and NO schedule rows at all
+    // appears once under its when_date (the E3 synthetic entry); a task
+    // whose rows all exist and are completed matches nothing here.
+    const rows: Array<{
+      task: LocalTask
+      entry: LocalSchedule | null
+      date: string
+      startTime: string | null
+    }> = []
+    for (const t of openTasks) {
+      const all = rowsByTask.get(t.id) ?? []
+      const future = all.filter(
+        (s) => s.when_date >= from && s.when_date !== 'someday' && !s.completed,
+      )
+      for (const entry of future) {
+        rows.push({ task: t, entry, date: entry.when_date, startTime: entry.start_time ?? null })
+      }
+      if (
+        future.length === 0 &&
+        all.length === 0 &&
+        t.when_date !== null &&
+        t.when_date !== 'someday' &&
+        t.when_date >= from
+      ) {
+        rows.push({ task: t, entry: null, date: t.when_date, startTime: null })
+      }
+    }
+
+    // ORDER BY schedule_date ASC, start_time ASC (nulls first), sort_order_today ASC
+    rows.sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        timeNullsFirst(a.startTime, b.startTime) ||
+        (a.task.sort_order_today ?? 0) - (b.task.sort_order_today ?? 0),
     )
 
+    // Group under the entry's date (or the task's when_date for the
+    // synthetic row) in encounter order, which is chronological.
     const dateMap = new Map<string, Task[]>()
     const dateOrder: string[] = []
-
-    for (const s of allSchedules) {
-      const t = await localDb.tasks.get(s.task_id)
-      if (!t || t.status !== 'open' || t.deleted_at) continue
-
-      const d = s.when_date
-      if (!dateMap.has(d)) { dateMap.set(d, []); dateOrder.push(d) }
-      const enriched = await enrichTask(t, today)
-      enriched.first_schedule_time = s.start_time ?? null
-      enriched.first_schedule_end_time = s.end_time ?? null
-      enriched.schedule_entry_id = s.id
-      dateMap.get(d)!.push(enriched)
+    for (const row of rows) {
+      if (!dateMap.has(row.date)) {
+        dateMap.set(row.date, [])
+        dateOrder.push(row.date)
+      }
+      dateMap
+        .get(row.date)!
+        .push(await enrichTask(row.task, today, { kind: 'row-entry', entry: row.entry }))
     }
 
-    // Synthetic entry (E3): a task with a when_date and no schedule rows at
-    // all appears once under its when_date. A task whose rows all exist and
-    // are completed matches nothing here.
-    const rowlessCandidates = await localDb.tasks
-      .where('when_date')
-      .aboveOrEqual(tomorrow)
-      .filter((t) => t.status === 'open' && !t.deleted_at && t.when_date !== 'someday')
-      .toArray()
-    for (const t of rowlessCandidates) {
-      const scheduleCount = await localDb.schedules
-        .where('task_id')
-        .equals(t.id)
-        .count()
-      if (scheduleCount > 0) continue
-
-      const d = t.when_date!
-      if (!dateMap.has(d)) { dateMap.set(d, []); dateOrder.push(d) }
-      dateMap.get(d)!.push(await enrichTask(t, today))
-    }
-
-    // Sort tasks within each date, and dates chronologically
-    for (const tasks of dateMap.values()) {
-      sortTasks(tasks)
-    }
-    dateOrder.sort()
-
-    const dates: UpcomingViewDate[] = dateOrder.map((date) => ({
-      date,
-      tasks: dateMap.get(date) ?? [],
-    }))
-
-    // Overdue: open tasks with deadline < today
-    const overdueTasks = await localDb.tasks
-      .where('deadline')
-      .below(today)
-      .filter((t) => t.status === 'open' && !t.deleted_at && !!t.deadline)
-      .toArray()
-    overdueTasks.sort((a, b) => (a.deadline ?? '').localeCompare(b.deadline ?? ''))
-
-    // Earlier: open tasks with when_date < today, not someday, regardless
-    // of schedule rows (E3); a task with a passed deadline may appear here
-    // and in Overdue at once.
-    const earlierTasks = await localDb.tasks
-      .where('when_date')
-      .below(today)
-      .filter(
-        (t) =>
-          t.status === 'open' &&
-          !t.deleted_at &&
-          !!t.when_date &&
-          t.when_date !== 'someday',
-      )
-      .toArray()
-    earlierTasks.sort((a, b) =>
-      (a.when_date ?? '').localeCompare(b.when_date ?? '') ||
-      (a.sort_order_today ?? 0) - (b.sort_order_today ?? 0),
-    )
+    const overdueTasks = collectOverdueTasks(openTasks, today)
+    const earlierTasks = collectEarlierTasks(openTasks, today)
 
     return {
-      overdue: await enrichTasks(overdueTasks, today),
-      dates,
-      earlier: await enrichTasks(earlierTasks, today),
+      overdue: await Promise.all(
+        overdueTasks.map((t) => enrichTask(t, today, { kind: 'first-any' })),
+      ),
+      dates: dateOrder.map((date) => ({ date, tasks: dateMap.get(date) ?? [] })),
+      earlier: await Promise.all(
+        earlierTasks.map((t) => enrichTask(t, today, { kind: 'first-open-past' })),
+      ),
     } satisfies UpcomingView
   }, [today])
 }
