@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { localDb } from '../../db/index'
-import { pullChanges } from '../pull'
+import { pullChanges, restoreFromSkippedSnapshot } from '../pull'
 import type { SyncQueueEntry } from '../../db/schema'
 
 // Mock the API client
@@ -148,6 +148,53 @@ describe('pullChanges', () => {
     expect(task?._syncStatus).toBe('pending')
   })
 
+  test('stores a skipped snapshot when the entity has a pending entry', async () => {
+    // Add a pending task to syncQueue
+    const pendingEntry: Omit<SyncQueueEntry, 'id'> = {
+      entity: 'task',
+      entityId: 'task-local-pending',
+      action: 'update',
+      data: { title: 'Local pending' },
+      fields: ['title'],
+      clientUpdatedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }
+    await localDb.syncQueue.add(pendingEntry as SyncQueueEntry)
+
+    // Seed the local task with the local version
+    await localDb.tasks.put({
+      id: 'task-local-pending',
+      title: 'Local pending',
+      status: 'open',
+      _syncStatus: 'pending',
+      _localUpdatedAt: new Date().toISOString(),
+    } as Parameters<typeof localDb.tasks.put>[0])
+
+    // Server tries to overwrite with a different title
+    mockGet.mockResolvedValueOnce(
+      makePullResponse([
+        makeChange('task', 'task-local-pending', 'update', { title: 'Server override' }, 50),
+      ]),
+    )
+
+    await pullChanges()
+
+    // Local version should be preserved
+    const task = await localDb.tasks.get('task-local-pending')
+    expect(task?.title).toBe('Local pending')
+    expect(task?._syncStatus).toBe('pending')
+
+    // The skipped server snapshot is stored for later restore (Discard)
+    const snap = await localDb.skippedSnapshots.get(['task', 'task-local-pending'])
+    expect(snap).toEqual({
+      entity: 'task',
+      entityId: 'task-local-pending',
+      action: 'update',
+      snapshot: { id: 'task-local-pending', title: 'Server override' },
+      seq: 50,
+    })
+  })
+
   test('handles pagination by following has_more until exhausted', async () => {
     // First page
     mockGet.mockResolvedValueOnce({
@@ -186,5 +233,101 @@ describe('pullChanges', () => {
 
     const [call] = mockGet.mock.calls
     expect(call[0]).toContain('since=77')
+  })
+})
+
+describe('restoreFromSkippedSnapshot', () => {
+  beforeEach(async () => {
+    await clearDb()
+    vi.clearAllMocks()
+  })
+
+  test('applies the latest snapshot', async () => {
+    const pendingEntry: Omit<SyncQueueEntry, 'id'> = {
+      entity: 'task',
+      entityId: 'task-x',
+      action: 'update',
+      data: { title: 'Local' },
+      fields: ['title'],
+      clientUpdatedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }
+    await localDb.syncQueue.add(pendingEntry as SyncQueueEntry)
+    await localDb.tasks.put({
+      id: 'task-x',
+      title: 'Local',
+      status: 'open',
+      _syncStatus: 'pending',
+      _localUpdatedAt: new Date().toISOString(),
+    } as Parameters<typeof localDb.tasks.put>[0])
+
+    // Two skipped server changes: the latest one wins
+    mockGet.mockResolvedValueOnce(
+      makePullResponse([makeChange('task', 'task-x', 'update', { title: 'Server A' }, 50)]),
+    )
+    await pullChanges()
+    mockGet.mockResolvedValueOnce(
+      makePullResponse([makeChange('task', 'task-x', 'update', { title: 'Server B' }, 51)]),
+    )
+    await pullChanges()
+
+    const stored = await localDb.skippedSnapshots.get(['task', 'task-x'])
+    expect(stored?.seq).toBe(51)
+
+    await restoreFromSkippedSnapshot('task', 'task-x')
+
+    const task = await localDb.tasks.get('task-x')
+    expect(task?.title).toBe('Server B')
+    expect(task?._syncStatus).toBe('synced')
+    expect(task?._serverSeq).toBe(51)
+    expect(await localDb.skippedSnapshots.get(['task', 'task-x'])).toBeUndefined()
+  })
+
+  test('deletes the row when the latest skipped change was a hard delete', async () => {
+    const pendingEntry: Omit<SyncQueueEntry, 'id'> = {
+      entity: 'task',
+      entityId: 'task-y',
+      action: 'delete',
+      data: { id: 'task-y' },
+      clientUpdatedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }
+    await localDb.syncQueue.add(pendingEntry as SyncQueueEntry)
+    await localDb.tasks.put({
+      id: 'task-y',
+      title: 'Local',
+      status: 'open',
+      _syncStatus: 'pending',
+      _localUpdatedAt: new Date().toISOString(),
+    } as Parameters<typeof localDb.tasks.put>[0])
+
+    // Server hard-deleted the task (snapshot without deleted_at)
+    mockGet.mockResolvedValueOnce(
+      makePullResponse([makeChange('task', 'task-y', 'delete', {}, 60)]),
+    )
+    await pullChanges()
+
+    const stored = await localDb.skippedSnapshots.get(['task', 'task-y'])
+    expect(stored?.action).toBe('delete')
+
+    await restoreFromSkippedSnapshot('task', 'task-y')
+
+    expect(await localDb.tasks.get('task-y')).toBeUndefined()
+    expect(await localDb.skippedSnapshots.get(['task', 'task-y'])).toBeUndefined()
+  })
+
+  test('leaves the row untouched when no snapshot is stored', async () => {
+    await localDb.tasks.put({
+      id: 'task-z',
+      title: 'Untouched',
+      status: 'open',
+      _syncStatus: 'synced',
+      _localUpdatedAt: new Date().toISOString(),
+    } as Parameters<typeof localDb.tasks.put>[0])
+
+    await restoreFromSkippedSnapshot('task', 'task-z')
+
+    const task = await localDb.tasks.get('task-z')
+    expect(task?.title).toBe('Untouched')
   })
 })

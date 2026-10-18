@@ -1,6 +1,7 @@
 import { api } from '../api/client'
 import { localDb } from '../db/index'
 import type { SyncEntity } from '../db/schema'
+import { applyQueueEntryLocally } from './replay'
 
 const ENTITY_TABLE_MAP: Record<string, string> = {
   task: 'tasks',
@@ -28,6 +29,15 @@ const SERVER_TO_QUEUE_ENTITY: Record<string, SyncEntity> = {
   repeat_rule: 'repeatRule',
   heading: 'heading',
 }
+
+// Map from SyncEntity (queue entity name) to its Dexie table name,
+// derived from the server-name maps above.
+export const QUEUE_ENTITY_TABLE: Record<SyncEntity, string> = Object.fromEntries(
+  Object.entries(SERVER_TO_QUEUE_ENTITY).map(([serverEntity, queueEntity]) => [
+    queueEntity,
+    ENTITY_TABLE_MAP[serverEntity],
+  ]),
+) as Record<SyncEntity, string>
 
 interface ChangeLogEntry {
   seq: number
@@ -91,7 +101,15 @@ async function applyChange(
   if (queueEntity) {
     const pendingIds = pendingEntityIds.get(queueEntity)
     if (pendingIds?.has(change.entity_id)) {
-      // Skip — we have local pending changes for this entity
+      // Skip — we have local pending changes for this entity. Keep the
+      // server's latest snapshot so it can be restored later (Discard).
+      await localDb.skippedSnapshots.put({
+        entity: queueEntity,
+        entityId: change.entity_id,
+        action: change.action,
+        snapshot: JSON.parse(change.snapshot) as Record<string, unknown>,
+        seq: change.seq,
+      })
       return
     }
   }
@@ -152,6 +170,39 @@ async function applyChange(
   }
 }
 
+/**
+ * Apply the stored skipped snapshot of an entity to its table and remove
+ * the record. A delete-action snapshot without deleted_at hard-deletes the
+ * row; any other snapshot is written back with synced metadata. No stored
+ * record leaves the row untouched.
+ */
+export async function restoreFromSkippedSnapshot(
+  entity: SyncEntity,
+  entityId: string,
+): Promise<void> {
+  const record = await localDb.skippedSnapshots.get([entity, entityId])
+  if (!record) return
+
+  const tableName = QUEUE_ENTITY_TABLE[entity]
+  if (tableName) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const table = (localDb as any)[tableName]
+    if (record.action === 'delete' && !record.snapshot.deleted_at) {
+      await table.delete(entityId)
+    } else {
+      await table.put({
+        ...record.snapshot,
+        id: entityId,
+        _syncStatus: 'synced',
+        _localUpdatedAt: new Date().toISOString(),
+        _serverSeq: record.seq,
+      })
+    }
+  }
+
+  await localDb.skippedSnapshots.delete([entity, entityId])
+}
+
 export async function pullChanges(): Promise<ChangeLogEntry[]> {
   const pendingEntityIds = await getPendingEntityIds()
   const allChanges: ChangeLogEntry[] = []
@@ -209,27 +260,67 @@ export async function fullSync(): Promise<void> {
       await localDb.headings.clear()
 
       const now = new Date().toISOString()
+      // Stamp every row with the full-sync cursor so later pulled changes
+      // can tell confirmed rows apart from local-only ones (e.g. the
+      // temporary-row cleanup for schedule creates).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const withMeta = (items: Record<string, unknown>[], seq?: number): any[] =>
+      const withMeta = (items: Record<string, unknown>[], seq: number): any[] =>
         items.map((item) => ({
           ...item,
           _syncStatus: 'synced' as const,
           _localUpdatedAt: now,
-          ...(seq !== undefined ? { _serverSeq: seq } : {}),
+          _serverSeq: seq,
         }))
 
-      if (response.tasks?.length) await localDb.tasks.bulkPut(withMeta(response.tasks) as Parameters<typeof localDb.tasks.bulkPut>[0])
-      if (response.projects?.length) await localDb.projects.bulkPut(withMeta(response.projects) as Parameters<typeof localDb.projects.bulkPut>[0])
-      if (response.areas?.length) await localDb.areas.bulkPut(withMeta(response.areas) as Parameters<typeof localDb.areas.bulkPut>[0])
-      if (response.tags?.length) await localDb.tags.bulkPut(withMeta(response.tags) as Parameters<typeof localDb.tags.bulkPut>[0])
-      if (response.checklist?.length) await localDb.checklistItems.bulkPut(withMeta(response.checklist) as Parameters<typeof localDb.checklistItems.bulkPut>[0])
-      if (response.attachments?.length) await localDb.attachments.bulkPut(withMeta(response.attachments) as Parameters<typeof localDb.attachments.bulkPut>[0])
-      if (response.schedules?.length) await localDb.schedules.bulkPut(withMeta(response.schedules) as Parameters<typeof localDb.schedules.bulkPut>[0])
-      if (response.reminders?.length) await localDb.reminders.bulkPut(withMeta(response.reminders) as Parameters<typeof localDb.reminders.bulkPut>[0])
-      if (response.repeat_rules?.length) await localDb.repeatRules.bulkPut(withMeta(response.repeat_rules) as Parameters<typeof localDb.repeatRules.bulkPut>[0])
-      if (response.headings?.length) await localDb.headings.bulkPut(withMeta(response.headings) as Parameters<typeof localDb.headings.bulkPut>[0])
+      if (response.tasks?.length) await localDb.tasks.bulkPut(withMeta(response.tasks, response.cursor) as Parameters<typeof localDb.tasks.bulkPut>[0])
+      if (response.projects?.length) await localDb.projects.bulkPut(withMeta(response.projects, response.cursor) as Parameters<typeof localDb.projects.bulkPut>[0])
+      if (response.areas?.length) await localDb.areas.bulkPut(withMeta(response.areas, response.cursor) as Parameters<typeof localDb.areas.bulkPut>[0])
+      if (response.tags?.length) await localDb.tags.bulkPut(withMeta(response.tags, response.cursor) as Parameters<typeof localDb.tags.bulkPut>[0])
+      if (response.checklist?.length) await localDb.checklistItems.bulkPut(withMeta(response.checklist, response.cursor) as Parameters<typeof localDb.checklistItems.bulkPut>[0])
+      if (response.attachments?.length) await localDb.attachments.bulkPut(withMeta(response.attachments, response.cursor) as Parameters<typeof localDb.attachments.bulkPut>[0])
+      if (response.schedules?.length) await localDb.schedules.bulkPut(withMeta(response.schedules, response.cursor) as Parameters<typeof localDb.schedules.bulkPut>[0])
+      if (response.reminders?.length) await localDb.reminders.bulkPut(withMeta(response.reminders, response.cursor) as Parameters<typeof localDb.reminders.bulkPut>[0])
+      if (response.repeat_rules?.length) await localDb.repeatRules.bulkPut(withMeta(response.repeat_rules, response.cursor) as Parameters<typeof localDb.repeatRules.bulkPut>[0])
+      if (response.headings?.length) await localDb.headings.bulkPut(withMeta(response.headings, response.cursor) as Parameters<typeof localDb.headings.bulkPut>[0])
     },
   )
+
+  // The clear+bulkPut transaction has committed. Re-apply every still-queued
+  // local change over the server rows (Dexie transactions don't nest, so
+  // this runs as sequential awaits after the transaction) so pending and
+  // stuck edits survive the full sync.
+  const queueEntries = await localDb.syncQueue.orderBy('id').toArray()
+
+  // Capture each queued entity's full-sync row (before replay overlays it)
+  // as its skipped snapshot, so Discard can restore the server version.
+  // Entities the server doesn't have get a delete snapshot.
+  const touchedEntities = new Map<SyncEntity, Set<string>>()
+  for (const entry of queueEntries) {
+    if (!touchedEntities.has(entry.entity)) {
+      touchedEntities.set(entry.entity, new Set())
+    }
+    touchedEntities.get(entry.entity)!.add(entry.entityId)
+  }
+  for (const [entity, entityIds] of touchedEntities) {
+    const tableName = QUEUE_ENTITY_TABLE[entity]
+    if (!tableName) continue
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const table = (localDb as any)[tableName]
+    for (const entityId of entityIds) {
+      const row = await table.get(entityId)
+      await localDb.skippedSnapshots.put({
+        entity,
+        entityId,
+        action: row ? 'update' : 'delete',
+        snapshot: (row ?? {}) as Record<string, unknown>,
+        seq: response.cursor,
+      })
+    }
+  }
+
+  for (const entry of queueEntries) {
+    await applyQueueEntryLocally(entry)
+  }
 
   await saveCursor(response.cursor)
 }
