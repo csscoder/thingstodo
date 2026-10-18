@@ -15,7 +15,7 @@ import {
 } from '@dnd-kit/core'
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { Package } from 'lucide-react'
-import { reorderTasks, bulkAction } from '../api/tasks'
+import { reorderTasks } from '../api/tasks'
 import * as localMutations from '../db/mutations'
 import { localDb } from '../db/index'
 import { updateProject, reorderProjects } from '../api/projects'
@@ -91,6 +91,85 @@ import { useAppStore } from '../stores/app'
 import { SortableListRegistryProvider } from '../contexts/SortableListRegistry'
 import { useSortableListRegistry } from '../contexts/useSortableListRegistry'
 import { calculatePosition } from '../lib/sort-position'
+
+/** Parsed sidebar drop target for task drops (from a sidebar droppable id). */
+export type SidebarDropTarget =
+  | { kind: 'inbox' }
+  | { kind: 'today' }
+  | { kind: 'someday' }
+  | { kind: 'anytime' }
+  | { kind: 'completed' }
+  | { kind: 'trash' }
+  | { kind: 'project'; id: string }
+  | { kind: 'area'; id: string }
+  | { kind: 'tag'; id: string }
+
+/** Parse a sidebar droppable id into a drop target descriptor. Returns null for non-sidebar ids. */
+function parseSidebarDropTarget(overId: string): SidebarDropTarget | null {
+  if (overId === 'sidebar-inbox') return { kind: 'inbox' }
+  if (overId === 'sidebar-today') return { kind: 'today' }
+  if (overId === 'sidebar-someday') return { kind: 'someday' }
+  if (overId === 'sidebar-anytime') return { kind: 'anytime' }
+  if (overId === 'sidebar-completed') return { kind: 'completed' }
+  if (overId === 'sidebar-trash') return { kind: 'trash' }
+  if (overId.startsWith('sidebar-project-')) return { kind: 'project', id: overId.replace('sidebar-project-', '') }
+  if (overId.startsWith('sidebar-area-')) return { kind: 'area', id: overId.replace('sidebar-area-', '') }
+  if (overId.startsWith('sidebar-tag-')) return { kind: 'tag', id: overId.replace('sidebar-tag-', '') }
+  return null
+}
+
+/**
+ * Apply a sidebar drop to multiple tasks through local mutations only —
+ * each change is queued in the sync queue (one write path, no direct REST).
+ * Mirrors the single-task drop semantics: list drops restore trashed tasks
+ * and reopen non-open ones first; a Completed drop restores trashed tasks;
+ * Tag drops and Trash drops leave status/deleted_at untouched beyond the drop itself.
+ */
+export async function applySidebarDrop(target: SidebarDropTarget, taskIds: string[]): Promise<void> {
+  const today = new Date().toISOString().split('T')[0]
+
+  for (const taskId of taskIds) {
+    if (target.kind === 'trash') {
+      await localMutations.deleteTask(taskId)
+      continue
+    }
+    if (target.kind === 'completed') {
+      const task = await localDb.tasks.get(taskId)
+      if (!task) continue
+      if (task.deleted_at) await localMutations.restoreTask(taskId)
+      await localMutations.completeTask(taskId)
+      continue
+    }
+    if (target.kind === 'tag') {
+      const task = await localDb.tasks.get(taskId)
+      if (!task) continue
+      const existingTagIds = task.tags?.map((t) => t.id) ?? []
+      if (!existingTagIds.includes(target.id)) {
+        await localMutations.updateTask(taskId, { tag_ids: [...existingTagIds, target.id] })
+      }
+      continue
+    }
+    // List targets: restore trashed tasks and reopen non-open ones first
+    const task = await localDb.tasks.get(taskId)
+    if (!task) continue
+    if (task.deleted_at) await localMutations.restoreTask(taskId)
+    if (task.status !== 'open') await localMutations.reopenTask(taskId)
+    if (target.kind === 'inbox') {
+      await localMutations.updateTask(taskId, { project_id: null, area_id: null, heading_id: null, when_date: null })
+    } else if (target.kind === 'today') {
+      await localMutations.updateTask(taskId, { when_date: today })
+    } else if (target.kind === 'someday') {
+      await localMutations.updateTask(taskId, { when_date: 'someday' })
+    } else if (target.kind === 'anytime') {
+      await localMutations.updateTask(taskId, { when_date: null })
+    } else if (target.kind === 'project') {
+      const project = await localDb.projects.get(target.id)
+      await localMutations.updateTask(taskId, { project_id: target.id, area_id: project?.area_id ?? null })
+    } else if (target.kind === 'area') {
+      await localMutations.updateTask(taskId, { project_id: null, area_id: target.id })
+    }
+  }
+}
 
 // Prefer sidebar droppables when the pointer is over them, fall back to closestCenter for sortable reorder.
 // When multiple sidebar targets match (e.g. project inside area), prefer the most specific one.
@@ -221,60 +300,17 @@ function AppDndContextInner({ children }: AppDndContextProps) {
       const activeId = String(active.id)
       const overId = String(over.id)
 
-      // Multi-task drag to sidebar targets — use bulk API
+      // Multi-task drag to sidebar targets — single write path: local mutations (sync queue) only
       if (draggedTaskIds.size > 1 && !activeId.startsWith('sort-')) {
         const ids = Array.from(draggedTaskIds)
-        const today = new Date().toISOString().split('T')[0]
-        let handled = false
-
-        if (overId === 'sidebar-today') {
-          Promise.all(ids.map((id) => localMutations.updateTask(id, { when_date: today }))).catch(() => {})
-          bulkAction({ task_ids: ids, action: 'set_when', params: { when_date: today } })
+        const target = parseSidebarDropTarget(overId)
+        if (target) {
+          applySidebarDrop(target, ids)
             .then(() => forceInvalidate())
-          handled = true
-        } else if (overId === 'sidebar-someday') {
-          Promise.all(ids.map((id) => localMutations.updateTask(id, { when_date: 'someday' }))).catch(() => {})
-          bulkAction({ task_ids: ids, action: 'set_when', params: { when_date: 'someday' } })
-            .then(() => forceInvalidate())
-          handled = true
-        } else if (overId === 'sidebar-anytime') {
-          Promise.all(ids.map((id) => localMutations.updateTask(id, { when_date: null }))).catch(() => {})
-          bulkAction({ task_ids: ids, action: 'set_when', params: { when_date: '' } })
-            .then(() => forceInvalidate())
-          handled = true
-        } else if (overId.startsWith('sidebar-project-')) {
-          const projectId = overId.replace('sidebar-project-', '')
-          const project = projects.find((p) => p.id === projectId)
-          Promise.all(ids.map((id) => localMutations.updateTask(id, { project_id: projectId, area_id: project?.area_id ?? null }))).catch(() => {})
-          bulkAction({ task_ids: ids, action: 'move_project', params: { project_id: projectId } })
-            .then(() => forceInvalidate())
-          handled = true
-        } else if (overId.startsWith('sidebar-tag-')) {
-          const tagId = overId.replace('sidebar-tag-', '')
-          // Add tag to each task locally (read existing tags first)
-          Promise.all(ids.map(async (id) => {
-            const task = await localDb.tasks.get(id)
-            const existingTagIds = task?.tags?.map((t) => t.id) ?? []
-            if (!existingTagIds.includes(tagId)) {
-              await localMutations.updateTask(id, { tag_ids: [...existingTagIds, tagId] })
-            }
-          })).catch(() => {})
-          bulkAction({ task_ids: ids, action: 'add_tags', params: { tag_ids: [tagId] } })
-            .then(() => forceInvalidate())
-          handled = true
-        } else if (overId === 'sidebar-trash') {
-          Promise.all(ids.map((id) => localMutations.deleteTask(id))).catch(() => {})
-          bulkAction({ task_ids: ids, action: 'delete' })
-            .then(() => forceInvalidate())
-          handled = true
-        } else if (overId === 'sidebar-completed') {
-          Promise.all(ids.map((id) => localMutations.completeTask(id))).catch(() => {})
-          bulkAction({ task_ids: ids, action: 'complete' })
-            .then(() => forceInvalidate())
-          handled = true
-        }
-
-        if (handled) {
+            .catch((err) => {
+              console.error('Sidebar multi-drop failed:', err)
+              forceInvalidate()
+            })
           setDraggedTaskIds(new Set())
           return
         }
