@@ -1,9 +1,16 @@
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+// A known name matches only when the text after $ starts with the name
+// and the name ends at a non-letter/number boundary.
+const matchesAtBoundary = (text: string, name: string) =>
+  new RegExp(`^${escapeRegExp(name)}(?![\\p{L}\\p{N}])`, 'iu').test(text)
+
 /**
  * Parse #tag tokens from a task title input string.
- * Supports alphanumeric tags with hyphens: #shopping, #to-do
+ * Supports Unicode letters/numbers with underscores and hyphens: #shopping, #to-do, #покупки
  */
 export function parseTitleAndTags(input: string): { title: string; tagNames: string[] } {
-  const tagPattern = /#([\w-]+)/g
+  const tagPattern = /#([\p{L}\p{N}_-]+)/gu
   const tagNames: string[] = []
   let match: RegExpExecArray | null
 
@@ -29,7 +36,7 @@ export function parseTitleTokens(input: string, knownNames: string[]): {
   tagNames: string[]
   projectRef: string | null
 } {
-  const tagPattern = /#([\w-]+)/g
+  const tagPattern = /#([\p{L}\p{N}_-]+)/gu
   const tagNames: string[] = []
   let match: RegExpExecArray | null
 
@@ -47,7 +54,7 @@ export function parseTitleTokens(input: string, knownNames: string[]): {
     // Sort by length descending so we match the longest name first
     const sorted = [...knownNames].sort((a, b) => b.length - a.length)
     for (const name of sorted) {
-      if (afterDollar.toLowerCase().startsWith(name.toLowerCase())) {
+      if (matchesAtBoundary(afterDollar, name)) {
         projectRef = name
         dollarMatchStart = dollarIdx
         break
@@ -62,7 +69,7 @@ export function parseTitleTokens(input: string, knownNames: string[]): {
     const strippedDollarIdx = title.indexOf('$')
     if (strippedDollarIdx !== -1) {
       const afterDollar = title.slice(strippedDollarIdx + 1)
-      if (projectRef && afterDollar.toLowerCase().startsWith(projectRef.toLowerCase())) {
+      if (projectRef && matchesAtBoundary(afterDollar, projectRef)) {
         title = title.slice(0, strippedDollarIdx) + title.slice(strippedDollarIdx + 1 + projectRef.length)
       }
     }
