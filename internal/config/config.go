@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -37,6 +38,9 @@ type Config struct {
 
 	// Timezone for date/time calculations (IANA name, e.g. "America/Chicago")
 	Location *time.Location
+	// TimeZoneName is the IANA name reported to clients (resolved from the
+	// TZ env var, then /etc/localtime, else "UTC").
+	TimeZoneName string
 }
 
 func Load() Config {
@@ -70,7 +74,8 @@ func Load() Config {
 	}
 
 	// Load timezone — defaults to system TZ (UTC in most Docker containers)
-	if tz := envStr("TZ", ""); tz != "" {
+	tz := envStr("TZ", "")
+	if tz != "" {
 		loc, err := time.LoadLocation(tz)
 		if err != nil {
 			log.Fatalf("invalid TZ %q: %v", tz, err)
@@ -80,7 +85,40 @@ func Load() Config {
 		cfg.Location = time.Local
 	}
 
+	// Resolve the IANA name to report to clients: time.Local reports
+	// "Local", which clients (e.g. Intl.DateTimeFormat) reject. The TZ-unset
+	// path cannot be unit-tested without process-wide env manipulation, so
+	// the resolution logic lives in zoneName and is covered by TestZoneName.
+	cfg.TimeZoneName = zoneName(cfg.Location, func() (string, error) { return os.Readlink("/etc/localtime") })
+
+	// When TZ is unset, make the server use the zone it reports: time.Local
+	// may be a shallow zone, so reload the resolved name for the full zone
+	// database entry. On failure keep time.Local.
+	if tz == "" && cfg.TimeZoneName != "UTC" {
+		if loc, err := time.LoadLocation(cfg.TimeZoneName); err == nil {
+			cfg.Location = loc
+		}
+	}
+
 	return cfg
+}
+
+// zoneName resolves the IANA name of loc. A named location (from TZ, or
+// time.UTC) reports itself; time.Local reports "Local", so in that case the
+// IANA name is taken from the path after the last "zoneinfo/" segment of the
+// /etc/localtime symlink target. On any failure it falls back to "UTC".
+func zoneName(loc *time.Location, localtimeTarget func() (string, error)) string {
+	if name := loc.String(); name != "Local" {
+		return name
+	}
+	target, err := localtimeTarget()
+	if err != nil {
+		return "UTC"
+	}
+	if i := strings.LastIndex(target, "zoneinfo/"); i >= 0 {
+		return target[i+len("zoneinfo/"):]
+	}
+	return "UTC"
 }
 
 // Validate reports configuration errors that make the selected auth mode

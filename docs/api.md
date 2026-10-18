@@ -138,11 +138,11 @@ CORS is **off** in `AUTH_MODE=none`: that mode has no auth, and a wildcard polic
 ### GET /api/auth/config
 **Mode: all** (public, no authentication required)
 
-Returns the current auth mode so the login page can render the appropriate UI.
+Returns the current auth mode so the login page can render the appropriate UI, plus the server's timezone so clients compute "today" in the owner's zone. `timezone` is the IANA name of the server's zone, resolved from the `TZ` env var, else the `/etc/localtime` symlink, else `UTC`.
 
 Response (200):
 ```json
-{ "auth_mode": "builtin|proxy|oidc|none" }
+{ "auth_mode": "builtin|proxy|oidc|none", "timezone": "Europe/Moscow" }
 ```
 
 ### POST /api/auth/login

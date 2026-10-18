@@ -56,12 +56,12 @@ paths:
   /api/auth/config:
     get:
       tags: [auth]
-      summary: Current auth mode
+      summary: Current auth mode and server timezone
       operationId: getAuthConfig
       security: []
       responses:
         '200':
-          description: Auth mode for the login page
+          description: Auth mode and server timezone for the login page
           content:
             application/json:
               schema:
@@ -2030,11 +2030,16 @@ components:
 
     AuthConfig:
       type: object
-      required: [auth_mode]
+      required: [auth_mode, timezone]
       properties:
         auth_mode:
           type: string
           enum: [builtin, proxy, oidc, none]
+        timezone:
+          type: string
+          description: IANA zone the server computes dates in (TZ env var,
+            else /etc/localtime, else UTC)
+          example: Europe/Moscow
 
     LoginRequest:
       type: object

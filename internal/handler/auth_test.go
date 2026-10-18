@@ -160,3 +160,43 @@ func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
 	}
 	return nil
 }
+
+func TestAuthConfigIncludesTimezone(t *testing.T) {
+	authH := handler.NewAuthHandler(
+		repository.NewUserRepository(testutil.SetupTestDB(t)),
+		config.Config{
+			AuthMode:     "builtin",
+			JWTSecret:    "test-secret",
+			TimeZoneName: "Europe/Moscow",
+		},
+	)
+
+	r := chi.NewRouter()
+	r.Get("/api/auth/config", authH.AuthConfig)
+
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/api/auth/config")
+	if err != nil {
+		t.Fatalf("auth config request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var got struct {
+		AuthMode string `json:"auth_mode"`
+		Timezone string `json:"timezone"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got.AuthMode != "builtin" {
+		t.Errorf("auth_mode = %q, want builtin", got.AuthMode)
+	}
+	if got.Timezone != "Europe/Moscow" {
+		t.Errorf("timezone = %q, want Europe/Moscow (cfg.TimeZoneName)", got.Timezone)
+	}
+}

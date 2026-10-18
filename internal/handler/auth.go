@@ -123,5 +123,5 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) AuthConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"auth_mode": h.cfg.AuthMode})
+	writeJSON(w, http.StatusOK, map[string]string{"auth_mode": h.cfg.AuthMode, "timezone": h.cfg.TimeZoneName})
 }
