@@ -1666,7 +1666,7 @@ Response (200):
 | Status | Meaning |
 |--------|---------|
 | `applied` | Change was applied without conflict |
-| `conflict_resolved` | Change conflicted with server state (server was newer), but was still recorded for audit |
+| `conflict_resolved` | Change conflicted with server state (server was newer) but was still applied — client-wins; `conflict_resolved` is informational |
 | `error` | Change could not be applied; check `error` and `code` fields for details. Internal failures report the generic `internal error`; user-facing messages (validation, not found, duplicate name, unsupported entity/action) keep their own text. Boundary validation failures use `"<field>: <message>"` (e.g. `when_date: must be YYYY-MM-DD or 'someday'`, or `when_date: duplicate timeless date`) and do not fail the batch |
 
 **Error codes:** every `error` result also carries a machine-readable `code` (absent on `applied` and `conflict_resolved`):

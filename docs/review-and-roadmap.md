@@ -310,6 +310,8 @@ Follow-ups deferred to Project 4. Sync and server leftovers are already captured
 - Quick entry with a when-date can transiently show duplicate Today rows until sync settles.
 - Failed offline reorders give no feedback (silent drag failure).
 - `useLocalAreaDetail`'s `completed_tasks` returns all completed tasks of the area; the server's area detail returns completed-today only.
+- Review-cutoff mixing: Today's review cutoff compares a UTC `updated_at` slice against the owner-zone date cutoff (hours-bounded parity gap).
+- Silent drag-reorder feedback: offline/failed sidebar and task reorders keep the previous order but give no user-visible error (no toast surface exists yet).
 
 ### Backlog — candidates for Project 4 (NOT SCHEDULED)
 

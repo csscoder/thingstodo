@@ -1890,6 +1890,10 @@ paths:
       tags: [sync]
       summary: Full snapshot of every entity
       operationId: syncFull
+      description: The snapshot includes trashed tasks (non-null deleted_at);
+        the cursor is read before the snapshot tables on purpose, so a
+        concurrent write may reappear in the next pull — harmless, as pull
+        re-applies full snapshots.
       responses:
         '200':
           description: Complete state plus the current cursor

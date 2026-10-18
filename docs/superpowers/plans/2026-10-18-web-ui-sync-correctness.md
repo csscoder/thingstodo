@@ -686,3 +686,7 @@ Use `Intl.DateTimeFormat(..., { timeZone, ... }).formatToParts` for zone math; n
 - [ ] **Step 3: Run** `make build && cd frontend && npm run e2e && npm run e2e:dev` — Expected: pass.
 - [ ] **Step 4: Update** the docs listed above; record the verification results (test counts) in the roadmap entry.
 - [ ] **Step 5: Commit** `docs: close project 3 in the roadmap`
+
+## Appendix — recorded deviations
+
+- An INTERNAL-stuck queue entry does not block later changes of the same entity (auto-retry continues for INTERNAL-stuck; permanent codes do block). Authorized by Task 9's Interfaces; the spec's blanket per-entity FIFO sentence would starve an entity behind a permanently-retrying transient.
