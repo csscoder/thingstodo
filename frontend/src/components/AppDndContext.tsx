@@ -125,6 +125,7 @@ function parseSidebarDropTarget(overId: string): SidebarDropTarget | null {
  * and reopen non-open ones first; a Completed drop restores trashed tasks;
  * Tag drops and Trash drops leave status/deleted_at untouched beyond the drop itself.
  */
+// eslint-disable-next-line react-refresh/only-export-components -- extracted for testability; moves with the drop handler
 export async function applySidebarDrop(target: SidebarDropTarget, taskIds: string[]): Promise<void> {
   const today = new Date().toISOString().split('T')[0]
 
