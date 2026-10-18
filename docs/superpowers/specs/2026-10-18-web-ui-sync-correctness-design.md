@@ -1,7 +1,7 @@
 # Web UI and Sync Correctness Against the Hardened API — Design
 
 Date: 2026-10-18
-Status: draft, owner answered Q1–Q4 on 2026-10-18; awaiting approval of the document
+Status: approved by owner 2026-10-18 (Droid gpt review REVIEW_APPROVED round 4; Droid glm APPROVE_WITH_FIXES, fixes applied)
 
 ## Intent
 
