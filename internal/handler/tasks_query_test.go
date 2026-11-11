@@ -134,7 +134,8 @@ func TestTaskQuery_Filters(t *testing.T) {
 	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixCanc01", Title: "Canceled task"})
 	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixHigh01", Title: "High task", HighPriority: true, TagIDs: []string{"tagWork01", "tagUrgent01"}})
 	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixWhen01", Title: "Someday task", WhenDate: strPtr("someday"), TagIDs: []string{"tagWork01"}})
-	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixDead01", Title: "Deadline task", Deadline: strPtr("2026-10-20"), ProjectID: strPtr("projFix01"), HeadingID: strPtr("headFix01")})
+	// Future deadline: never overdue (stays out of list=today), always after deadline_after=2026-10-16.
+	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixDead01", Title: "Deadline task", Deadline: strPtr(now.AddDate(0, 0, 30).Format("2006-01-02")), ProjectID: strPtr("projFix01"), HeadingID: strPtr("headFix01")})
 	// Static past deadline: always overdue, always inside deadline_before=2026-10-16.
 	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixOver01", Title: "Overdue task", Deadline: strPtr("2026-10-15")})
 	mustCreateTask(t, repo, model.CreateTaskInput{ID: "fixToday01", Title: "Today task", WhenDate: strPtr(today)})
