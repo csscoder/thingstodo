@@ -2,6 +2,8 @@
 
 A self-hosted, Things 3 / Todoist inspired task manager.
 
+Fork of [collinjanssen/thingstodo](https://github.com/collinjanssen/thingstodo) by Collin Janssen, with changes by Aleksandr Zidyganov.
+
 ![ThingsToDo screenshot](docs/screenshots/screenshot-light.png)
 
 ## Features
@@ -202,4 +204,4 @@ npm run e2e:dev                   # against the Vite dev server
 
 ## License
 
-AGPL-3.0
+AGPL-3.0. Original work Copyright (C) 2025 Collin Janssen; modifications Copyright (C) 2026 Aleksandr Zidyganov. See [LICENSE](LICENSE).
