@@ -1,0 +1,14 @@
+ThingsToDo
+
+Original work: https://github.com/collinjanssen/thingstodo
+Copyright (C) 2025 Collin Janssen
+
+This is a modified version of the original work.
+Modifications Copyright (C) 2026 Aleksandr Zidyganov, starting 2026-10-16.
+
+The modifications are listed in CHANGELOG.md and in the git history of this
+repository, starting after commit 32dbd08 ("Initial commit"), which contains the
+imported original work.
+
+The original work and the modified version are licensed under the GNU Affero
+General Public License, version 3. See LICENSE.
