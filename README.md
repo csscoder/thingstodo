@@ -109,7 +109,7 @@ Log in via any OpenID Connect provider (Google, Keycloak, Authelia, etc.). Only 
 
 ### API Key
 
-Enable external access (e.g. iOS Shortcuts) with a static API key alongside any auth mode.
+Enable external access (e.g. iOS Shortcuts) with a static API key in any auth mode except `none`, where Bearer headers are ignored.
 
 | Variable | Default | Description |
 |---|---|---|

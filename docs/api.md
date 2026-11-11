@@ -95,7 +95,7 @@ Mutation endpoints validate request fields at the API boundary, before any write
 
 ## Authentication
 
-### API Key (builtin mode)
+### API Key (all modes except `none`)
 
 Set the `API_KEY` environment variable to a secret string. Then pass it via the `Authorization` header:
 
